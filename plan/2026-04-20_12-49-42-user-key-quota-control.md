@@ -79,15 +79,28 @@ complexity: complex
 - `functions:apply_patch`，用于后续代码修改。
 
 ## Acceptance Checklist
-- [ ] 管理员可以批量生成用户 key。
-- [ ] 用户 key 可配置初始次数。
-- [ ] 用户 key 的权限一致且不可进入后台管理。
-- [ ] 生成扣点按模型倍率和张数计算。
-- [ ] 额度不足时前端发送按钮不可点。
-- [ ] 额度不足时后端请求也会被拒绝。
-- [ ] 管理员可以查看和调整用户 key 次数。
-- [ ] 现有管理员 key 和普通 key 不回退。
-- [ ] 构建与本地部署检查通过。
+- [x] 管理员可以批量生成用户 key。
+- [x] 用户 key 可配置初始次数。
+- [x] 用户 key 的权限一致且不可进入后台管理。
+- [x] 生成扣点按模型倍率和张数计算。
+- [x] 额度不足时前端发送按钮不可点。
+- [x] 额度不足时后端请求也会被拒绝。
+- [x] 管理员可以查看和调整用户 key 次数。
+- [x] 现有管理员 key 和普通 key 不回退。
+- [x] 构建与本地部署检查通过。
+
+## Delivered
+- 后端新增 `services/user_key_service.py`，用户 key 独立落盘到 `data/user_keys.json`。
+- 鉴权扩展到三类密钥，登录和会话接口会返回 `auth_type` 与 `remaining_quota`。
+- 图片生成接口按 `gpt-image-1 = 1`、`gpt-image-2 = 4` 和 `n` 预扣，失败自动退回。
+- 管理员接口补了用户 key 的列表、批量生成、更新、删除。
+- 账号页新增用户 key 管理区，画图页新增本次消耗提示和额度不足禁用。
+- `npm run build` 与 `docker compose -f docker-compose-local.yml up -d --build` 已通过。
+
+## Verification Notes
+- 进程内测试已验证 `gpt-image-1 n=3` 扣 3，`gpt-image-2 n=2` 扣 8，额度不足返回 `403`，上游失败返回 `502` 且退回。
+- 进程内测试已验证管理员可增删改查用户 key，启用中的用户 key 访问管理接口返回 `403`。
+- `npm run lint` 仍未作为收尾门槛，因为仓库已有 `web/src/components/ui/dia-text-reveal.tsx:155` 与 `web/src/components/ui/dia-text-reveal.tsx:188` 的旧问题。
 
 ## Risks / Blockers
 - 现有 `/api/quota` 语义是“账号池总额度”，引入用户 key 后要改成“按当前 key 返回”，会影响现有前端和接口文档。
