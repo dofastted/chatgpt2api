@@ -12,4 +12,5 @@ A4,接入前端管理与发送前校验,在管理页增加用户 key 管理区�
 started_at=2026-04-20T13:11:32+08:00
 账号页新增用户 key 管理区，支持批量生成、复制、编辑和删除；画图页改成单次请求带 n，并按模型倍率显示本次消耗，额度不足时发送按钮禁用；web 的 npm run build 和 docker compose -f docker-compose-local.yml up -d --build 都已通过。未做浏览器自动化点按。",DONE,,commit=b2887b86b5a4e53cbdafb7fb8da8964dd8d752f6 done_at=2026-04-20T13:20:35+08:00,b2887b86b5a4e53cbdafb7fb8da8964dd8d752f6
 A5,更新文档并做构建验证,同步接口与鉴权文档并完成构建和本地部署检查,计划中的接口 文档 构建和本地部署检查全部通过,执行 cd web && npm run build 与 docker compose -f docker-compose-local.yml up -d --build 并更新相关 llmdoc,functions:exec_command;functions:apply_patch,TODO,TODO,TODO,llmdoc/architecture/backend-api.md;llmdoc/architecture/frontend-routing-and-auth.md;llmdoc/reference/http-endpoints.md;llmdoc/must/auth-and-roles.md;plan/2026-04-20_12-49-42-user-key-quota-control.md,A1|A2|A3|A4,"需要保留当前 lint 旧问题说明
-started_at=2026-04-20T13:20:55+08:00",IN_PROGRESS,,,
+started_at=2026-04-20T13:20:55+08:00
+已同步 llmdoc 的鉴权、后端接口、前端路由与运行配置说明，并把计划验收项改成已完成；再次执行 npm run build 和 docker compose -f docker-compose-local.yml up -d --build 均通过。仓库已有的 dia-text-reveal lint 旧问题继续保留。",DONE,,commit=5c1032155d8ec409201e1591bab9992b11b53c2a done_at=2026-04-20T13:25:36+08:00,5c1032155d8ec409201e1591bab9992b11b53c2a
