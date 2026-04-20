@@ -10,18 +10,19 @@
 
 - 首页 `web/src/app/page.tsx:8` 启动后读取会话并按角色分流。
 - 登录页 `web/src/app/login/page.tsx:28` 登录成功后也按角色分流。
-- 顶部导航 `web/src/components/top-nav.tsx:13` 只在 `admin` 时显示“号池管理”。
-- 账号页 `web/src/app/accounts/page.tsx:277` 会再次检查角色，普通用户会被送回 `/image`。
+- 顶部导航 `web/src/components/top-nav.tsx:25` 只在 `admin` 时显示“号池管理”，但“捐赠上传”对所有已登录用户都可见，逻辑在 `web/src/components/top-nav.tsx:68` 到 `web/src/components/top-nav.tsx:229`。
+- 账号页 `web/src/app/accounts/page.tsx:251` 会再次检查角色，普通用户会被送回 `/image`。
 
 错误处理：
 
 - `401` 会清掉本地密钥并直接跳 `/login`，见 `web/src/lib/request.ts:27` 到 `web/src/lib/request.ts:31`。
-- `403` 不会自动跳转，所以页面内权限不足要自己处理，例如 `web/src/app/accounts/page.tsx:277`。
+- `403` 不会自动跳转，所以页面内权限不足要自己处理，例如 `web/src/app/accounts/page.tsx:257`。
 
 账号页 JSON 导入：
 
 - 递归查找 `access_token` 字段的逻辑在 `web/src/lib/account-import.ts:1`。
-- 账号页管理员启动时会同时拉账户列表和用户 key 列表，入口见 `web/src/app/accounts/page.tsx:277`。
+- 账号页管理员启动时会同时拉账户列表和用户 key 列表，入口见 `web/src/app/accounts/page.tsx:251`。
+- 账号列表支持按账户来源筛选，也能在编辑弹窗里把来源改成“普通”或“捐赠”，见 `web/src/app/accounts/page.tsx:277`、`web/src/app/accounts/page.tsx:504`、`web/src/app/accounts/page.tsx:795`。
 - 用户 key 管理区支持批量生成、复制、编辑和删除，交互入口见 `web/src/app/accounts/page.tsx:598`、`web/src/app/accounts/page.tsx:632`、`web/src/app/accounts/page.tsx:1316`。
 - 用户 key 对应的请求封装在 `web/src/lib/api.ts:119`、`web/src/lib/api.ts:148`、`web/src/lib/api.ts:180`、`web/src/lib/api.ts:193`。
 

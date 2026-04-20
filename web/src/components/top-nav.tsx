@@ -1,12 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { LoaderCircle, Upload } from "lucide-react";
+import { toast } from "sonner";
 
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import webConfig from "@/constants/common-env";
-import { fetchAuthSession, type AuthRole } from "@/lib/api";
+import { cleanJsonText, extractAccessTokensFromJson, normalizeTokenList } from "@/lib/account-import";
+import { createDonationAccounts, fetchAuthSession, type AuthRole } from "@/lib/api";
 import { clearStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
@@ -18,7 +30,10 @@ const navItems: Array<{ href: string; label: string; roles?: AuthRole[] }> = [
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [authRole, setAuthRole] = useState<AuthRole | null>(null);
+  const [donationOpen, setDonationOpen] = useState(false);
+  const [isUploadingDonation, setIsUploadingDonation] = useState(false);
 
   useEffect(() => {
     if (pathname === "/login") {
@@ -50,6 +65,89 @@ export function TopNav() {
     router.replace("/login");
   };
 
+  const handleDonationUpload = async (files: File[]) => {
+    if (files.length === 0) {
+      return;
+    }
+
+    setIsUploadingDonation(true);
+
+    try {
+      const importedTokens: string[] = [];
+      const invalidFiles: string[] = [];
+      const emptyFiles: string[] = [];
+      let matchedFiles = 0;
+
+      for (const file of files) {
+        try {
+          const text = cleanJsonText(await file.text());
+          if (!text) {
+            emptyFiles.push(file.name);
+            continue;
+          }
+
+          const payload = JSON.parse(text);
+          const fileTokens = extractAccessTokensFromJson(payload);
+          if (fileTokens.length === 0) {
+            emptyFiles.push(file.name);
+            continue;
+          }
+
+          matchedFiles += 1;
+          importedTokens.push(...fileTokens);
+        } catch {
+          invalidFiles.push(file.name);
+        }
+      }
+
+      const tokens = normalizeTokenList(importedTokens);
+      if (tokens.length === 0) {
+        const errors: string[] = [];
+        if (invalidFiles.length > 0) {
+          errors.push(`${invalidFiles.length} 个文件不是有效 JSON`);
+        }
+        if (emptyFiles.length > 0) {
+          errors.push(`${emptyFiles.length} 个文件没有 access_token`);
+        }
+        toast.error(errors.length > 0 ? `未提取到可用 Token，${errors.join("，")}` : "未提取到可用 Token");
+        return;
+      }
+
+      const data = await createDonationAccounts(tokens);
+      const errorCount = data.errors?.length ?? 0;
+      setDonationOpen(false);
+
+      const messages = [`已提交 ${matchedFiles} 个文件，共 ${tokens.length} 个 Token`];
+      messages.push("这些账户会按捐赠账户入池");
+      if ((data.skipped ?? 0) > 0) {
+        messages.push(`跳过 ${data.skipped} 个重复项`);
+      }
+      if (errorCount > 0) {
+        messages.push(`刷新失败 ${errorCount} 个`);
+      }
+      if (invalidFiles.length > 0) {
+        messages.push(`${invalidFiles.length} 个文件不是有效 JSON`);
+      }
+      if (emptyFiles.length > 0) {
+        messages.push(`${emptyFiles.length} 个文件没有 access_token`);
+      }
+
+      if (errorCount > 0) {
+        toast.error(messages.join("，"));
+      } else {
+        toast.success(messages.join("，"));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "上传捐赠账户失败";
+      toast.error(message);
+    } finally {
+      setIsUploadingDonation(false);
+      if (uploadInputRef.current) {
+        uploadInputRef.current.value = "";
+      }
+    }
+  };
+
   if (pathname === "/login") {
     return null;
   }
@@ -66,16 +164,70 @@ export function TopNav() {
           >
             chatgpt2api
           </Link>
-          <a
-            href="https://github.com/basketikun/chatgpt2api"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 py-2 text-sm text-stone-400 transition hover:text-stone-700"
-            aria-label="GitHub repository"
-          >
-            <Github className="size-4" />
-            <span>GitHub</span>
-          </a>
+          <Dialog open={donationOpen} onOpenChange={setDonationOpen}>
+            <DialogTrigger asChild>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 py-2 text-sm text-stone-400 transition hover:text-stone-700"
+                aria-label="上传捐赠账户"
+              >
+                <Upload className="size-4" />
+                <span>捐赠上传</span>
+              </button>
+            </DialogTrigger>
+            <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+              <DialogHeader className="gap-2">
+                <DialogTitle>捐赠账户上传</DialogTitle>
+                <DialogDescription className="text-sm leading-6">
+                  上传包含 `access_token` 的 JSON 文件。系统会提取 Token，调用账户新增流程，并自动标记为捐赠账户。
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => void handleDonationUpload(Array.from(event.target.files ?? []))}
+                />
+                <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50/70 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium text-stone-800">上传 JSON</div>
+                      <p className="text-xs leading-5 text-stone-500">
+                        支持多选文件。导入成功后，这些账号会被归到捐赠账户，但仍会计入号池。
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-100"
+                      onClick={() => uploadInputRef.current?.click()}
+                      disabled={isUploadingDonation}
+                    >
+                      {isUploadingDonation ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <Upload className="size-4" />
+                      )}
+                      选择文件
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <DialogFooter className="pt-2">
+                <Button
+                  variant="secondary"
+                  className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+                  onClick={() => setDonationOpen(false)}
+                  disabled={isUploadingDonation}
+                >
+                  关闭
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
         <div className="flex justify-center gap-8">
           {visibleNavItems.map((item) => {

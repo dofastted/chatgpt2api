@@ -15,6 +15,9 @@ from services.config import config
 
 
 class AccountService:
+    DEFAULT_CATEGORY = "普通"
+    DONATION_CATEGORY = "捐赠"
+
     ACCOUNT_TYPE_MAP = {
         "free": "Free",
         "plus": "Plus",
@@ -119,6 +122,8 @@ class AccountService:
             return None
         normalized = dict(item)
         normalized["access_token"] = access_token
+        category = self._clean_token(normalized.get("category")) or self.DEFAULT_CATEGORY
+        normalized["category"] = self.DONATION_CATEGORY if category == self.DONATION_CATEGORY else self.DEFAULT_CATEGORY
         normalized["type"] = self._clean_token(normalized.get("type")) or "Free"
         normalized["status"] = self._clean_token(normalized.get("status")) or "正常"
         normalized["quota"] = int(normalized.get("quota") if normalized.get("quota") is not None else 0)
@@ -201,6 +206,7 @@ class AccountService:
             {
                 "id": hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16],
                 "access_token": access_token,
+                "category": account.get("category") or self.DEFAULT_CATEGORY,
                 "type": account.get("type") or "Free",
                 "status": account.get("status") or "正常",
                 "quota": account.get("quota") if account.get("quota") is not None else 0,
@@ -260,10 +266,11 @@ class AccountService:
                 and (token := self._clean_token(item.get("access_token")))
             ]
 
-    def add_accounts(self, tokens: list[str]) -> dict:
+    def add_accounts(self, tokens: list[str], category: str | None = None) -> dict:
         cleaned_tokens = self._clean_tokens(tokens)
         if not cleaned_tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+        normalized_category = self.DONATION_CATEGORY if self._clean_token(category) == self.DONATION_CATEGORY else self.DEFAULT_CATEGORY
 
         with self._lock:
             indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
@@ -280,6 +287,7 @@ class AccountService:
                     {
                         **current,
                         "access_token": access_token,
+                        "category": normalized_category,
                         "type": str(current.get("type") or "Free"),
                     }
                 )
