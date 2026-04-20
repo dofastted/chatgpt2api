@@ -207,11 +207,16 @@ export default function ImagePage() {
     const handleFocus = () => {
       void syncQuota();
     };
+    const handleQuotaChanged = () => {
+      void syncQuota();
+    };
 
     void syncQuota();
     window.addEventListener("focus", handleFocus);
+    window.addEventListener("chatgpt2api:quota-changed", handleQuotaChanged);
     return () => {
       window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("chatgpt2api:quota-changed", handleQuotaChanged);
     };
   }, [loadQuota]);
 

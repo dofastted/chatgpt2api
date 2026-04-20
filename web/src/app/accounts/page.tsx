@@ -465,7 +465,7 @@ export default function AccountsPage() {
           errors.push(`${invalidFiles.length} 个文件不是有效 JSON`);
         }
         if (emptyFiles.length > 0) {
-          errors.push(`${emptyFiles.length} 个文件没有 access_token`);
+          errors.push(`${emptyFiles.length} 个文件没有可识别的 token 字段`);
         }
         toast.error(errors.length > 0 ? `未提取到可用 Token，${errors.join("，")}` : "未提取到可用 Token");
         return;
@@ -489,7 +489,7 @@ export default function AccountsPage() {
         messages.push(`${invalidFiles.length} 个文件不是有效 JSON`);
       }
       if (emptyFiles.length > 0) {
-        messages.push(`${emptyFiles.length} 个文件没有 access_token`);
+        messages.push(`${emptyFiles.length} 个文件没有可识别的 token 字段`);
       }
 
       if ((data.errors?.length ?? 0) > 0) {
@@ -699,7 +699,7 @@ export default function AccountsPage() {
               <DialogHeader className="gap-2">
                 <DialogTitle>新增账户</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
-                  支持批量上传 JSON 文件直接导入，也支持手动粘贴 Access Token。
+                  支持批量上传标准 JSON 或 CPA 格式 JSON，也支持手动粘贴 Access Token。
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
@@ -716,7 +716,7 @@ export default function AccountsPage() {
                     <div className="space-y-1">
                       <div className="text-sm font-medium text-stone-800">批量上传 JSON</div>
                       <p className="text-xs leading-5 text-stone-500">
-                        可多选文件，系统会清洗内容并提取其中的 access_token，然后直接调用新增接口。
+                        可多选文件。系统会自动识别 `access_token`、`accessToken`、`token` 等字段，然后直接调用新增接口。
                       </p>
                     </div>
                     <Button

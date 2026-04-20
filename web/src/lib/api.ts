@@ -54,6 +54,9 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  rewarded_accounts?: number;
+  rewarded_quota?: number;
+  remaining_quota?: number | null;
   errors?: Array<{ access_token: string; error: string }>;
 };
 

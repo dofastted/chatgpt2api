@@ -25,6 +25,7 @@ IMAGE_COST_MULTIPLIER = {
     "gpt-image-1": 1,
     "gpt-image-2": 4,
 }
+DONATION_REWARD_QUOTA = 50
 
 
 class ImageGenerationRequest(BaseModel):
@@ -285,17 +286,36 @@ def create_app() -> FastAPI:
             body: AccountCreateRequest,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        context = require_auth_key(authorization)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         result = account_service.add_accounts(tokens, category=account_service.DONATION_CATEGORY)
         refresh_result = account_service.refresh_accounts(tokens)
+        added_tokens = {
+            str(token or "").strip()
+            for token in result.get("added_tokens", [])
+            if str(token or "").strip()
+        }
+        failed_tokens = {
+            str(item.get("access_token") or "").strip()
+            for item in refresh_result.get("errors", [])
+            if str(item.get("access_token") or "").strip()
+        }
+        rewarded_accounts = len(added_tokens - failed_tokens)
+        rewarded_quota = rewarded_accounts * DONATION_REWARD_QUOTA
+        remaining_quota = None
+        if context.auth_type == "user_key" and rewarded_quota > 0:
+            rewarded_user_key = user_key_service.grant_quota(extract_bearer_token(authorization), rewarded_quota)
+            remaining_quota = max(0, int(rewarded_user_key.get("quota") or 0)) if rewarded_user_key else None
         return {
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
             "items": refresh_result.get("items", result.get("items", [])),
+            "rewarded_accounts": rewarded_accounts,
+            "rewarded_quota": rewarded_quota,
+            "remaining_quota": remaining_quota,
         }
 
     @router.post("/api/user-keys")

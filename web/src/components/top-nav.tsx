@@ -107,7 +107,7 @@ export function TopNav() {
           errors.push(`${invalidFiles.length} 个文件不是有效 JSON`);
         }
         if (emptyFiles.length > 0) {
-          errors.push(`${emptyFiles.length} 个文件没有 access_token`);
+          errors.push(`${emptyFiles.length} 个文件没有可识别的 token 字段`);
         }
         toast.error(errors.length > 0 ? `未提取到可用 Token，${errors.join("，")}` : "未提取到可用 Token");
         return;
@@ -115,12 +115,17 @@ export function TopNav() {
 
       const data = await createDonationAccounts(tokens);
       const errorCount = data.errors?.length ?? 0;
+      const rewardedQuota = Math.max(0, Number(data.rewarded_quota || 0));
+      const rewardedAccounts = Math.max(0, Number(data.rewarded_accounts || 0));
       setDonationOpen(false);
 
       const messages = [`已提交 ${matchedFiles} 个文件，共 ${tokens.length} 个 Token`];
       messages.push("这些账户会按捐赠账户入池");
       if ((data.skipped ?? 0) > 0) {
         messages.push(`跳过 ${data.skipped} 个重复项`);
+      }
+      if (rewardedQuota > 0) {
+        messages.push(`捐赠成功 ${rewardedAccounts} 个，用户 key 已到账 ${rewardedQuota} 点`);
       }
       if (errorCount > 0) {
         messages.push(`刷新失败 ${errorCount} 个`);
@@ -129,13 +134,16 @@ export function TopNav() {
         messages.push(`${invalidFiles.length} 个文件不是有效 JSON`);
       }
       if (emptyFiles.length > 0) {
-        messages.push(`${emptyFiles.length} 个文件没有 access_token`);
+        messages.push(`${emptyFiles.length} 个文件没有可识别的 token 字段`);
       }
 
       if (errorCount > 0) {
         toast.error(messages.join("，"));
       } else {
         toast.success(messages.join("，"));
+      }
+      if (rewardedQuota > 0) {
+        window.dispatchEvent(new Event("chatgpt2api:quota-changed"));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "上传捐赠账户失败";
@@ -179,7 +187,7 @@ export function TopNav() {
               <DialogHeader className="gap-2">
                 <DialogTitle>捐赠账户上传</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
-                  上传包含 `access_token` 的 JSON 文件。系统会提取 Token，调用账户新增流程，并自动标记为捐赠账户。
+                  支持标准账号 JSON 和 CPA 格式 JSON。系统会自动识别 `access_token`、`accessToken`、`token` 等字段，并把导入账号标记为捐赠账户。
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
@@ -196,7 +204,7 @@ export function TopNav() {
                     <div className="space-y-1">
                       <div className="text-sm font-medium text-stone-800">上传 JSON</div>
                       <p className="text-xs leading-5 text-stone-500">
-                        支持多选文件。导入成功后，这些账号会被归到捐赠账户，但仍会计入号池。
+                        支持多选文件，也支持 CPA 格式 JSON。导入成功后，这些账号会被归到捐赠账户，但仍会计入号池。
                       </p>
                     </div>
                     <Button

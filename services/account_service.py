@@ -269,17 +269,19 @@ class AccountService:
     def add_accounts(self, tokens: list[str], category: str | None = None) -> dict:
         cleaned_tokens = self._clean_tokens(tokens)
         if not cleaned_tokens:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0, "added_tokens": [], "items": self.list_accounts()}
         normalized_category = self.DONATION_CATEGORY if self._clean_token(category) == self.DONATION_CATEGORY else self.DEFAULT_CATEGORY
 
         with self._lock:
             indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
             added = 0
             skipped = 0
+            added_tokens: list[str] = []
             for access_token in cleaned_tokens:
                 current = indexed.get(access_token)
                 if current is None:
                     added += 1
+                    added_tokens.append(access_token)
                     current = {}
                 else:
                     skipped += 1
@@ -296,7 +298,7 @@ class AccountService:
             self._accounts = list(indexed.values())
             self._save_accounts()
             items = self._public_items(self._accounts)
-        return {"added": added, "skipped": skipped, "items": items}
+        return {"added": added, "skipped": skipped, "added_tokens": added_tokens, "items": items}
 
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(self._clean_tokens(tokens))
