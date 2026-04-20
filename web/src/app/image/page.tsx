@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, ArrowUp, LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUp, Download, LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -53,11 +53,24 @@ function formatConversationTime(value: string) {
   }).format(date);
 }
 
+function downloadBase64Image(base64: string, fileName: string) {
+  const binary = window.atob(base64);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const blob = new Blob([bytes], { type: "image/png" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 type PreviewableImage = {
   id: string;
   originalIndex: number;
   src: string;
   alt: string;
+  b64Json: string;
 };
 
 async function normalizeConversationHistory(items: ImageConversation[]) {
@@ -120,6 +133,7 @@ export default function ImagePage() {
                 originalIndex: index,
                 src: `data:image/png;base64,${image.b64_json}`,
                 alt: `Generated result ${index + 1}`,
+                b64Json: image.b64_json,
               },
             ]
           : [],
@@ -394,6 +408,13 @@ export default function ImagePage() {
     setPreviewImageId(previewableImages[nextIndex]?.id ?? null);
   };
 
+  const handleDownloadPreviewImage = () => {
+    if (!previewImage) {
+      return;
+    }
+    downloadBase64Image(previewImage.b64Json, `image-${Date.now()}-${previewImageIndex + 1}.png`);
+  };
+
   return (
     <>
       <section className="mx-auto grid h-[calc(100vh-5rem)] min-h-0 w-full max-w-[1380px] grid-cols-1 gap-3 px-3 pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
@@ -653,6 +674,16 @@ export default function ImagePage() {
                 </div>
 
                 <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleDownloadPreviewImage}
+                    className="border-white/15 bg-white/8 text-stone-100 hover:bg-white/14"
+                  >
+                    <Download className="size-4" />
+                    下载
+                  </Button>
                   <Button
                     type="button"
                     variant="outline"
