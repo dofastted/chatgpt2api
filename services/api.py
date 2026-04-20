@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
 
@@ -14,6 +15,7 @@ from services.account_service import account_service
 from services.config import config
 from services.backend_service import BackendService
 from services.image_service import ImageGenerationError
+from services.user_key_service import user_key_service
 from services.version import get_app_version
 
 
@@ -48,15 +50,53 @@ class AccountUpdateRequest(BaseModel):
     quota: int | None = None
 
 
-def resolve_auth_role(authorization: str | None) -> str | None:
+@dataclass(frozen=True)
+class AuthContext:
+    role: str
+    auth_type: str
+    remaining_quota: int | None = None
+    user_key_id: str | None = None
+    user_key_label: str | None = None
+
+
+def resolve_auth_context(authorization: str | None) -> AuthContext | None:
     auth_key = extract_bearer_token(authorization)
     if not auth_key:
         return None
     if auth_key == str(config.admin_auth_key or "").strip():
-        return "admin"
+        return AuthContext(role="admin", auth_type="admin_auth_key")
     if auth_key == str(config.auth_key or "").strip():
-        return "user"
-    return None
+        return AuthContext(role="user", auth_type="auth_key")
+
+    user_key = user_key_service.get_user_key(auth_key)
+    if user_key is None or user_key.get("status") != user_key_service.ENABLED_STATUS:
+        return None
+    return AuthContext(
+        role="user",
+        auth_type="user_key",
+        remaining_quota=max(0, int(user_key.get("quota") or 0)),
+        user_key_id=str(user_key.get("id") or "") or None,
+        user_key_label=str(user_key.get("label") or "") or None,
+    )
+
+
+def resolve_auth_role(authorization: str | None) -> str | None:
+    context = resolve_auth_context(authorization)
+    if context is None:
+        return None
+    return context.role
+
+
+def build_auth_session_payload(app_version: str, context: AuthContext) -> dict[str, object]:
+    return {
+        "ok": True,
+        "version": app_version,
+        "role": context.role,
+        "auth_type": context.auth_type,
+        "remaining_quota": context.remaining_quota,
+        "user_key_id": context.user_key_id,
+        "user_key_label": context.user_key_label,
+    }
 
 
 def build_model_item(model_id: str) -> dict[str, object]:
@@ -75,15 +115,18 @@ def extract_bearer_token(authorization: str | None) -> str:
     return value.strip()
 
 
-def require_auth_key(authorization: str | None) -> None:
-    if resolve_auth_role(authorization) is None:
+def require_auth_key(authorization: str | None) -> AuthContext:
+    context = resolve_auth_context(authorization)
+    if context is None:
         raise HTTPException(status_code=401, detail={"error": "authorization is invalid"})
+    return context
 
 
-def require_admin_auth_key(authorization: str | None) -> None:
-    require_auth_key(authorization)
-    if resolve_auth_role(authorization) != "admin":
+def require_admin_auth_key(authorization: str | None) -> AuthContext:
+    context = require_auth_key(authorization)
+    if context.role != "admin":
         raise HTTPException(status_code=403, detail={"error": "admin authorization is required"})
+    return context
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
@@ -165,13 +208,13 @@ def create_app() -> FastAPI:
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
-        return {"ok": True, "version": app_version, "role": resolve_auth_role(authorization)}
+        context = require_auth_key(authorization)
+        return build_auth_session_payload(app_version, context)
 
     @router.get("/auth/session")
     async def get_auth_session(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
-        return {"ok": True, "version": app_version, "role": resolve_auth_role(authorization)}
+        context = require_auth_key(authorization)
+        return build_auth_session_payload(app_version, context)
 
     @router.get("/version")
     async def get_version():
@@ -213,14 +256,20 @@ def create_app() -> FastAPI:
 
     @router.get("/api/quota")
     async def get_quota_summary(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        context = require_auth_key(authorization)
+        if context.auth_type == "user_key":
+            return {
+                "available_quota": max(0, int(context.remaining_quota or 0)),
+                "auth_type": context.auth_type,
+                "remaining_quota": max(0, int(context.remaining_quota or 0)),
+            }
         accounts = account_service.list_accounts()
         available_quota = sum(
             max(0, int(account.get("quota") or 0))
             for account in accounts
             if account.get("status") != "禁用"
         )
-        return {"available_quota": available_quota}
+        return {"available_quota": available_quota, "auth_type": context.auth_type, "remaining_quota": None}
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(

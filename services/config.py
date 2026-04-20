@@ -18,6 +18,7 @@ class AppSettings:
     host: str
     port: int
     accounts_file: Path
+    user_keys_file: Path
     tls_verify: bool
 
 
@@ -70,6 +71,9 @@ def _load_settings() -> AppSettings:
         host="0.0.0.0",
         port=8000,
         accounts_file=DATA_DIR / "accounts.json",
+        user_keys_file=Path(
+            str(os.getenv("CHATGPT2API_USER_KEYS_FILE") or raw_config.get("user-keys-file") or DATA_DIR / "user_keys.json")
+        ),
         tls_verify=tls_verify,
     )
 

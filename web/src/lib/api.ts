@@ -4,6 +4,7 @@ export type AccountType = "Free" | "Plus" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-1" | "gpt-image-2";
 export type AuthRole = "user" | "admin";
+export type AuthType = "auth_key" | "admin_auth_key" | "user_key";
 
 export type Account = {
   id: string;
@@ -53,6 +54,16 @@ type AuthSessionResponse = {
   ok: boolean;
   version: string;
   role: AuthRole;
+  auth_type?: AuthType;
+  remaining_quota?: number | null;
+  user_key_id?: string | null;
+  user_key_label?: string | null;
+};
+
+type QuotaSummaryResponse = {
+  available_quota: number;
+  auth_type?: AuthType;
+  remaining_quota?: number | null;
 };
 
 export async function login(authKey: string) {
@@ -76,7 +87,7 @@ export async function fetchAccounts() {
 }
 
 export async function fetchQuotaSummary() {
-  return httpRequest<{ available_quota: number }>("/api/quota");
+  return httpRequest<QuotaSummaryResponse>("/api/quota");
 }
 
 export async function createAccounts(tokens: string[]) {
