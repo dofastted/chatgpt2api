@@ -12,6 +12,7 @@ import {
   CircleOff,
   Copy,
   Download,
+  KeyRound,
   LoaderCircle,
   Pencil,
   Plus,
@@ -45,16 +46,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { cleanJsonText, extractAccessTokensFromJson, normalizeTokenList } from "@/lib/account-import";
 import {
   createAccounts,
+  createUserKeys,
   deleteAccounts,
+  deleteUserKeys,
   fetchAuthSession,
   fetchAccounts,
+  fetchUserKeys,
   refreshAccounts,
   updateAccount,
+  updateUserKey,
   type Account,
+  type AccountCategory,
   type AccountStatus,
   type AccountType,
+  type UserKey,
+  type UserKeyStatus,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -72,6 +81,12 @@ const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = 
   { label: "限流", value: "限流" },
   { label: "异常", value: "异常" },
   { label: "禁用", value: "禁用" },
+];
+
+const accountCategoryOptions: { label: string; value: AccountCategory | "all" }[] = [
+  { label: "全部来源", value: "all" },
+  { label: "普通", value: "普通" },
+  { label: "捐赠", value: "捐赠" },
 ];
 
 const statusMeta: Record<
@@ -135,6 +150,24 @@ function formatQuotaSummary(accounts: Account[]) {
   return formatCompact(accounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
+function formatUserKeyQuotaSummary(userKeys: UserKey[]) {
+  return formatCompact(userKeys.reduce((sum, item) => sum + Math.max(0, item.quota), 0));
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const pad = (num: number) => String(num).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}:${pad(date.getSeconds())}`;
+}
+
 function maskToken(token?: string) {
   if (!token) return "—";
   if (token.length <= 18) return token;
@@ -155,6 +188,7 @@ function downloadTokens(accounts: Account[]) {
 function normalizeAccounts(items: Account[]): Account[] {
   return items.map((item) => ({
     ...item,
+    category: item.category === "捐赠" ? "捐赠" : "普通",
     type:
       item.type === "Plus" || item.type === "Team" || item.type === "Pro" || item.type === "Free"
         ? item.type
@@ -162,60 +196,16 @@ function normalizeAccounts(items: Account[]): Account[] {
   }));
 }
 
-function normalizeTokenList(tokens: string[]) {
-  return Array.from(
-    new Set(
-      tokens
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
-function isAccessTokenKey(key: string) {
-  return key.replace(/[\s-]+/g, "_").toLowerCase() === "access_token";
-}
-
-function collectAccessTokens(value: unknown, collected: string[]) {
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectAccessTokens(item, collected));
-    return;
-  }
-
-  if (!value || typeof value !== "object") {
-    return;
-  }
-
-  Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
-    if (isAccessTokenKey(key)) {
-      const token = String(item || "").trim();
-      if (token) {
-        collected.push(token);
-      }
-      return;
-    }
-
-    collectAccessTokens(item, collected);
-  });
-}
-
-function extractAccessTokensFromJson(value: unknown) {
-  const collected: string[] = [];
-  collectAccessTokens(value, collected);
-  return normalizeTokenList(collected);
-}
-
-function cleanJsonText(text: string) {
-  return text.replace(/^\uFEFF/, "").trim();
-}
-
 export default function AccountsPage() {
   const router = useRouter();
   const didLoadRef = useRef(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [userKeys, setUserKeys] = useState<UserKey[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
+  const [userKeyQuery, setUserKeyQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<AccountCategory | "all">("all");
   const [typeFilter, setTypeFilter] = useState<AccountType | "all">("all");
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
   const [page, setPage] = useState(1);
@@ -223,15 +213,28 @@ export default function AccountsPage() {
   const [open, setOpen] = useState(false);
   const [newTokens, setNewTokens] = useState("");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [editingUserKey, setEditingUserKey] = useState<UserKey | null>(null);
+  const [editCategory, setEditCategory] = useState<AccountCategory>("普通");
   const [editType, setEditType] = useState<AccountType>("Free");
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [editQuota, setEditQuota] = useState("0");
+  const [newUserKeyPrefix, setNewUserKeyPrefix] = useState("uk");
+  const [newUserKeyLabelPrefix, setNewUserKeyLabelPrefix] = useState("");
+  const [newUserKeyCount, setNewUserKeyCount] = useState("5");
+  const [newUserKeyQuota, setNewUserKeyQuota] = useState("20");
+  const [editUserKeyLabel, setEditUserKeyLabel] = useState("");
+  const [editUserKeyQuota, setEditUserKeyQuota] = useState("0");
+  const [editUserKeyStatus, setEditUserKeyStatus] = useState<UserKeyStatus>("启用");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [isUploadingJson, setIsUploadingJson] = useState(false);
+  const [isLoadingUserKeys, setIsLoadingUserKeys] = useState(true);
+  const [isSubmittingUserKeys, setIsSubmittingUserKeys] = useState(false);
+  const [isDeletingUserKeys, setIsDeletingUserKeys] = useState(false);
+  const [isUpdatingUserKey, setIsUpdatingUserKey] = useState(false);
   const [isAuthorizing, setIsAuthorizing] = useState(true);
 
   const loadAccounts = async (silent = false) => {
@@ -271,7 +274,7 @@ export default function AccountsPage() {
           return;
         }
         setIsAuthorizing(false);
-        await loadAccounts();
+        await Promise.all([loadAccounts(), loadUserKeys()]);
       } catch {
         if (!cancelled) {
           router.replace("/login");
@@ -290,11 +293,12 @@ export default function AccountsPage() {
     return accounts.filter((account) => {
       const searchMatched =
         normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
+      const categoryMatched = categoryFilter === "all" || account.category === categoryFilter;
       const typeMatched = typeFilter === "all" || account.type === typeFilter;
       const statusMatched = statusFilter === "all" || account.status === statusFilter;
-      return searchMatched && typeMatched && statusMatched;
+      return searchMatched && categoryMatched && typeMatched && statusMatched;
     });
-  }, [accounts, query, statusFilter, typeFilter]);
+  }, [accounts, categoryFilter, query, statusFilter, typeFilter]);
 
   const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
   const safePage = Math.min(page, pageCount);
@@ -322,6 +326,29 @@ export default function AccountsPage() {
   const abnormalTokens = useMemo(() => {
     return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
   }, [accounts]);
+
+  const filteredUserKeys = useMemo(() => {
+    const normalizedQuery = userKeyQuery.trim().toLowerCase();
+    return userKeys.filter((item) => {
+      if (normalizedQuery.length === 0) {
+        return true;
+      }
+      return (
+        item.key.toLowerCase().includes(normalizedQuery) ||
+        String(item.label || "")
+          .toLowerCase()
+          .includes(normalizedQuery)
+      );
+    });
+  }, [userKeyQuery, userKeys]);
+
+  const userKeySummary = useMemo(() => {
+    const total = userKeys.length;
+    const enabled = userKeys.filter((item) => item.status === "启用").length;
+    const disabled = userKeys.filter((item) => item.status === "停用").length;
+    const quota = formatUserKeyQuotaSummary(userKeys);
+    return { total, enabled, disabled, quota };
+  }, [userKeys]);
 
   const paginationItems = useMemo(() => {
     const items: (number | "...")[] = [];
@@ -376,6 +403,23 @@ export default function AccountsPage() {
       toast.error(message);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const loadUserKeys = async (silent = false) => {
+    if (!silent) {
+      setIsLoadingUserKeys(true);
+    }
+    try {
+      const data = await fetchUserKeys();
+      setUserKeys(data.items);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "加载用户 key 失败";
+      toast.error(message);
+    } finally {
+      if (!silent) {
+        setIsLoadingUserKeys(false);
+      }
     }
   };
 
@@ -513,6 +557,7 @@ export default function AccountsPage() {
 
   const openEditDialog = (account: Account) => {
     setEditingAccount(account);
+    setEditCategory(account.category);
     setEditType(account.type);
     setEditStatus(account.status);
     setEditQuota(String(account.quota));
@@ -526,6 +571,7 @@ export default function AccountsPage() {
     setIsUpdating(true);
     try {
       const data = await updateAccount(editingAccount.access_token, {
+        category: editCategory,
         type: editType,
         status: editStatus,
         quota: Number(editQuota || 0),
@@ -539,6 +585,69 @@ export default function AccountsPage() {
       toast.error(message);
     } finally {
       setIsUpdating(false);
+    }
+  };
+
+  const openUserKeyDialog = (userKey: UserKey) => {
+    setEditingUserKey(userKey);
+    setEditUserKeyLabel(String(userKey.label || ""));
+    setEditUserKeyQuota(String(userKey.quota));
+    setEditUserKeyStatus(userKey.status);
+  };
+
+  const handleCreateUserKeys = async () => {
+    setIsSubmittingUserKeys(true);
+    try {
+      const data = await createUserKeys({
+        count: Math.max(1, Number(newUserKeyCount || 1)),
+        quota: Math.max(0, Number(newUserKeyQuota || 0)),
+        prefix: newUserKeyPrefix.trim() || undefined,
+        label_prefix: newUserKeyLabelPrefix.trim() || undefined,
+      });
+      setUserKeys(data.items);
+      toast.success(`已生成 ${data.created_items?.length ?? data.added ?? 0} 个用户 key`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生成用户 key 失败";
+      toast.error(message);
+    } finally {
+      setIsSubmittingUserKeys(false);
+    }
+  };
+
+  const handleDeleteUserKey = async (key: string) => {
+    setIsDeletingUserKeys(true);
+    try {
+      const data = await deleteUserKeys([key]);
+      setUserKeys(data.items);
+      setEditingUserKey((prev) => (prev?.key === key ? null : prev));
+      toast.success(`已删除 ${data.removed ?? 0} 个用户 key`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除用户 key 失败";
+      toast.error(message);
+    } finally {
+      setIsDeletingUserKeys(false);
+    }
+  };
+
+  const handleUpdateUserKey = async () => {
+    if (!editingUserKey) {
+      return;
+    }
+    setIsUpdatingUserKey(true);
+    try {
+      const data = await updateUserKey(editingUserKey.key, {
+        label: editUserKeyLabel.trim() || undefined,
+        quota: Math.max(0, Number(editUserKeyQuota || 0)),
+        status: editUserKeyStatus,
+      });
+      setUserKeys(data.items);
+      setEditingUserKey(null);
+      toast.success("用户 key 已更新");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "更新用户 key 失败";
+      toast.error(message);
+    } finally {
+      setIsUpdatingUserKey(false);
     }
   };
 
@@ -669,10 +778,27 @@ export default function AccountsPage() {
           <DialogHeader className="gap-2">
             <DialogTitle>编辑账户</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              手动修改账号状态、类型和额度。
+              手动修改账户来源、状态、类型和额度。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">来源</label>
+              <Select value={editCategory} onValueChange={(value) => setEditCategory(value as AccountCategory)}>
+                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {accountCategoryOptions
+                    .filter((option) => option.value !== "all")
+                    .map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">状态</label>
               <Select value={editStatus} onValueChange={(value) => setEditStatus(value as AccountStatus)}>
@@ -737,6 +863,64 @@ export default function AccountsPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={Boolean(editingUserKey)} onOpenChange={(open) => (!open ? setEditingUserKey(null) : null)}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>编辑用户 key</DialogTitle>
+            <DialogDescription className="text-sm leading-6">手动修改标签、状态和剩余次数。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">标签</label>
+              <Input
+                value={editUserKeyLabel}
+                onChange={(event) => setEditUserKeyLabel(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+                placeholder="可留空"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">状态</label>
+              <Select value={editUserKeyStatus} onValueChange={(value) => setEditUserKeyStatus(value as UserKeyStatus)}>
+                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="启用">启用</SelectItem>
+                  <SelectItem value="停用">停用</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">剩余次数</label>
+              <Input
+                value={editUserKeyQuota}
+                onChange={(event) => setEditUserKeyQuota(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+          </div>
+          <DialogFooter className="pt-2">
+            <Button
+              variant="secondary"
+              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              onClick={() => setEditingUserKey(null)}
+              disabled={isUpdatingUserKey}
+            >
+              取消
+            </Button>
+            <Button
+              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              onClick={() => void handleUpdateUserKey()}
+              disabled={isUpdatingUserKey}
+            >
+              {isUpdatingUserKey ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              保存修改
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <section className="space-y-3">
         <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
           {metricCards.map((item) => {
@@ -783,6 +967,24 @@ export default function AccountsPage() {
                 className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
               />
             </div>
+            <Select
+              value={categoryFilter}
+              onValueChange={(value) => {
+                setCategoryFilter(value as AccountCategory | "all");
+                setPage(1);
+              }}
+            >
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {accountCategoryOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Select
               value={typeFilter}
               onValueChange={(value) => {
@@ -891,6 +1093,7 @@ export default function AccountsPage() {
                       />
                     </th>
                     <th className="w-56 px-4 py-3">token</th>
+                    <th className="w-24 px-4 py-3">来源</th>
                     <th className="w-28 px-4 py-3">类型</th>
                     <th className="w-24 px-4 py-3">状态</th>
                     <th className="w-56 px-4 py-3">账号信息</th>
@@ -939,6 +1142,14 @@ export default function AccountsPage() {
                               <Copy className="size-4" />
                             </button>
                           </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge
+                            variant={account.category === "捐赠" ? "info" : "secondary"}
+                            className="rounded-md"
+                          >
+                            {account.category}
+                          </Badge>
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
@@ -1090,6 +1301,218 @@ export default function AccountsPage() {
                   <ChevronRight className="size-4" />
                 </Button>
               </div>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
+              <KeyRound className="size-4" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold tracking-tight">用户 Key</h2>
+              <p className="text-sm text-stone-500">给普通使用方单独分配次数，并限制管理权限。</p>
+            </div>
+          </div>
+
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => void loadUserKeys()}
+            disabled={isLoadingUserKeys || isSubmittingUserKeys || isDeletingUserKeys || isUpdatingUserKey}
+          >
+            <RefreshCw className={cn("size-4", isLoadingUserKeys ? "animate-spin" : "")} />
+            刷新用户 key
+          </Button>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-1 p-4">
+              <div className="text-xs text-stone-400">用户 key 总数</div>
+              <div className="text-2xl font-semibold tracking-tight text-stone-900">{userKeySummary.total}</div>
+            </CardContent>
+          </Card>
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-1 p-4">
+              <div className="text-xs text-stone-400">启用中</div>
+              <div className="text-2xl font-semibold tracking-tight text-emerald-600">{userKeySummary.enabled}</div>
+            </CardContent>
+          </Card>
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-1 p-4">
+              <div className="text-xs text-stone-400">停用中</div>
+              <div className="text-2xl font-semibold tracking-tight text-stone-500">{userKeySummary.disabled}</div>
+            </CardContent>
+          </Card>
+          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-1 p-4">
+              <div className="text-xs text-stone-400">总剩余次数</div>
+              <div className="text-2xl font-semibold tracking-tight text-blue-500">{userKeySummary.quota}</div>
+            </CardContent>
+          </Card>
+        </div>
+
+        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_160px] xl:grid-cols-[minmax(0,1fr)_160px_160px_160px_200px]">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">前缀</label>
+              <Input
+                value={newUserKeyPrefix}
+                onChange={(event) => setNewUserKeyPrefix(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+                placeholder="uk"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">数量</label>
+              <Input
+                type="number"
+                min="1"
+                max="100"
+                value={newUserKeyCount}
+                onChange={(event) => setNewUserKeyCount(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">初始次数</label>
+              <Input
+                type="number"
+                min="0"
+                value={newUserKeyQuota}
+                onChange={(event) => setNewUserKeyQuota(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">标签前缀</label>
+              <Input
+                value={newUserKeyLabelPrefix}
+                onChange={(event) => setNewUserKeyLabelPrefix(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+                placeholder="例如 渠道A-"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                className="h-11 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+                onClick={() => void handleCreateUserKeys()}
+                disabled={isSubmittingUserKeys}
+              >
+                {isSubmittingUserKeys ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                批量生成
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <CardContent className="space-y-0 p-0">
+            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-center gap-3">
+                <h3 className="text-lg font-semibold tracking-tight">Key 列表</h3>
+                <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
+                  {filteredUserKeys.length}
+                </Badge>
+              </div>
+              <div className="relative min-w-[260px]">
+                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+                <Input
+                  value={userKeyQuery}
+                  onChange={(event) => setUserKeyQuery(event.target.value)}
+                  placeholder="搜索 key 或标签"
+                  className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                />
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[880px] text-left">
+                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+                  <tr>
+                    <th className="w-56 px-4 py-3">key</th>
+                    <th className="w-36 px-4 py-3">标签</th>
+                    <th className="w-24 px-4 py-3">状态</th>
+                    <th className="w-24 px-4 py-3">次数</th>
+                    <th className="w-40 px-4 py-3">创建时间</th>
+                    <th className="w-40 px-4 py-3">最近使用</th>
+                    <th className="w-28 px-4 py-3">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredUserKeys.map((item) => (
+                    <tr
+                      key={item.id}
+                      className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                    >
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium tracking-tight text-stone-700">{maskToken(item.key)}</span>
+                          <button
+                            type="button"
+                            className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(item.key);
+                              toast.success("用户 key 已复制");
+                            }}
+                          >
+                            <Copy className="size-4" />
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-stone-500">{item.label || "—"}</td>
+                      <td className="px-4 py-3">
+                        <Badge variant={item.status === "启用" ? "success" : "secondary"} className="rounded-md">
+                          {item.status}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge variant="info" className="rounded-md">
+                          {formatQuota(item.quota)}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.createdAt)}</td>
+                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.lastUsedAt)}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1 text-stone-400">
+                          <button
+                            type="button"
+                            className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                            onClick={() => openUserKeyDialog(item)}
+                            disabled={isUpdatingUserKey}
+                          >
+                            <Pencil className="size-4" />
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
+                            onClick={() => void handleDeleteUserKey(item.key)}
+                            disabled={isDeletingUserKeys}
+                          >
+                            <Trash2 className="size-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {!isLoadingUserKeys && filteredUserKeys.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                    <KeyRound className="size-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-stone-700">还没有用户 key</p>
+                    <p className="text-sm text-stone-500">先设好前缀、数量和初始次数，再批量生成。</p>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </CardContent>
         </Card>

@@ -114,11 +114,17 @@ export default function ImagePage() {
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [availableQuota, setAvailableQuota] = useState("加载中");
+  const [availableQuota, setAvailableQuota] = useState<number | null>(null);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const parsedCount = useMemo(() => Math.max(1, Math.min(10, Number(imageCount) || 1)), [imageCount]);
+  const parsedCount = useMemo(() => Math.max(1, Math.min(4, Number(imageCount) || 1)), [imageCount]);
+  const requestCost = useMemo(() => parsedCount * (imageModel === "gpt-image-2" ? 4 : 1), [imageModel, parsedCount]);
+  const isQuotaInsufficient = useMemo(
+    () => availableQuota !== null && requestCost > Math.max(0, availableQuota),
+    [availableQuota, requestCost],
+  );
+  const availableQuotaLabel = availableQuota === null ? "加载中" : String(Math.max(0, availableQuota));
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
@@ -182,9 +188,9 @@ export default function ImagePage() {
   const loadQuota = useCallback(async () => {
     try {
       const data = await fetchQuotaSummary();
-      setAvailableQuota(String(Math.max(0, data.available_quota || 0)));
+      setAvailableQuota(Math.max(0, Number(data.available_quota || 0)));
     } catch {
-      setAvailableQuota((prev) => (prev === "加载中" ? "—" : prev));
+      setAvailableQuota(null);
     }
   }, []);
 
@@ -290,6 +296,10 @@ export default function ImagePage() {
       toast.error("请输入提示词");
       return;
     }
+    if (isQuotaInsufficient) {
+      toast.error(`当前额度不足，本次需要 ${requestCost} 次`);
+      return;
+    }
 
     const now = new Date().toISOString();
     const conversationId =
@@ -317,59 +327,34 @@ export default function ImagePage() {
     try {
       await persistConversation(draftConversation);
 
-      const tasks = Array.from({ length: parsedCount }, async (_, index) => {
-        try {
-          const data = await generateImage(prompt, imageModel);
-          const first = data.data?.[0];
-          if (!first?.b64_json) {
-            throw new Error(`第 ${index + 1} 张没有返回图片数据`);
-          }
-
-          const nextImage: StoredImage = {
+      const data = await generateImage(prompt, imageModel, parsedCount);
+      const returnedItems = Array.isArray(data.data) ? data.data : [];
+      const nextImages: StoredImage[] = Array.from({ length: parsedCount }, (_, index) => {
+        const current = returnedItems[index];
+        if (current?.b64_json) {
+          return {
             id: `${conversationId}-${index}`,
             status: "success",
-            b64_json: first.b64_json,
+            b64_json: current.b64_json,
           };
-
-          await updateConversation(conversationId, (current) => ({
-            ...(current ?? draftConversation),
-            images: (current?.images ?? draftConversation.images).map((image) =>
-              image.id === nextImage.id ? nextImage : image,
-            ),
-          }));
-
-          return nextImage;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : `第 ${index + 1} 张生成失败`;
-          const failedImage: StoredImage = {
-            id: `${conversationId}-${index}`,
-            status: "error",
-            error: message,
-          };
-
-          await updateConversation(conversationId, (current) => ({
-            ...(current ?? draftConversation),
-            images: (current?.images ?? draftConversation.images).map((image) =>
-              image.id === failedImage.id ? failedImage : image,
-            ),
-          }));
-
-          throw error;
         }
+        return {
+          id: `${conversationId}-${index}`,
+          status: "error",
+          error: `第 ${index + 1} 张没有返回图片数据`,
+        };
       });
 
-      const settled = await Promise.allSettled(tasks);
-      const successCount = settled.filter((item): item is PromiseFulfilledResult<StoredImage> => item.status === "fulfilled")
-        .length;
-      const failedCount = settled.length - successCount;
+      const successCount = nextImages.filter((item) => item.status === "success").length;
+      const failedCount = nextImages.length - successCount;
 
       if (successCount === 0) {
-        const firstError = settled.find((item) => item.status === "rejected");
-        throw new Error(firstError?.status === "rejected" ? String(firstError.reason) : "生成图片失败");
+        throw new Error("生成图片失败");
       }
 
       await updateConversation(conversationId, (current) => ({
         ...(current ?? draftConversation),
+        images: nextImages,
         status: failedCount > 0 ? "error" : "success",
         error: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
       }));
@@ -605,7 +590,7 @@ export default function ImagePage() {
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
-                      if (!isGenerating) {
+                      if (!isGenerating && !isQuotaInsufficient) {
                         void handleGenerateImage();
                       }
                     }
@@ -616,7 +601,15 @@ export default function ImagePage() {
                 <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-white via-white/95 to-transparent px-4 pb-4 pt-10 sm:px-6">
                   <div className="flex items-center gap-3">
                     <div className="rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600">
-                      剩余额度 {availableQuota}
+                      剩余额度 {availableQuotaLabel}
+                    </div>
+                    <div
+                      className={cn(
+                        "rounded-full px-3 py-2 text-xs font-medium",
+                        isQuotaInsufficient ? "bg-rose-50 text-rose-600" : "bg-emerald-50 text-emerald-700",
+                      )}
+                    >
+                      本次消耗 {requestCost} 次
                     </div>
                     <Select value={imageModel} onValueChange={(value) => setImageModel(value as ImageModel)}>
                       <SelectTrigger className="h-10 w-[164px] rounded-full border-stone-200 bg-white text-sm font-medium text-stone-700 shadow-none focus-visible:ring-0">
@@ -636,7 +629,7 @@ export default function ImagePage() {
                       <Input
                         type="number"
                         min="1"
-                        max="10"
+                        max="4"
                         step="1"
                         value={imageCount}
                         onChange={(event) => setImageCount(event.target.value)}
@@ -648,13 +641,16 @@ export default function ImagePage() {
                   <button
                     type="button"
                     onClick={() => void handleGenerateImage()}
-                    disabled={isGenerating}
+                    disabled={isGenerating || isQuotaInsufficient}
                     className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-stone-950 text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300"
                     aria-label="生成图片"
                   >
                     {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
                   </button>
                 </div>
+                {isQuotaInsufficient ? (
+                  <div className="px-6 pb-4 text-xs text-rose-600">当前额度不足，本次至少需要 {requestCost} 次。</div>
+                ) : null}
               </div>
             </div>
           </div>
