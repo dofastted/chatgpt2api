@@ -2,6 +2,8 @@ ID,Title,Description,Acceptance,Test_Method,Tools,Dev_Status,Review1_Status,Regr
 A1,梳理画图页预览状态,在画图页补充预览所需的成功图片列表和当前索引状态，只允许成功图片进入预览,点击成功图片后能打开对应大图且失败图和生成中图片不会触发预览,手动生成含成功和失败结果的会话并逐一点击验证,feedback:codebase_retrieval;functions:exec_command;functions:apply_patch,TODO,TODO,TODO,web/src/app/image/page.tsx,无,"优先复用当前会话与本地历史结构
 started_at=2026-04-20T11:03:55+08:00
 started_at=2026-04-20T11:47:09+08:00
-started_at=2026-04-20T11:47:44+08:00",IN_PROGRESS,,,
-A2,接入预览弹层切换,复用现有 Dialog 组件实现大图弹层并支持当前会话内前后切换,弹层能显示当前图片和序号且首尾切换状态正确,手动检查桌面端和移动端布局并验证首张末张按钮状态,functions:exec_command;functions:apply_patch,TODO,TODO,TODO,web/src/app/image/page.tsx;web/src/components/ui/dialog.tsx,A1,仅在当前选中会话内切换成功图片,,,,
+started_at=2026-04-20T11:47:44+08:00
+已接入成功图片预览入口与预览状态；仅成功图片可打开弹层。docker compose -f docker-compose-local.yml up -d --build 通过并成功启动容器。npm run lint 仍受 web/src/components/ui/dia-text-reveal.tsx 旧错误影响。",DONE,,commit=7be2a4af31fcbefce7a6b0d73b1b21c18286f29b done_at=2026-04-20T11:48:42+08:00,7be2a4af31fcbefce7a6b0d73b1b21c18286f29b
+A2,接入预览弹层切换,复用现有 Dialog 组件实现大图弹层并支持当前会话内前后切换,弹层能显示当前图片和序号且首尾切换状态正确,手动检查桌面端和移动端布局并验证首张末张按钮状态,functions:exec_command;functions:apply_patch,TODO,TODO,TODO,web/src/app/image/page.tsx;web/src/components/ui/dialog.tsx,A1,"仅在当前选中会话内切换成功图片
+started_at=2026-04-20T11:49:01+08:00",IN_PROGRESS,,,
 A3,补充下载与回归验证,为预览中的当前图片提供下载按钮并完成 lint 与 build 验证,点击下载后浏览器能保存图片且 lint 和 build 通过,执行 cd web && npm run lint 与 cd web && npm run build 并手动测试下载,functions:exec_command;functions:apply_patch,TODO,TODO,TODO,web/src/app/image/page.tsx;web/src/app/accounts/page.tsx,A1|A2,下载逻辑参考账户页现有 Blob 与 createObjectURL 写法,,,,

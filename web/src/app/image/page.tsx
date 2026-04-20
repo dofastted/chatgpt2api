@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUp, LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -135,6 +135,8 @@ export default function ImagePage() {
     [activePreviewImageId, previewableImages],
   );
   const previewImage = previewImageIndex >= 0 ? previewableImages[previewImageIndex] : null;
+  const hasPreviousPreviewImage = previewImageIndex > 0;
+  const hasNextPreviewImage = previewImageIndex >= 0 && previewImageIndex < previewableImages.length - 1;
 
   useEffect(() => {
     let cancelled = false;
@@ -379,6 +381,17 @@ export default function ImagePage() {
 
   const handleOpenPreview = (imageId: string) => {
     setPreviewImageId(imageId);
+  };
+
+  const handlePreviewStep = (step: -1 | 1) => {
+    if (previewImageIndex < 0) {
+      return;
+    }
+    const nextIndex = previewImageIndex + step;
+    if (nextIndex < 0 || nextIndex >= previewableImages.length) {
+      return;
+    }
+    setPreviewImageId(previewableImages[nextIndex]?.id ?? null);
   };
 
   return (
@@ -630,15 +643,51 @@ export default function ImagePage() {
       <Dialog open={Boolean(previewImage)} onOpenChange={(open) => (!open ? setPreviewImageId(null) : null)}>
         <DialogContent className="w-[min(96vw,1120px)] border-stone-800/80 bg-stone-950 p-2 sm:p-4">
           {previewImage ? (
-            <div className="flex items-center justify-center overflow-hidden rounded-[20px] bg-black/60">
-              <Image
-                src={previewImage.src}
-                alt={previewImage.alt}
-                width={1024}
-                height={1024}
-                unoptimized
-                className="h-auto max-h-[82vh] w-full object-contain"
-              />
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3 rounded-[18px] bg-white/6 px-3 py-2 text-sm text-stone-200 sm:px-4">
+                <div className="flex items-center gap-2 text-stone-300">
+                  <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium">
+                    {previewImageIndex + 1} / {previewableImages.length}
+                  </span>
+                  <span className="hidden text-xs text-stone-400 sm:inline">当前会话成功图片预览</span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handlePreviewStep(-1)}
+                    disabled={!hasPreviousPreviewImage}
+                    className="border-white/15 bg-white/8 text-stone-100 hover:bg-white/14"
+                  >
+                    <ArrowLeft className="size-4" />
+                    上一张
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handlePreviewStep(1)}
+                    disabled={!hasNextPreviewImage}
+                    className="border-white/15 bg-white/8 text-stone-100 hover:bg-white/14"
+                  >
+                    下一张
+                    <ArrowRight className="size-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-center overflow-hidden rounded-[20px] bg-black/60">
+                <Image
+                  src={previewImage.src}
+                  alt={previewImage.alt}
+                  width={1024}
+                  height={1024}
+                  unoptimized
+                  className="h-auto max-h-[82vh] w-full object-contain"
+                />
+              </div>
             </div>
           ) : null}
         </DialogContent>
