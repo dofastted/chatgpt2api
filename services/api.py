@@ -49,9 +49,29 @@ class AccountRefreshRequest(BaseModel):
 
 class AccountUpdateRequest(BaseModel):
     access_token: str = Field(default="")
+    category: str | None = None
     type: str | None = None
     status: str | None = None
     quota: int | None = None
+
+
+class UserKeyCreateRequest(BaseModel):
+    count: int = Field(default=1, ge=1, le=100)
+    quota: int = Field(default=0, ge=0)
+    prefix: str | None = None
+    label_prefix: str | None = None
+    status: str | None = None
+
+
+class UserKeyDeleteRequest(BaseModel):
+    keys: list[str] = Field(default_factory=list)
+
+
+class UserKeyUpdateRequest(BaseModel):
+    key: str = Field(default="")
+    label: str | None = None
+    quota: int | None = None
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -237,6 +257,11 @@ def create_app() -> FastAPI:
         require_admin_auth_key(authorization)
         return {"items": account_service.list_accounts()}
 
+    @router.get("/api/user-keys")
+    async def get_user_keys(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return {"items": user_key_service.list_public_user_keys()}
+
     @router.post("/api/accounts")
     async def create_accounts(
             body: AccountCreateRequest,
@@ -255,6 +280,38 @@ def create_app() -> FastAPI:
             "items": refresh_result.get("items", result.get("items", [])),
         }
 
+    @router.post("/api/donations/accounts")
+    async def create_donation_accounts(
+            body: AccountCreateRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_auth_key(authorization)
+        tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
+        if not tokens:
+            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
+        result = account_service.add_accounts(tokens, category=account_service.DONATION_CATEGORY)
+        refresh_result = account_service.refresh_accounts(tokens)
+        return {
+            **result,
+            "refreshed": refresh_result.get("refreshed", 0),
+            "errors": refresh_result.get("errors", []),
+            "items": refresh_result.get("items", result.get("items", [])),
+        }
+
+    @router.post("/api/user-keys")
+    async def create_user_keys(
+            body: UserKeyCreateRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        return user_key_service.create_user_keys(
+            count=body.count,
+            quota=body.quota,
+            prefix=body.prefix,
+            label_prefix=body.label_prefix,
+            status=body.status,
+        )
+
     @router.delete("/api/accounts")
     async def delete_accounts(
             body: AccountDeleteRequest,
@@ -265,6 +322,17 @@ def create_app() -> FastAPI:
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         return account_service.delete_accounts(tokens)
+
+    @router.delete("/api/user-keys")
+    async def delete_user_keys(
+            body: UserKeyDeleteRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        keys = [str(key or "").strip() for key in body.keys if str(key or "").strip()]
+        if not keys:
+            raise HTTPException(status_code=400, detail={"error": "keys is required"})
+        return user_key_service.delete_user_keys(keys)
 
     @router.get("/api/quota")
     async def get_quota_summary(authorization: str | None = Header(default=None)):
@@ -309,6 +377,7 @@ def create_app() -> FastAPI:
         updates = {
             key: value
             for key, value in {
+                "category": body.category,
                 "type": body.type,
                 "status": body.status,
                 "quota": body.quota,
@@ -322,6 +391,33 @@ def create_app() -> FastAPI:
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
         return {"item": account, "items": account_service.list_accounts()}
+
+    @router.post("/api/user-keys/update")
+    async def update_user_key(
+            body: UserKeyUpdateRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        key = str(body.key or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail={"error": "key is required"})
+
+        updates = {
+            update_key: value
+            for update_key, value in {
+                "label": body.label,
+                "quota": body.quota,
+                "status": body.status,
+            }.items()
+            if value is not None
+        }
+        if not updates:
+            raise HTTPException(status_code=400, detail={"error": "no updates provided"})
+
+        user_key = user_key_service.update_user_key(key, updates)
+        if user_key is None:
+            raise HTTPException(status_code=404, detail={"error": "user key not found"})
+        return {"item": user_key, "items": user_key_service.list_public_user_keys()}
 
     @router.post("/v1/images/generations")
     async def generate_images(

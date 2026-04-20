@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -77,6 +78,30 @@ class UserKeyService:
                 return index
         return -1
 
+    def _public_items(self, user_keys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": str(item.get("id") or ""),
+                "key": self._clean_text(item.get("key")),
+                "label": item.get("label"),
+                "quota": max(0, int(item.get("quota") or 0)),
+                "status": self._normalize_status(item.get("status")),
+                "createdAt": self._clean_text(item.get("created_at")) or None,
+                "updatedAt": self._clean_text(item.get("updated_at")) or None,
+                "lastUsedAt": self._clean_text(item.get("last_used_at")) or None,
+            }
+            for item in user_keys
+            if self._clean_text(item.get("key"))
+        ]
+
+    def _build_generated_key(self, prefix: str, existing_keys: set[str]) -> str:
+        normalized_prefix = self._clean_text(prefix)
+        while True:
+            random_part = secrets.token_urlsafe(18).replace("-", "").replace("_", "")
+            candidate = f"{normalized_prefix}_{random_part}" if normalized_prefix else random_part
+            if candidate not in existing_keys:
+                return candidate
+
     def get_user_key(self, key: str) -> dict[str, Any] | None:
         normalized_key = self._clean_text(key)
         if not normalized_key:
@@ -96,6 +121,94 @@ class UserKeyService:
     def list_user_keys(self) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(item) for item in self._user_keys]
+
+    def list_public_user_keys(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return self._public_items(self._user_keys)
+
+    def create_user_keys(
+            self,
+            count: int,
+            quota: int,
+            prefix: str | None = None,
+            label_prefix: str | None = None,
+            status: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_count = max(0, int(count or 0))
+        normalized_quota = max(0, int(quota or 0))
+        normalized_status = self._normalize_status(status)
+        cleaned_label_prefix = self._clean_text(label_prefix)
+        if normalized_count <= 0:
+            return {"added": 0, "created_items": [], "items": self.list_public_user_keys()}
+
+        with self._lock:
+            existing_keys = {self._clean_text(item.get("key")) for item in self._user_keys if self._clean_text(item.get("key"))}
+            created_items: list[dict[str, Any]] = []
+            for index in range(normalized_count):
+                now = self._now_text()
+                generated_key = self._build_generated_key(prefix or "uk", existing_keys)
+                existing_keys.add(generated_key)
+                next_item = self._normalize_user_key(
+                    {
+                        "key": generated_key,
+                        "label": f"{cleaned_label_prefix}{index + 1}" if cleaned_label_prefix else None,
+                        "quota": normalized_quota,
+                        "status": normalized_status,
+                        "created_at": now,
+                        "updated_at": now,
+                        "last_used_at": None,
+                    }
+                )
+                if next_item is None:
+                    continue
+                self._user_keys.append(next_item)
+                created_items.append(next_item)
+            if created_items:
+                self._save_user_keys()
+            return {
+                "added": len(created_items),
+                "created_items": self._public_items(created_items),
+                "items": self._public_items(self._user_keys),
+            }
+
+    def delete_user_keys(self, keys: list[str]) -> dict[str, Any]:
+        target_keys = {self._clean_text(key) for key in keys if self._clean_text(key)}
+        if not target_keys:
+            return {"removed": 0, "items": self.list_public_user_keys()}
+        with self._lock:
+            before = len(self._user_keys)
+            self._user_keys = [item for item in self._user_keys if self._clean_text(item.get("key")) not in target_keys]
+            removed = before - len(self._user_keys)
+            if removed:
+                self._save_user_keys()
+            return {"removed": removed, "items": self._public_items(self._user_keys)}
+
+    def update_user_key(self, key: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        normalized_key = self._clean_text(key)
+        if not normalized_key:
+            return None
+        with self._lock:
+            index = self._find_user_key_index(normalized_key)
+            if index < 0:
+                return None
+            current = dict(self._user_keys[index])
+            next_item = self._normalize_user_key(
+                {
+                    **current,
+                    **updates,
+                    "key": normalized_key,
+                    "updated_at": self._now_text(),
+                }
+            )
+            if next_item is None:
+                return None
+            self._user_keys[index] = next_item
+            self._save_user_keys()
+            public_items = self._public_items(self._user_keys)
+            target_item = next((item for item in public_items if self._clean_text(item.get("key")) == normalized_key), None)
+            if target_item is None:
+                return None
+            return dict(target_item)
 
     def consume_quota(self, key: str, cost: int) -> dict[str, Any] | None:
         normalized_key = self._clean_text(key)
