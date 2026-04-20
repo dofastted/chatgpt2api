@@ -1,4 +1,5 @@
 {
   "auth-key": "replace-with-your-auth-key",
+  "admin-auth-key": "replace-with-your-admin-auth-key",
   "tls-verify": true
 }

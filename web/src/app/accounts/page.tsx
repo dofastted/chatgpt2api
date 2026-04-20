@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
@@ -17,6 +18,7 @@ import {
   RefreshCw,
   Search,
   Trash2,
+  Upload,
   UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -46,6 +48,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   createAccounts,
   deleteAccounts,
+  fetchAuthSession,
   fetchAccounts,
   refreshAccounts,
   updateAccount,
@@ -159,8 +162,57 @@ function normalizeAccounts(items: Account[]): Account[] {
   }));
 }
 
+function normalizeTokenList(tokens: string[]) {
+  return Array.from(
+    new Set(
+      tokens
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function isAccessTokenKey(key: string) {
+  return key.replace(/[\s-]+/g, "_").toLowerCase() === "access_token";
+}
+
+function collectAccessTokens(value: unknown, collected: string[]) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectAccessTokens(item, collected));
+    return;
+  }
+
+  if (!value || typeof value !== "object") {
+    return;
+  }
+
+  Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
+    if (isAccessTokenKey(key)) {
+      const token = String(item || "").trim();
+      if (token) {
+        collected.push(token);
+      }
+      return;
+    }
+
+    collectAccessTokens(item, collected);
+  });
+}
+
+function extractAccessTokensFromJson(value: unknown) {
+  const collected: string[] = [];
+  collectAccessTokens(value, collected);
+  return normalizeTokenList(collected);
+}
+
+function cleanJsonText(text: string) {
+  return text.replace(/^\uFEFF/, "").trim();
+}
+
 export default function AccountsPage() {
+  const router = useRouter();
   const didLoadRef = useRef(false);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -179,6 +231,8 @@ export default function AccountsPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isUploadingJson, setIsUploadingJson] = useState(false);
+  const [isAuthorizing, setIsAuthorizing] = useState(true);
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
@@ -203,8 +257,33 @@ export default function AccountsPage() {
       return;
     }
     didLoadRef.current = true;
-    void loadAccounts();
-  }, []);
+
+    let cancelled = false;
+    const bootstrap = async () => {
+      try {
+        const session = await fetchAuthSession();
+        if (cancelled) {
+          return;
+        }
+        if (session.role !== "admin") {
+          toast.error("当前密钥没有号池管理权限");
+          router.replace("/image");
+          return;
+        }
+        setIsAuthorizing(false);
+        await loadAccounts();
+      } catch {
+        if (!cancelled) {
+          router.replace("/login");
+        }
+      }
+    };
+
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -258,11 +337,18 @@ export default function AccountsPage() {
     return items;
   }, [pageCount, safePage]);
 
+  if (isAuthorizing) {
+    return (
+      <div className="grid min-h-[calc(100vh-6rem)] place-items-center">
+        <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+          <LoaderCircle className="size-5 animate-spin" />
+        </div>
+      </div>
+    );
+  }
+
   const handleAddAccounts = async () => {
-    const tokens = newTokens
-      .split(/\r?\n/)
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const tokens = normalizeTokenList(newTokens.split(/\r?\n/));
 
     if (tokens.length === 0) {
       toast.error("请先粘贴至少一个 Access Token");
@@ -290,6 +376,91 @@ export default function AccountsPage() {
       toast.error(message);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleUploadJsonAccounts = async (files: File[]) => {
+    if (files.length === 0) {
+      return;
+    }
+
+    setIsUploadingJson(true);
+
+    try {
+      const importedTokens: string[] = [];
+      const invalidFiles: string[] = [];
+      const emptyFiles: string[] = [];
+      let matchedFiles = 0;
+
+      for (const file of files) {
+        try {
+          const text = cleanJsonText(await file.text());
+          if (!text) {
+            emptyFiles.push(file.name);
+            continue;
+          }
+
+          const payload = JSON.parse(text);
+          const fileTokens = extractAccessTokensFromJson(payload);
+          if (fileTokens.length === 0) {
+            emptyFiles.push(file.name);
+            continue;
+          }
+
+          matchedFiles += 1;
+          importedTokens.push(...fileTokens);
+        } catch {
+          invalidFiles.push(file.name);
+        }
+      }
+
+      const tokens = normalizeTokenList(importedTokens);
+      if (tokens.length === 0) {
+        const errors: string[] = [];
+        if (invalidFiles.length > 0) {
+          errors.push(`${invalidFiles.length} 个文件不是有效 JSON`);
+        }
+        if (emptyFiles.length > 0) {
+          errors.push(`${emptyFiles.length} 个文件没有 access_token`);
+        }
+        toast.error(errors.length > 0 ? `未提取到可用 Token，${errors.join("，")}` : "未提取到可用 Token");
+        return;
+      }
+
+      const data = await createAccounts(tokens);
+      setAccounts(normalizeAccounts(data.items));
+      setSelectedIds([]);
+      setNewTokens("");
+      setPage(1);
+      setOpen(false);
+
+      const messages = [`已从 ${matchedFiles} 个文件导入 ${tokens.length} 个 Token`];
+      if ((data.skipped ?? 0) > 0) {
+        messages.push(`跳过 ${data.skipped} 个重复项`);
+      }
+      if ((data.errors?.length ?? 0) > 0) {
+        messages.push(`刷新失败 ${data.errors?.length ?? 0} 个`);
+      }
+      if (invalidFiles.length > 0) {
+        messages.push(`${invalidFiles.length} 个文件不是有效 JSON`);
+      }
+      if (emptyFiles.length > 0) {
+        messages.push(`${emptyFiles.length} 个文件没有 access_token`);
+      }
+
+      if ((data.errors?.length ?? 0) > 0) {
+        toast.error(messages.join("，"));
+      } else {
+        toast.success(messages.join("，"));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "上传 JSON 失败";
+      toast.error(message);
+    } finally {
+      setIsUploadingJson(false);
+      if (uploadInputRef.current) {
+        uploadInputRef.current.value = "";
+      }
     }
   };
 
@@ -419,10 +590,38 @@ export default function AccountsPage() {
               <DialogHeader className="gap-2">
                 <DialogTitle>新增账户</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
-                  每行一个 Access Token。保存后会自动拉取邮箱、类型和额度。
+                  支持批量上传 JSON 文件直接导入，也支持手动粘贴 Access Token。
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => void handleUploadJsonAccounts(Array.from(event.target.files ?? []))}
+                />
+                <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50/70 p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium text-stone-800">批量上传 JSON</div>
+                      <p className="text-xs leading-5 text-stone-500">
+                        可多选文件，系统会清洗内容并提取其中的 access_token，然后直接调用新增接口。
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-100"
+                      onClick={() => uploadInputRef.current?.click()}
+                      disabled={isSubmitting || isUploadingJson}
+                    >
+                      {isUploadingJson ? <LoaderCircle className="size-4 animate-spin" /> : <Upload className="size-4" />}
+                      上传 JSON
+                    </Button>
+                  </div>
+                </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-stone-700">Token 列表</label>
                   <Textarea

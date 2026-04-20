@@ -1,21 +1,49 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
+import { fetchAuthSession, type AuthRole } from "@/lib/api";
 import { clearStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
-const navItems = [
+const navItems: Array<{ href: string; label: string; roles?: AuthRole[] }> = [
   { href: "/image", label: "画图" },
-  { href: "/accounts", label: "号池管理" },
+  { href: "/accounts", label: "号池管理", roles: ["admin"] },
 ];
 
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
+  const [authRole, setAuthRole] = useState<AuthRole | null>(null);
+
+  useEffect(() => {
+    if (pathname === "/login") {
+      return;
+    }
+
+    let cancelled = false;
+    const loadSession = async () => {
+      try {
+        const session = await fetchAuthSession();
+        if (!cancelled) {
+          setAuthRole(session.role);
+        }
+      } catch {
+        if (!cancelled) {
+          setAuthRole(null);
+        }
+      }
+    };
+
+    void loadSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname]);
 
   const handleLogout = async () => {
     await clearStoredAuthKey();
@@ -25,6 +53,8 @@ export function TopNav() {
   if (pathname === "/login") {
     return null;
   }
+
+  const visibleNavItems = navItems.filter((item) => !item.roles || (authRole ? item.roles.includes(authRole) : false));
 
   return (
     <header>
@@ -48,7 +78,7 @@ export function TopNav() {
           </a>
         </div>
         <div className="flex justify-center gap-8">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const active = pathname === item.href;
             return (
               <Link

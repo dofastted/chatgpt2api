@@ -3,6 +3,7 @@ import { httpRequest } from "@/lib/request";
 export type AccountType = "Free" | "Plus" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-1" | "gpt-image-2";
+export type AuthRole = "user" | "admin";
 
 export type Account = {
   id: string;
@@ -48,9 +49,15 @@ type AccountUpdateResponse = {
   items: Account[];
 };
 
+type AuthSessionResponse = {
+  ok: boolean;
+  version: string;
+  role: AuthRole;
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
-  return httpRequest<{ ok: boolean }>("/auth/login", {
+  return httpRequest<AuthSessionResponse>("/auth/login", {
     method: "POST",
     body: {},
     headers: {
@@ -60,8 +67,16 @@ export async function login(authKey: string) {
   });
 }
 
+export async function fetchAuthSession() {
+  return httpRequest<AuthSessionResponse>("/auth/session");
+}
+
 export async function fetchAccounts() {
   return httpRequest<AccountListResponse>("/api/accounts");
+}
+
+export async function fetchQuotaSummary() {
+  return httpRequest<{ available_quota: number }>("/api/quota");
 }
 
 export async function createAccounts(tokens: string[]) {

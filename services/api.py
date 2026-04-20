@@ -48,6 +48,17 @@ class AccountUpdateRequest(BaseModel):
     quota: int | None = None
 
 
+def resolve_auth_role(authorization: str | None) -> str | None:
+    auth_key = extract_bearer_token(authorization)
+    if not auth_key:
+        return None
+    if auth_key == str(config.admin_auth_key or "").strip():
+        return "admin"
+    if auth_key == str(config.auth_key or "").strip():
+        return "user"
+    return None
+
+
 def build_model_item(model_id: str) -> dict[str, object]:
     return {
         "id": model_id,
@@ -65,8 +76,14 @@ def extract_bearer_token(authorization: str | None) -> str:
 
 
 def require_auth_key(authorization: str | None) -> None:
-    if extract_bearer_token(authorization) != str(config.auth_key or "").strip():
+    if resolve_auth_role(authorization) is None:
         raise HTTPException(status_code=401, detail={"error": "authorization is invalid"})
+
+
+def require_admin_auth_key(authorization: str | None) -> None:
+    require_auth_key(authorization)
+    if resolve_auth_role(authorization) != "admin":
+        raise HTTPException(status_code=403, detail={"error": "admin authorization is required"})
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
@@ -149,7 +166,12 @@ def create_app() -> FastAPI:
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        return {"ok": True, "version": app_version}
+        return {"ok": True, "version": app_version, "role": resolve_auth_role(authorization)}
+
+    @router.get("/auth/session")
+    async def get_auth_session(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return {"ok": True, "version": app_version, "role": resolve_auth_role(authorization)}
 
     @router.get("/version")
     async def get_version():
@@ -157,7 +179,7 @@ def create_app() -> FastAPI:
 
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin_auth_key(authorization)
         return {"items": account_service.list_accounts()}
 
     @router.post("/api/accounts")
@@ -165,7 +187,7 @@ def create_app() -> FastAPI:
             body: AccountCreateRequest,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_admin_auth_key(authorization)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
@@ -183,18 +205,29 @@ def create_app() -> FastAPI:
             body: AccountDeleteRequest,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_admin_auth_key(authorization)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         return account_service.delete_accounts(tokens)
+
+    @router.get("/api/quota")
+    async def get_quota_summary(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        accounts = account_service.list_accounts()
+        available_quota = sum(
+            max(0, int(account.get("quota") or 0))
+            for account in accounts
+            if account.get("status") != "禁用"
+        )
+        return {"available_quota": available_quota}
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(
             body: AccountRefreshRequest,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_admin_auth_key(authorization)
         access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
         if not access_tokens:
             access_tokens = account_service.list_tokens()
@@ -207,7 +240,7 @@ def create_app() -> FastAPI:
             body: AccountUpdateRequest,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_admin_auth_key(authorization)
         access_token = str(body.access_token or "").strip()
         if not access_token:
             raise HTTPException(status_code=400, detail={"error": "access_token is required"})

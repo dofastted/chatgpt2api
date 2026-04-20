@@ -6,6 +6,7 @@ import { ArrowUp, LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -15,7 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { fetchAccounts, generateImage, type Account, type ImageModel } from "@/lib/api";
+import { fetchQuotaSummary, generateImage, type ImageModel } from "@/lib/api";
 import {
   clearImageConversations,
   deleteImageConversation,
@@ -52,10 +53,12 @@ function formatConversationTime(value: string) {
   }).format(date);
 }
 
-function formatAvailableQuota(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status !== "禁用");
-  return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
-}
+type PreviewableImage = {
+  id: string;
+  originalIndex: number;
+  src: string;
+  alt: string;
+};
 
 async function normalizeConversationHistory(items: ImageConversation[]) {
   const normalized = items.map((item) =>
@@ -95,6 +98,7 @@ export default function ImagePage() {
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-1");
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [availableQuota, setAvailableQuota] = useState("加载中");
@@ -106,6 +110,31 @@ export default function ImagePage() {
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
   );
+  const previewableImages = useMemo<PreviewableImage[]>(
+    () =>
+      (selectedConversation?.images || []).flatMap((image, index) =>
+        image.status === "success" && image.b64_json
+          ? [
+              {
+                id: image.id,
+                originalIndex: index,
+                src: `data:image/png;base64,${image.b64_json}`,
+                alt: `Generated result ${index + 1}`,
+              },
+            ]
+          : [],
+      ),
+    [selectedConversation],
+  );
+  const activePreviewImageId = useMemo(
+    () => (previewableImages.some((image) => image.id === previewImageId) ? previewImageId : null),
+    [previewImageId, previewableImages],
+  );
+  const previewImageIndex = useMemo(
+    () => previewableImages.findIndex((image) => image.id === activePreviewImageId),
+    [activePreviewImageId, previewableImages],
+  );
+  const previewImage = previewImageIndex >= 0 ? previewableImages[previewImageIndex] : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -136,8 +165,8 @@ export default function ImagePage() {
 
   const loadQuota = useCallback(async () => {
     try {
-      const data = await fetchAccounts();
-      setAvailableQuota(formatAvailableQuota(data.items));
+      const data = await fetchQuotaSummary();
+      setAvailableQuota(String(Math.max(0, data.available_quota || 0)));
     } catch {
       setAvailableQuota((prev) => (prev === "加载中" ? "—" : prev));
     }
@@ -203,6 +232,7 @@ export default function ImagePage() {
 
   const handleCreateDraft = () => {
     setSelectedConversationId(null);
+    setPreviewImageId(null);
     setImagePrompt("");
     textareaRef.current?.focus();
   };
@@ -211,6 +241,9 @@ export default function ImagePage() {
     const nextConversations = conversations.filter((item) => item.id !== id);
     setConversations(nextConversations);
     setSelectedConversationId((prev) => (prev === id ? null : prev));
+    if (selectedConversationId === id) {
+      setPreviewImageId(null);
+    }
 
     try {
       await deleteImageConversation(id);
@@ -227,6 +260,7 @@ export default function ImagePage() {
       await clearImageConversations();
       setConversations([]);
       setSelectedConversationId(null);
+      setPreviewImageId(null);
       toast.success("已清空历史记录");
     } catch (error) {
       const message = error instanceof Error ? error.message : "清空历史记录失败";
@@ -341,6 +375,10 @@ export default function ImagePage() {
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  const handleOpenPreview = (imageId: string) => {
+    setPreviewImageId(imageId);
   };
 
   return (
@@ -471,14 +509,21 @@ export default function ImagePage() {
                         {selectedConversation.images.map((image, index) => (
                           <div key={image.id} className="break-inside-avoid overflow-hidden rounded-[22px]">
                             {image.status === "success" && image.b64_json ? (
-                              <Image
-                                src={`data:image/png;base64,${image.b64_json}`}
-                                alt={`Generated result ${index + 1}`}
-                                width={1024}
-                                height={1024}
-                                unoptimized
-                                className="block h-auto w-full"
-                              />
+                              <button
+                                type="button"
+                                onClick={() => handleOpenPreview(image.id)}
+                                className="group block w-full overflow-hidden rounded-[22px] bg-stone-100 text-left"
+                                aria-label={`预览第 ${index + 1} 张图片`}
+                              >
+                                <Image
+                                  src={`data:image/png;base64,${image.b64_json}`}
+                                  alt={`Generated result ${index + 1}`}
+                                  width={1024}
+                                  height={1024}
+                                  unoptimized
+                                  className="block h-auto w-full transition duration-200 group-hover:scale-[1.01]"
+                                />
+                              </button>
                             ) : image.status === "error" ? (
                               <div className="flex min-h-[320px] items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-600">
                                 {image.error || "生成失败"}
@@ -581,6 +626,23 @@ export default function ImagePage() {
           </div>
         </div>
       </section>
+
+      <Dialog open={Boolean(previewImage)} onOpenChange={(open) => (!open ? setPreviewImageId(null) : null)}>
+        <DialogContent className="w-[min(96vw,1120px)] border-stone-800/80 bg-stone-950 p-2 sm:p-4">
+          {previewImage ? (
+            <div className="flex items-center justify-center overflow-hidden rounded-[20px] bg-black/60">
+              <Image
+                src={previewImage.src}
+                alt={previewImage.alt}
+                width={1024}
+                height={1024}
+                unoptimized
+                className="h-auto max-h-[82vh] w-full object-contain"
+              />
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

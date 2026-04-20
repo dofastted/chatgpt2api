@@ -14,6 +14,7 @@ CONFIG_FILE = BASE_DIR / "config.json"
 @dataclass(frozen=True)
 class AppSettings:
     auth_key: str
+    admin_auth_key: str
     host: str
     port: int
     accounts_file: Path
@@ -50,6 +51,13 @@ def _load_settings() -> AppSettings:
         raise ValueError(
             "config.json must contain a non-empty 'auth-key' or CHATGPT2API_AUTH_KEY must be set"
         )
+    admin_auth_key = str(
+        os.getenv("CHATGPT2API_ADMIN_AUTH_KEY") or raw_config.get("admin-auth-key") or auth_key
+    ).strip()
+    if not admin_auth_key:
+        raise ValueError(
+            "config.json must contain a non-empty 'admin-auth-key' or CHATGPT2API_ADMIN_AUTH_KEY must be set"
+        )
 
     tls_verify = _parse_bool(
         os.getenv("CHATGPT2API_TLS_VERIFY", raw_config.get("tls-verify")),
@@ -58,6 +66,7 @@ def _load_settings() -> AppSettings:
 
     return AppSettings(
         auth_key=auth_key,
+        admin_auth_key=admin_auth_key,
         host="0.0.0.0",
         port=8000,
         accounts_file=DATA_DIR / "accounts.json",

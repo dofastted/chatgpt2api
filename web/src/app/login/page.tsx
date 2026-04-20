@@ -25,9 +25,9 @@ export default function LoginPage() {
 
     setIsSubmitting(true);
     try {
-      await login(normalizedAuthKey);
+      const session = await login(normalizedAuthKey);
       await setStoredAuthKey(normalizedAuthKey);
-      router.replace("/accounts");
+      router.replace(session.role === "admin" ? "/accounts" : "/image");
     } catch (error) {
       const message = error instanceof Error ? error.message : "登录失败";
       toast.error(message);
@@ -46,7 +46,7 @@ export default function LoginPage() {
             </div>
             <div className="space-y-2">
               <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">输入密钥后继续使用账号管理和图片生成功能。</p>
+              <p className="text-sm leading-6 text-stone-500">普通密钥可画图，管理员密钥才可进入号池管理。</p>
             </div>
           </div>
 
