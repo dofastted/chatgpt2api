@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -48,6 +49,10 @@ class UserKeyService:
             "last_used_at": self._clean_text(item.get("last_used_at")) or None,
         }
 
+    @staticmethod
+    def _now_text() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     def _load_user_keys(self) -> list[dict[str, Any]]:
         if not self.store_file.exists():
             return []
@@ -91,6 +96,68 @@ class UserKeyService:
     def list_user_keys(self) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(item) for item in self._user_keys]
+
+    def consume_quota(self, key: str, cost: int) -> dict[str, Any] | None:
+        normalized_key = self._clean_text(key)
+        normalized_cost = max(0, int(cost or 0))
+        if not normalized_key or normalized_cost <= 0:
+            return self.get_user_key(normalized_key)
+        with self._lock:
+            index = self._find_user_key_index(normalized_key)
+            if index < 0:
+                return None
+            current = dict(self._user_keys[index])
+            if current.get("status") != self.ENABLED_STATUS:
+                return None
+            quota = max(0, int(current.get("quota") or 0))
+            if quota < normalized_cost:
+                return None
+            current["quota"] = quota - normalized_cost
+            current["updated_at"] = self._now_text()
+            normalized = self._normalize_user_key(current)
+            if normalized is None:
+                return None
+            self._user_keys[index] = normalized
+            self._save_user_keys()
+            return dict(normalized)
+
+    def refund_quota(self, key: str, cost: int) -> dict[str, Any] | None:
+        normalized_key = self._clean_text(key)
+        normalized_cost = max(0, int(cost or 0))
+        if not normalized_key or normalized_cost <= 0:
+            return self.get_user_key(normalized_key)
+        with self._lock:
+            index = self._find_user_key_index(normalized_key)
+            if index < 0:
+                return None
+            current = dict(self._user_keys[index])
+            current["quota"] = max(0, int(current.get("quota") or 0)) + normalized_cost
+            current["updated_at"] = self._now_text()
+            normalized = self._normalize_user_key(current)
+            if normalized is None:
+                return None
+            self._user_keys[index] = normalized
+            self._save_user_keys()
+            return dict(normalized)
+
+    def mark_used(self, key: str) -> dict[str, Any] | None:
+        normalized_key = self._clean_text(key)
+        if not normalized_key:
+            return None
+        with self._lock:
+            index = self._find_user_key_index(normalized_key)
+            if index < 0:
+                return None
+            current = dict(self._user_keys[index])
+            now = self._now_text()
+            current["updated_at"] = now
+            current["last_used_at"] = now
+            normalized = self._normalize_user_key(current)
+            if normalized is None:
+                return None
+            self._user_keys[index] = normalized
+            self._save_user_keys()
+            return dict(normalized)
 
 
 user_key_service = UserKeyService(config.user_keys_file)

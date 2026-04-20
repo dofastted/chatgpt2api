@@ -21,11 +21,15 @@ from services.version import get_app_version
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+IMAGE_COST_MULTIPLIER = {
+    "gpt-image-1": 1,
+    "gpt-image-2": 4,
+}
 
 
 class ImageGenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
-    model: str = "gpt-4o"
+    model: str = "gpt-image-1"
     n: int = Field(default=1, ge=1, le=4)
     response_format: str = "b64_json"
     history_disabled: bool = True
@@ -97,6 +101,14 @@ def build_auth_session_payload(app_version: str, context: AuthContext) -> dict[s
         "user_key_id": context.user_key_id,
         "user_key_label": context.user_key_label,
     }
+
+
+def resolve_image_cost(model: str, n: int) -> int:
+    normalized_model = str(model or "").strip()
+    multiplier = IMAGE_COST_MULTIPLIER.get(normalized_model)
+    if multiplier is None:
+        raise HTTPException(status_code=400, detail={"error": f"unsupported image model: {normalized_model}"})
+    return max(1, int(n or 1)) * multiplier
 
 
 def build_model_item(model_id: str) -> dict[str, object]:
@@ -316,16 +328,39 @@ def create_app() -> FastAPI:
             body: ImageGenerationRequest,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        context = require_auth_key(authorization)
+        reserved_user_key = ""
+        request_cost = resolve_image_cost(body.model, body.n)
+        if context.auth_type == "user_key":
+            reserved_user_key = extract_bearer_token(authorization)
+            reserved = user_key_service.consume_quota(reserved_user_key, request_cost)
+            if reserved is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": f"quota is insufficient for this request, required={request_cost}"},
+                )
         try:
-            return await run_in_threadpool(
+            result = await run_in_threadpool(
                 service.generate_with_pool,
                 body.prompt,
                 body.model,
                 body.n,
             )
+            if reserved_user_key:
+                user_key_service.mark_used(reserved_user_key)
+            return result
         except ImageGenerationError as exc:
+            if reserved_user_key:
+                user_key_service.refund_quota(reserved_user_key, request_cost)
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        except HTTPException:
+            if reserved_user_key:
+                user_key_service.refund_quota(reserved_user_key, request_cost)
+            raise
+        except Exception:
+            if reserved_user_key:
+                user_key_service.refund_quota(reserved_user_key, request_cost)
+            raise
 
     app.include_router(router)
 

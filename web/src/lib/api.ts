@@ -128,7 +128,7 @@ export async function updateAccount(
   });
 }
 
-export async function generateImage(prompt: string, model: ImageModel = "gpt-image-1") {
+export async function generateImage(prompt: string, model: ImageModel = "gpt-image-1", n = 1) {
   return httpRequest<{ created: number; data: Array<{ b64_json: string; revised_prompt?: string }> }>(
     "/v1/images/generations",
     {
@@ -136,7 +136,7 @@ export async function generateImage(prompt: string, model: ImageModel = "gpt-ima
       body: {
         prompt,
         model,
-        n: 1,
+        n,
         response_format: "b64_json",
       },
     },
