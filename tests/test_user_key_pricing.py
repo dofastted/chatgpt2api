@@ -455,6 +455,85 @@ class UserKeyPricingTests(unittest.TestCase):
             [{"type": "input_image", "image_url": "https://example.com/source.png"}],
         )
 
+    def test_generate_image_payload_with_input_image_applies_user_key_billing(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=10,
+            prefix="uk",
+            pricing={"gpt-image-1": 2, "gpt-image-2": 6},
+        )
+        user_key = created["created_items"][0]["key"]
+        context = api.resolve_auth_context(f"Bearer {user_key}")
+        self.assertIsNotNone(context)
+        service = FakeBackendService(FakeAccountService())
+
+        async def fake_run_in_threadpool(func, *args):
+            return func(*args)
+
+        with patch.object(api, "run_in_threadpool", side_effect=fake_run_in_threadpool):
+            result, billing_payload = asyncio.run(
+                api.generate_image_payload(
+                    service=service,
+                    context=context,
+                    authorization=f"Bearer {user_key}",
+                    prompt="edit this image",
+                    model="gpt-image-2",
+                    n=1,
+                    input_images=[{"type": "input_image", "image_url": "https://example.com/source.png"}],
+                )
+            )
+
+        self.assertIsNotNone(billing_payload)
+        assert billing_payload is not None
+        self.assertEqual(billing_payload["requested_model"], "gpt-image-2")
+        self.assertEqual(billing_payload["unit_cost"], 6)
+        self.assertEqual(billing_payload["charged_quota"], 6)
+        self.assertEqual(billing_payload["remaining_quota"], 4)
+        self.assertEqual(result["billing"]["charged_quota"], 6)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        self.assertEqual(current_item["quota"], 4)
+        self.assertEqual(
+            FakeBackendService.last_call["input_images"],
+            [{"type": "input_image", "image_url": "https://example.com/source.png"}],
+        )
+
+    def test_generate_image_payload_with_input_image_refunds_user_key_on_failure(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=9,
+            prefix="uk",
+            pricing={"gpt-image-1": 3, "gpt-image-2": 6},
+        )
+        user_key = created["created_items"][0]["key"]
+        context = api.resolve_auth_context(f"Bearer {user_key}")
+        self.assertIsNotNone(context)
+        service = FakeBackendService(FakeAccountService())
+        FakeBackendService.error = ImageGenerationError("upstream failed")
+
+        async def fake_run_in_threadpool(func, *args):
+            return func(*args)
+
+        with patch.object(api, "run_in_threadpool", side_effect=fake_run_in_threadpool):
+            with self.assertRaises(api.HTTPException) as raised:
+                asyncio.run(
+                    api.generate_image_payload(
+                        service=service,
+                        context=context,
+                        authorization=f"Bearer {user_key}",
+                        prompt="edit this image",
+                        model="gpt-image-1",
+                        n=2,
+                        input_images=[{"type": "input_image", "image_url": "https://example.com/source.png"}],
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(raised.exception.detail["error"], "upstream failed")
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        self.assertEqual(current_item["quota"], 9)
+
     def test_responses_alias_supports_multiple_images(self) -> None:
         result = {
             "created": 123,
@@ -527,6 +606,31 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(completed_payload["response"]["billing"]["charged_quota"], 8)
         self.assertEqual(completed_payload["response"]["output"][0]["result"], "ZmFrZQ==")
 
+        self.assertEqual(events[-1], (None, "[DONE]"))
+
+    def test_response_stream_with_input_image_result_still_emits_completed_and_done_marker(self) -> None:
+        payload = api.build_responses_payload(
+            response_id="resp_stream_input_image",
+            response_model="gpt-5",
+            image_result={
+                "created": 123,
+                "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
+            },
+            billing={
+                "requested_model": "gpt-image-1",
+                "unit_cost": 3,
+                "charged_quota": 3,
+                "remaining_quota": 6,
+            },
+            metadata={"input_image": "true"},
+        )
+        stream_content = b"".join(api.iter_responses_stream(payload)).decode("utf-8")
+        events = self.collect_sse_events(stream_content)
+
+        completed_events = [payload for event, payload in events if event == "response.completed"]
+        self.assertEqual(len(completed_events), 1)
+        self.assertEqual(completed_events[0]["response"]["billing"]["charged_quota"], 3)
+        self.assertEqual(completed_events[0]["response"]["metadata"]["input_image"], "true")
         self.assertEqual(events[-1], (None, "[DONE]"))
 
     def test_image_generation_stream_emits_completed_and_done_marker(self) -> None:
