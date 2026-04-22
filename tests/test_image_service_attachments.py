@@ -1,0 +1,304 @@
+from __future__ import annotations
+
+import base64
+import sys
+import unittest
+from io import BytesIO
+from unittest.mock import patch
+
+sys.modules.setdefault("pybase64", base64)
+
+from services import image_service
+from PIL import Image, ImageDraw
+
+
+class FakeSession:
+    def close(self) -> None:
+        return None
+
+    def post(self, *_args, **_kwargs):
+        raise AssertionError("unexpected post call")
+
+    def put(self, *_args, **_kwargs):
+        raise AssertionError("unexpected put call")
+
+    def get(self, *_args, **_kwargs):
+        raise AssertionError("unexpected get call")
+
+
+class ImageServiceAttachmentTests(unittest.TestCase):
+    def test_build_uploaded_input_image_supports_data_url(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+
+        class Response:
+            def __init__(self, *, ok: bool = True, payload: dict | None = None, status_code: int = 200, text: str = ""):
+                self.ok = ok
+                self._payload = payload or {}
+                self.status_code = status_code
+                self.text = text
+
+            def json(self) -> dict:
+                return dict(self._payload)
+
+        class Session(FakeSession):
+            def __init__(self) -> None:
+                self.post_calls: list[tuple[str, dict | None]] = []
+                self.put_calls: list[tuple[str, bytes, dict[str, str] | None]] = []
+
+            def post(self, url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 60) -> Response:
+                del headers, timeout
+                self.post_calls.append((url, json))
+                if url.endswith("/backend-api/files"):
+                    return Response(payload={"file_id": "file-upload-1", "upload_url": "https://upload.example.com/blob"})
+                if url.endswith("/backend-api/files/file-upload-1/uploaded"):
+                    return Response(payload={"status": "success"})
+                raise AssertionError(f"unexpected post url: {url}")
+
+            def put(
+                self,
+                url: str,
+                data: bytes | None = None,
+                headers: dict[str, str] | None = None,
+                timeout: int = 120,
+            ) -> Response:
+                del timeout
+                self.put_calls.append((url, data or b"", headers))
+                return Response(status_code=201)
+
+        session = Session()
+        uploaded = image_service._build_uploaded_input_image(
+            session,
+            "token-123",
+            "device-1",
+            "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii"),
+        )
+
+        self.assertEqual(uploaded.file_id, "file-upload-1")
+        self.assertEqual(uploaded.mime_type, "image/png")
+        self.assertEqual(uploaded.size_bytes, len(png_bytes))
+        self.assertEqual(uploaded.width, 1)
+        self.assertEqual(uploaded.height, 1)
+        self.assertEqual(session.post_calls[0][0], "https://chatgpt.com/backend-api/files")
+        self.assertEqual(session.post_calls[0][1]["use_case"], "multimodal")
+        self.assertEqual(session.put_calls[0][0], "https://upload.example.com/blob")
+        self.assertEqual(session.put_calls[0][1], png_bytes)
+        self.assertEqual(session.put_calls[0][2]["content-type"], "image/png")
+
+    def test_build_conversation_message_uses_multimodal_text_with_attachment(self) -> None:
+        with patch.object(
+            image_service,
+            "_build_uploaded_input_image",
+            return_value=image_service.UploadedInputImage(
+                file_id="file-input-1",
+                file_name="input.png",
+                mime_type="image/png",
+                size_bytes=321,
+                width=512,
+                height=256,
+            ),
+        ):
+            message = image_service._build_conversation_message(
+                FakeSession(),
+                "token-123",
+                "device-1",
+                "edit this image",
+                input_images=[{"type": "input_image", "image_url": "https://example.com/source.png"}],
+            )
+
+        self.assertEqual(message["author"]["role"], "user")
+        self.assertEqual(message["content"]["content_type"], "multimodal_text")
+        self.assertEqual(message["content"]["parts"][0], "edit this image")
+        self.assertEqual(message["content"]["parts"][1]["asset_pointer"], "file-service://file-input-1")
+        self.assertEqual(message["metadata"]["attachments"][0]["id"], "file-input-1")
+        self.assertEqual(message["metadata"]["attachments"][0]["mimeType"], "image/png")
+
+    def test_build_conversation_message_surfaces_upload_failure(self) -> None:
+        with patch.object(
+            image_service,
+            "_build_uploaded_input_image",
+            side_effect=image_service.ImageGenerationError("failed to fetch input image"),
+        ):
+            with self.assertRaises(image_service.ImageGenerationError) as raised:
+                image_service._build_conversation_message(
+                    FakeSession(),
+                    "token-123",
+                    "device-1",
+                    "edit this image",
+                    input_images=[{"type": "input_image", "image_url": "https://example.com/source.png"}],
+                )
+
+        self.assertEqual(str(raised.exception), "failed to fetch input image")
+
+    def test_gpt_image_2_uses_real_upstream_model(self) -> None:
+        upstream_model, reasoning_effort = image_service._resolve_upstream_target("token-123", "gpt-image-2")
+
+        self.assertEqual(upstream_model, "gpt-image-2")
+        self.assertIsNone(reasoning_effort)
+
+    def test_needs_text_render_retry_detects_oversized_or_unbalanced_text(self) -> None:
+        good = Image.new("RGB", (512, 512), "black")
+        good_draw = ImageDraw.Draw(good)
+        good_draw.rectangle((120, 205, 392, 295), fill="white")
+        good_bytes = BytesIO()
+        good.save(good_bytes, format="PNG")
+
+        bad = Image.new("RGB", (512, 512), "black")
+        bad_draw = ImageDraw.Draw(bad)
+        bad_draw.rectangle((36, 200, 476, 368), fill="white")
+        bad_bytes = BytesIO()
+        bad.save(bad_bytes, format="PNG")
+
+        prompt = "black background with white letters ABCD"
+        self.assertFalse(image_service._needs_text_render_retry(prompt, good_bytes.getvalue()))
+        self.assertTrue(image_service._needs_text_render_retry(prompt, bad_bytes.getvalue()))
+
+    def test_needs_text_render_retry_detects_extra_artifact_blocks(self) -> None:
+        image = Image.new("RGB", (512, 512), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((120, 205, 392, 295), fill="white")
+        draw.rectangle((160, 350, 230, 382), fill="white")
+        image_bytes = BytesIO()
+        image.save(image_bytes, format="PNG")
+
+        prompt = "black background with white letters ABCD"
+        self.assertTrue(image_service._needs_text_render_retry(prompt, image_bytes.getvalue()))
+
+    def test_refine_prompt_for_text_rendering_only_applies_to_text_prompts(self) -> None:
+        plain_prompt = "a red apple on a wooden table"
+        text_prompt = "black background with white letters ABCD"
+
+        self.assertEqual(image_service._refine_prompt_for_text_rendering(plain_prompt), plain_prompt)
+        refined = image_service._refine_prompt_for_text_rendering(text_prompt)
+        self.assertIn("Keep one centered line only", refined)
+        self.assertIn("No blur, glow, bloom", refined)
+        self.assertTrue(refined.startswith(text_prompt))
+
+    def test_generate_image_result_returns_all_upstream_attachments(self) -> None:
+        with (
+            patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),
+            patch.object(image_service, "_resolve_upstream_target", return_value=("auto", None)),
+            patch.object(image_service, "_bootstrap", return_value="device-1"),
+            patch.object(image_service, "_chat_requirements", return_value=("chat-token", {})),
+            patch.object(image_service, "_send_conversation", return_value=object()),
+            patch.object(
+                image_service,
+                "_parse_sse",
+                return_value={
+                    "conversation_id": "conv-1",
+                    "file_ids": ["file-1", "file-2"],
+                    "text": "",
+                },
+            ),
+            patch.object(image_service, "_fetch_download_url", side_effect=["https://example.com/1", "https://example.com/2"]),
+            patch.object(
+                image_service,
+                "_download_image_payload",
+                side_effect=[
+                    ("aW1hZ2UtMQ==", "image/png"),
+                    ("aW1hZ2UtMg==", "image/webp"),
+                ],
+            ),
+        ):
+            payload = image_service.generate_image_result("token-123", "draw two apples", model="gpt-image-1", n=1)
+
+        self.assertEqual(len(payload["data"]), 2)
+        self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtMQ==")
+        self.assertEqual(payload["data"][0]["mime_type"], "image/png")
+        self.assertEqual(payload["data"][1]["b64_json"], "aW1hZ2UtMg==")
+        self.assertEqual(payload["data"][1]["mime_type"], "image/webp")
+
+    def test_generate_image_result_retries_when_sse_stream_breaks_once(self) -> None:
+        parse_calls = {"count": 0}
+
+        def parse_once_then_succeed(_response: object) -> dict[str, object]:
+            parse_calls["count"] += 1
+            if parse_calls["count"] == 1:
+                raise Exception("curl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR (err 2)")
+            return {
+                "conversation_id": "conv-2",
+                "file_ids": ["file-3"],
+                "text": "",
+            }
+
+        with (
+            patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),
+            patch.object(image_service, "_resolve_upstream_target", return_value=("auto", None)),
+            patch.object(image_service, "_bootstrap", return_value="device-1"),
+            patch.object(image_service, "_chat_requirements", return_value=("chat-token", {})),
+            patch.object(image_service, "_send_conversation", return_value=object()),
+            patch.object(image_service, "_parse_sse", side_effect=parse_once_then_succeed),
+            patch.object(image_service, "_fetch_download_url", return_value="https://example.com/3"),
+            patch.object(image_service, "_download_image_payload", return_value=("aW1hZ2UtMw==", "image/png")),
+        ):
+            payload = image_service.generate_image_result("token-123", "draw ABCD", model="gpt-image-1", n=1)
+
+        self.assertEqual(parse_calls["count"], 2)
+        self.assertEqual(len(payload["data"]), 1)
+        self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtMw==")
+
+    def test_generate_image_result_retries_when_text_render_quality_is_rejected_once(self) -> None:
+        with (
+            patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),
+            patch.object(image_service, "_resolve_upstream_target", return_value=("auto", None)),
+            patch.object(image_service, "_bootstrap", return_value="device-1"),
+            patch.object(image_service, "_chat_requirements", return_value=("chat-token", {})),
+            patch.object(image_service, "_send_conversation", return_value=object()),
+            patch.object(
+                image_service,
+                "_parse_sse",
+                return_value={
+                    "conversation_id": "conv-3",
+                    "file_ids": ["file-4"],
+                    "text": "",
+                },
+            ),
+            patch.object(
+                image_service,
+                "_download_generated_images",
+                side_effect=[
+                    image_service.ImageGenerationError("low quality text render for file: file-4"),
+                    [
+                        image_service.GeneratedImage(
+                            b64_json="aW1hZ2UtNA==",
+                            revised_prompt="draw ABCD",
+                            mime_type="image/png",
+                        )
+                    ],
+                ],
+            ) as download_mock,
+        ):
+            payload = image_service.generate_image_result("token-123", "draw white letters ABCD", model="gpt-image-1", n=1)
+
+        self.assertEqual(download_mock.call_count, 2)
+        self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtNA==")
+
+    def test_download_image_payload_retries_until_content_arrives(self) -> None:
+        class Response:
+            def __init__(self, ok: bool, content: bytes, content_type: str = "image/png") -> None:
+                self.ok = ok
+                self.content = content
+                self.headers = {"content-type": content_type}
+                self.status_code = 200 if ok else 502
+
+        class Session:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get(self, _url: str, timeout: int = 60) -> Response:
+                self.calls += 1
+                if self.calls < 3:
+                    return Response(False, b"")
+                return Response(True, b"\x89PNG\r\n\x1a\nrest")
+
+        session = Session()
+        payload, mime_type = image_service._download_image_payload(session, "https://example.com/image.png")
+
+        self.assertEqual(session.calls, 3)
+        self.assertEqual(mime_type, "image/png")
+        self.assertEqual(base64.b64decode(payload), b"\x89PNG\r\n\x1a\nrest")
+
+
+if __name__ == "__main__":
+    unittest.main()

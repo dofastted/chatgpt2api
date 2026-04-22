@@ -3,7 +3,13 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 from services.account_service import AccountService
-from services.image_service import ImageGenerationError, generate_image_result, is_token_invalid_error
+from services.image_service import (
+    ImageGenerationError,
+    generate_image_result,
+    is_low_quality_image_error,
+    is_transient_image_error,
+    is_token_invalid_error,
+)
 
 
 class BackendService:
@@ -41,7 +47,13 @@ class BackendService:
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
 
-    def generate_with_pool(self, prompt: str, model: str, n: int):
+    def generate_with_pool(
+        self,
+        prompt: str,
+        model: str,
+        n: int,
+        input_images: list[dict[str, str]] | None = None,
+    ):
         attempted_tokens: set[str] = set()
 
         while True:
@@ -62,7 +74,13 @@ class BackendService:
 
             print(f"[image-generate] start pooled token={request_token[:12]}... model={model} n={n}")
             try:
-                result = generate_image_result(request_token, prompt, model, n)
+                result = generate_image_result(
+                    request_token,
+                    prompt,
+                    model,
+                    n,
+                    input_images=input_images,
+                )
                 account = self.account_service.mark_image_result(request_token, success=True)
                 print(
                     f"[image-generate] success pooled token={request_token[:12]}... "
@@ -78,5 +96,11 @@ class BackendService:
                 if is_token_invalid_error(str(exc)):
                     self.account_service.remove_token(request_token)
                     print(f"[image-generate] remove invalid token={request_token[:12]}...")
+                    continue
+                if is_low_quality_image_error(str(exc)):
+                    print(f"[image-generate] skip low quality token={request_token[:12]}...")
+                    continue
+                if is_transient_image_error(str(exc)):
+                    print(f"[image-generate] skip transient failure token={request_token[:12]}...")
                     continue
                 raise

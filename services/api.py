@@ -279,6 +279,7 @@ async def generate_image_payload(
         prompt: str,
         model: str,
         n: int,
+        input_images: list[dict[str, str]] | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     reserved_user_key = ""
     request_cost = 0
@@ -302,6 +303,7 @@ async def generate_image_payload(
             prompt,
             model,
             n,
+            input_images,
         )
         billing_payload = None
         if reserved_user_key:
@@ -797,7 +799,7 @@ def create_app() -> FastAPI:
                 detail={"error": "responses request must include an image_generation tool"},
             )
         validate_responses_tool_choice(body.tool_choice)
-        validate_responses_input_images(body.input)
+        input_images = validate_responses_input_images(body.input)
         prompt = extract_responses_prompt(body.input)
         await wait_for_image_request_turn(extract_bearer_token(authorization))
 
@@ -812,6 +814,7 @@ def create_app() -> FastAPI:
             prompt=prompt,
             model=requested_model,
             n=body.n,
+            input_images=input_images,
         )
         response_id = f"resp_{uuid4().hex}"
         payload = build_responses_payload(

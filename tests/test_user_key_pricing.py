@@ -46,11 +46,24 @@ class FakeBackendService:
         "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
     }
     error: Exception | None = None
+    last_call: dict[str, object] | None = None
 
     def __init__(self, account_service: FakeAccountService):
         self.account_service = account_service
 
-    def generate_with_pool(self, prompt: str, model: str, n: int) -> dict:
+    def generate_with_pool(
+        self,
+        prompt: str,
+        model: str,
+        n: int,
+        input_images: list[dict[str, str]] | None = None,
+    ) -> dict:
+        self.__class__.last_call = {
+            "prompt": prompt,
+            "model": model,
+            "n": n,
+            "input_images": [dict(item) for item in list(input_images or [])],
+        }
         if self.error is not None:
             raise self.error
         return {
@@ -71,6 +84,7 @@ class UserKeyPricingTests(unittest.TestCase):
         if self.user_keys_file.exists():
             self.user_keys_file.unlink()
         FakeBackendService.error = None
+        FakeBackendService.last_call = None
         FakeBackendService.response = {
             "created": 123,
             "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
@@ -410,6 +424,34 @@ class UserKeyPricingTests(unittest.TestCase):
 
         self.assertEqual(
             image_inputs,
+            [{"type": "input_image", "image_url": "https://example.com/source.png"}],
+        )
+
+    def test_generate_image_payload_passes_input_image_to_backend_generation(self) -> None:
+        service = FakeBackendService(FakeAccountService())
+
+        async def fake_run_in_threadpool(func, *args):
+            return func(*args)
+
+        with patch.object(api, "run_in_threadpool", side_effect=fake_run_in_threadpool):
+            result, billing_payload = asyncio.run(
+                api.generate_image_payload(
+                    service=service,
+                    context=api.AuthContext(role="user", auth_type="auth_key"),
+                    authorization=f"Bearer {api.config.auth_key}",
+                    prompt="edit this image",
+                    model="gpt-image-1",
+                    n=1,
+                    input_images=[{"type": "input_image", "image_url": "https://example.com/source.png"}],
+                )
+            )
+
+        self.assertEqual(result["data"][0]["b64_json"], "ZmFrZQ==")
+        self.assertIsNone(billing_payload)
+        self.assertIsNotNone(FakeBackendService.last_call)
+        assert FakeBackendService.last_call is not None
+        self.assertEqual(
+            FakeBackendService.last_call["input_images"],
             [{"type": "input_image", "image_url": "https://example.com/source.png"}],
         )
 
