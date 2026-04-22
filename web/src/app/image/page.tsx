@@ -15,6 +15,7 @@ import {
   listImageConversations,
   saveImageConversation,
   type ImageConversation,
+  type StoredInputImage,
   type StoredImage,
 } from "@/store/image-conversations";
 import { getStoredAuthKey } from "@/store/auth";
@@ -419,12 +420,24 @@ export default function ImagePage() {
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const draftInputImage: StoredInputImage | null = currentInputImage
+      ? {
+          id: currentInputImage.id,
+          fileName: currentInputImage.fileName,
+          dataUrl: currentInputImage.dataUrl,
+          mimeType: currentInputImage.dataUrl.startsWith("data:")
+            ? currentInputImage.dataUrl.slice(5).split(";", 1)[0].trim() || "image/png"
+            : "image/png",
+          sizeBytes: currentInputImage.sizeBytes,
+        }
+      : null;
     const draftConversation: ImageConversation = {
       id: conversationId,
       title: buildConversationTitle(prompt),
       prompt,
       model: imageModel,
       count: parsedCount,
+      inputImage: draftInputImage,
       images: Array.from({ length: parsedCount }, (_, index) => ({
         id: `${conversationId}-${index}`,
         status: "loading" as const,
@@ -677,8 +690,22 @@ export default function ImagePage() {
             ) : (
               <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5">
                 <div className="flex justify-end">
-                  <div className="max-w-[80%] px-1 pt-1 text-right text-[15px] leading-8 text-stone-700">
-                    {selectedConversation.prompt}
+                  <div className="flex max-w-[80%] flex-col items-end gap-3">
+                    {selectedConversation.inputImage ? (
+                      <div className="overflow-hidden rounded-[18px] border border-stone-200 bg-white shadow-sm">
+                        <img
+                          src={selectedConversation.inputImage.dataUrl}
+                          alt={selectedConversation.inputImage.fileName || "参考图"}
+                          className="block h-28 w-28 object-cover"
+                        />
+                        <div className="border-t border-stone-100 px-3 py-2 text-[11px] text-stone-500">
+                          {selectedConversation.inputImage.fileName || "参考图"}
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="px-1 pt-1 text-right text-[15px] leading-8 text-stone-700">
+                      {selectedConversation.prompt}
+                    </div>
                   </div>
                 </div>
 
