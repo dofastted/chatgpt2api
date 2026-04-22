@@ -1,20 +1,12 @@
 "use client";
 
-import Image from "next/image";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, ArrowUp, Download, LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { ArrowLeft, ArrowRight, ArrowUp, Download, ImagePlus, LoaderCircle, MessageSquarePlus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { buildImageDataUrl, detectImageFileExtension, detectImageMimeType } from "@/lib/image-data";
 import { Textarea } from "@/components/ui/textarea";
 import { fetchQuotaSummary, generateImage, type ImageModel } from "@/lib/api";
 import {
@@ -25,12 +17,25 @@ import {
   type ImageConversation,
   type StoredImage,
 } from "@/store/image-conversations";
+import { getStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
-const imageModelOptions: Array<{ label: string; value: ImageModel }> = [
-  { label: "gpt-image-1", value: "gpt-image-1" },
-  { label: "gpt-image-2", value: "gpt-image-2" },
-];
+const imageModelMeta: Record<ImageModel, { helperText: string }> = {
+  "gpt-image-1": {
+    helperText: "当前直接走标准生图链路。",
+  },
+  "gpt-image-2": {
+    helperText: "当前直接走真实 gpt-image-2 生图链路。",
+  },
+};
+
+const DEFAULT_IMAGE_PRICING: Record<ImageModel, number> = {
+  "gpt-image-1": 1,
+  "gpt-image-2": 4,
+};
+const MAX_IMAGES_PER_REQUEST = 2;
+const IMAGE_COUNT_OPTIONS = Array.from({ length: MAX_IMAGES_PER_REQUEST }, (_, index) => String(index + 1));
+const MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024;
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -53,10 +58,11 @@ function formatConversationTime(value: string) {
   }).format(date);
 }
 
-function downloadBase64Image(base64: string, fileName: string) {
+function downloadBase64Image(base64: string, fileName: string, mimeType?: string) {
   const binary = window.atob(base64);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  const blob = new Blob([bytes], { type: "image/png" });
+  const resolvedMimeType = String(mimeType || "").trim() || detectImageMimeType(base64);
+  const blob = new Blob([bytes], { type: resolvedMimeType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -71,9 +77,42 @@ type PreviewableImage = {
   src: string;
   alt: string;
   b64Json: string;
+  mimeType: string;
 };
 
-async function normalizeConversationHistory(items: ImageConversation[]) {
+type PendingInputImage = {
+  id: string;
+  fileName: string;
+  dataUrl: string;
+  sizeBytes: number;
+};
+
+function formatInputImageSize(sizeBytes: number) {
+  if (sizeBytes >= 1024 * 1024) {
+    return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      if (!result) {
+        reject(new Error("读取图片失败"));
+        return;
+      }
+      resolve(result);
+    };
+    reader.onerror = () => {
+      reject(new Error("读取图片失败"));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function normalizeConversationHistory(items: ImageConversation[], scope: string) {
   const normalized = items.map((item) =>
     item.status === "generating"
       ? {
@@ -98,7 +137,7 @@ async function normalizeConversationHistory(items: ImageConversation[]) {
   await Promise.all(
     normalized
       .filter((item, index) => item !== items[index])
-      .map((item) => saveImageConversation(item)),
+      .map((item) => saveImageConversation(scope, item)),
   );
 
   return normalized;
@@ -112,14 +151,26 @@ export default function ImagePage() {
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
+  const [conversationScope, setConversationScope] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [inputImage, setInputImage] = useState<PendingInputImage | null>(null);
   const [availableQuota, setAvailableQuota] = useState<number | null>(null);
+  const [currentPricing, setCurrentPricing] = useState<Record<ImageModel, number> | null>(null);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputImageRef = useRef<HTMLInputElement>(null);
 
-  const parsedCount = useMemo(() => Math.max(1, Math.min(4, Number(imageCount) || 1)), [imageCount]);
-  const requestCost = useMemo(() => parsedCount * (imageModel === "gpt-image-2" ? 4 : 1), [imageModel, parsedCount]);
+  const parsedCount = useMemo(
+    () => Math.max(1, Math.min(MAX_IMAGES_PER_REQUEST, Number(imageCount) || 1)),
+    [imageCount],
+  );
+  const effectivePricing = useMemo(
+    () => currentPricing || DEFAULT_IMAGE_PRICING,
+    [currentPricing],
+  );
+  const currentUnitCost = useMemo(() => Math.max(0, Number(effectivePricing[imageModel] || 0)), [effectivePricing, imageModel]);
+  const requestCost = useMemo(() => parsedCount * currentUnitCost, [currentUnitCost, parsedCount]);
   const isQuotaInsufficient = useMemo(
     () => availableQuota !== null && requestCost > Math.max(0, availableQuota),
     [availableQuota, requestCost],
@@ -137,9 +188,10 @@ export default function ImagePage() {
               {
                 id: image.id,
                 originalIndex: index,
-                src: `data:image/png;base64,${image.b64_json}`,
+                src: buildImageDataUrl(image.b64_json, image.mimeType),
                 alt: `Generated result ${index + 1}`,
                 b64Json: image.b64_json,
+                mimeType: String(image.mimeType || "").trim() || detectImageMimeType(image.b64_json),
               },
             ]
           : [],
@@ -161,10 +213,39 @@ export default function ImagePage() {
   useEffect(() => {
     let cancelled = false;
 
-    const loadHistory = async () => {
+    const loadScope = async () => {
       try {
-        const items = await listImageConversations();
-        const normalizedItems = await normalizeConversationHistory(items);
+        const authKey = await getStoredAuthKey();
+        if (!cancelled) {
+          setConversationScope(String(authKey || "").trim() || "__anonymous__");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setConversationScope("__anonymous__");
+        }
+      }
+    };
+
+    void loadScope();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (conversationScope === null) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadHistory = async () => {
+      setIsLoadingHistory(true);
+      setSelectedConversationId(null);
+      setPreviewImageId(null);
+      try {
+        const items = await listImageConversations(conversationScope);
+        const normalizedItems = await normalizeConversationHistory(items, conversationScope);
         if (cancelled) {
           return;
         }
@@ -183,14 +264,23 @@ export default function ImagePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [conversationScope]);
 
   const loadQuota = useCallback(async () => {
     try {
       const data = await fetchQuotaSummary();
       setAvailableQuota(Math.max(0, Number(data.available_quota || 0)));
+      if (data.pricing) {
+        setCurrentPricing({
+          "gpt-image-1": Math.max(0, Number(data.pricing["gpt-image-1"] || 0)),
+          "gpt-image-2": Math.max(0, Number(data.pricing["gpt-image-2"] || 0)),
+        });
+      } else {
+        setCurrentPricing(null);
+      }
     } catch {
       setAvailableQuota(null);
+      setCurrentPricing(null);
     }
   }, []);
 
@@ -232,17 +322,23 @@ export default function ImagePage() {
   }, [selectedConversation, isGenerating]);
 
   const persistConversation = async (conversation: ImageConversation) => {
+    if (!conversationScope) {
+      return;
+    }
     setConversations((prev) => {
       const next = [conversation, ...prev.filter((item) => item.id !== conversation.id)];
       return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     });
-    await saveImageConversation(conversation);
+    await saveImageConversation(conversationScope, conversation);
   };
 
   const updateConversation = async (
     conversationId: string,
     updater: (current: ImageConversation | null) => ImageConversation,
   ) => {
+    if (!conversationScope) {
+      return;
+    }
     let nextConversation: ImageConversation | null = null;
 
     setConversations((prev) => {
@@ -253,7 +349,7 @@ export default function ImagePage() {
     });
 
     if (nextConversation) {
-      await saveImageConversation(nextConversation);
+      await saveImageConversation(conversationScope, nextConversation);
     }
   };
 
@@ -261,6 +357,7 @@ export default function ImagePage() {
     setSelectedConversationId(null);
     setPreviewImageId(null);
     setImagePrompt("");
+    setInputImage(null);
     textareaRef.current?.focus();
   };
 
@@ -273,18 +370,24 @@ export default function ImagePage() {
     }
 
     try {
-      await deleteImageConversation(id);
+      if (!conversationScope) {
+        return;
+      }
+      await deleteImageConversation(conversationScope, id);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除会话失败";
       toast.error(message);
-      const items = await listImageConversations();
+      const items = conversationScope ? await listImageConversations(conversationScope) : [];
       setConversations(items);
     }
   };
 
   const handleClearHistory = async () => {
     try {
-      await clearImageConversations();
+      if (!conversationScope) {
+        return;
+      }
+      await clearImageConversations(conversationScope);
       setConversations([]);
       setSelectedConversationId(null);
       setPreviewImageId(null);
@@ -296,7 +399,12 @@ export default function ImagePage() {
   };
 
   const handleGenerateImage = async () => {
+    if (!conversationScope) {
+      toast.error("当前登录信息还在初始化，请稍后再试");
+      return;
+    }
     const prompt = imagePrompt.trim();
+    const currentInputImage = inputImage;
     if (!prompt) {
       toast.error("请输入提示词");
       return;
@@ -328,12 +436,18 @@ export default function ImagePage() {
     setIsGenerating(true);
     setSelectedConversationId(conversationId);
     setImagePrompt("");
+    setInputImage(null);
 
     try {
       await persistConversation(draftConversation);
 
-      const data = await generateImage(prompt, imageModel, parsedCount);
+      const data = await generateImage(prompt, imageModel, parsedCount, {
+        inputImageUrl: currentInputImage?.dataUrl,
+      });
       const returnedItems = Array.isArray(data.data) ? data.data : [];
+      if (data.billing) {
+        setAvailableQuota(Math.max(0, Number(data.billing.remaining_quota || 0)));
+      }
       const nextImages: StoredImage[] = Array.from({ length: parsedCount }, (_, index) => {
         const current = returnedItems[index];
         if (current?.b64_json) {
@@ -341,6 +455,7 @@ export default function ImagePage() {
             id: `${conversationId}-${index}`,
             status: "success",
             b64_json: current.b64_json,
+            mimeType: String(current.mime_type || "").trim() || detectImageMimeType(current.b64_json),
           };
         }
         return {
@@ -383,6 +498,49 @@ export default function ImagePage() {
     }
   };
 
+  const handleOpenInputImagePicker = () => {
+    inputImageRef.current?.click();
+  };
+
+  const handleRemoveInputImage = () => {
+    setInputImage(null);
+    if (inputImageRef.current) {
+      inputImageRef.current.value = "";
+    }
+  };
+
+  const handleInputImageChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    if (!String(file.type || "").startsWith("image/")) {
+      toast.error("只支持上传图片文件");
+      return;
+    }
+    if (file.size > MAX_INPUT_IMAGE_BYTES) {
+      toast.error("图片不能超过 8 MB");
+      return;
+    }
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const imageId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      setInputImage({
+        id: imageId,
+        fileName: file.name,
+        dataUrl,
+        sizeBytes: file.size,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "读取图片失败";
+      toast.error(message);
+    }
+  };
+
   const handleOpenPreview = (imageId: string) => {
     setPreviewImageId(imageId);
   };
@@ -402,7 +560,12 @@ export default function ImagePage() {
     if (!previewImage) {
       return;
     }
-    downloadBase64Image(previewImage.b64Json, `image-${Date.now()}-${previewImageIndex + 1}.png`);
+    const ext = detectImageFileExtension(previewImage.b64Json, previewImage.mimeType);
+    downloadBase64Image(
+      previewImage.b64Json,
+      `image-${Date.now()}-${previewImageIndex + 1}.${ext}`,
+      previewImage.mimeType,
+    );
   };
 
   return (
@@ -428,7 +591,28 @@ export default function ImagePage() {
               </Button>
             </div>
 
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+            <div className="rounded-[22px] border border-stone-200/80 bg-white px-4 py-4 shadow-[0_12px_30px_rgba(0,0,0,0.03)]">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-400">生成信息</div>
+              <div className="mt-4 space-y-2 text-xs text-stone-500">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-stone-400">当前模型</span>
+                  <span className="font-medium text-stone-900">{imageModel}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-stone-400">剩余额度</span>
+                  <span className="font-medium text-stone-900">{availableQuotaLabel}</span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-stone-400">本次消耗</span>
+                  <span className="font-medium text-stone-900">{requestCost} 次</span>
+                </div>
+              </div>
+              <p className="mt-4 text-[11px] leading-5 text-stone-400">{currentUnitCost} / 张</p>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-400">对话记录</div>
+              <div className="space-y-2">
               {isLoadingHistory ? (
                 <div className="flex items-center gap-2 px-2 py-3 text-sm text-stone-500">
                   <LoaderCircle className="size-4 animate-spin" />
@@ -436,7 +620,7 @@ export default function ImagePage() {
                 </div>
               ) : conversations.length === 0 ? (
                 <div className="px-2 py-3 text-sm leading-6 text-stone-500">
-                  还没有图片记录，输入提示词后会在这里显示。
+                  暂无记录
                 </div>
               ) : (
                 conversations.map((conversation) => {
@@ -473,6 +657,7 @@ export default function ImagePage() {
                   );
                 })
               )}
+              </div>
             </div>
           </div>
         </aside>
@@ -485,23 +670,8 @@ export default function ImagePage() {
             {!selectedConversation ? (
               <div className="flex h-full min-h-[420px] items-center justify-center text-center">
                 <div className="w-full max-w-4xl">
-                  <h1
-                    className="text-3xl font-semibold tracking-tight text-stone-950 md:text-5xl"
-                    style={{
-                      fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
-                    }}
-                  >
-                    Turn ideas into images
-
-                  </h1>
-                  <p
-                    className="mt-4 text-[15px] italic tracking-[0.01em] text-stone-500"
-                    style={{
-                      fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
-                    }}
-                  >
-                    Describe a scene, a mood, or a character, and let the next image start here.
-                  </p>
+                  <h1 className="text-3xl font-semibold tracking-tight text-stone-950 md:text-5xl">生成图片</h1>
+                  <p className="mt-4 text-[15px] text-stone-500">输入提示词即可开始。</p>
                 </div>
               </div>
             ) : (
@@ -539,12 +709,10 @@ export default function ImagePage() {
                                 className="group block w-full overflow-hidden rounded-[22px] bg-stone-100 text-left"
                                 aria-label={`预览第 ${index + 1} 张图片`}
                               >
-                                <Image
-                                  src={`data:image/png;base64,${image.b64_json}`}
+                                <img
+                                  src={buildImageDataUrl(image.b64_json, image.mimeType)}
                                   alt={`Generated result ${index + 1}`}
-                                  width={1024}
-                                  height={1024}
-                                  unoptimized
+                                  loading="lazy"
                                   className="block h-auto w-full transition duration-200 group-hover:scale-[1.01]"
                                 />
                               </button>
@@ -578,84 +746,157 @@ export default function ImagePage() {
 
           <div className="shrink-0 flex justify-center">
             <div
-              className="overflow-hidden rounded-[32px] border border-stone-200/80 bg-white shadow-[0_18px_48px_rgba(28,25,23,0.08)]"
-              style={{ width: "min(980px, 100%)" }}
+              className="w-full max-w-[980px] rounded-[24px] border border-stone-200/80 bg-white shadow-[0_0.25rem_1.25rem_rgba(0,0,0,0.04),0_0_0_0.5px_rgba(214,211,209,0.52)] transition-shadow duration-200 hover:shadow-[0_0.25rem_1.25rem_rgba(0,0,0,0.06),0_0_0_0.5px_rgba(214,211,209,0.72)] focus-within:shadow-[0_0.25rem_1.25rem_rgba(0,0,0,0.08),0_0_0_0.5px_rgba(214,211,209,0.88)]"
             >
               <div
-                className="relative cursor-text"
+                className="cursor-text px-4 pt-4 pb-3 sm:px-5"
                 onClick={() => {
                   textareaRef.current?.focus();
                 }}
               >
-                <Textarea
-                  ref={textareaRef}
-                  value={imagePrompt}
-                  onChange={(event) => setImagePrompt(event.target.value)}
-                  placeholder="输入你想要生成的画面"
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      if (!isGenerating && !isQuotaInsufficient) {
-                        void handleGenerateImage();
-                      }
-                    }
+                <input
+                  ref={inputImageRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
+                  className="hidden"
+                  onChange={(event) => {
+                    void handleInputImageChange(event);
                   }}
-                  className="min-h-[148px] resize-none rounded-[32px] border-0 bg-transparent px-6 pt-6 pb-20 text-[15px] leading-7 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0"
                 />
-
-                <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-white via-white/95 to-transparent px-4 pb-4 pt-10 sm:px-6">
-                  <div className="flex items-center gap-3">
-                    <div className="rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600">
-                      剩余额度 {availableQuotaLabel}
+                <div className="flex min-h-[196px] flex-col rounded-[22px] border border-stone-200/70 bg-white">
+                  {inputImage ? (
+                    <div className="border-b border-stone-100 px-4 pt-4 pb-3">
+                      <div className="flex items-center gap-3 rounded-2xl bg-stone-50 px-3 py-3">
+                        <img
+                          src={inputImage.dataUrl}
+                          alt={inputImage.fileName}
+                          className="size-14 shrink-0 rounded-xl object-cover"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-stone-900">{inputImage.fileName}</div>
+                          <div className="mt-1 text-xs text-stone-500">
+                            已附加 1 张参考图
+                            {" · "}
+                            {formatInputImageSize(inputImage.sizeBytes)}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleRemoveInputImage();
+                          }}
+                          className="inline-flex size-8 items-center justify-center rounded-full text-stone-400 transition hover:bg-white hover:text-stone-700"
+                          aria-label="移除已上传图片"
+                        >
+                          <X className="size-4" />
+                        </button>
+                      </div>
                     </div>
-                    <div
-                      className={cn(
-                        "rounded-full px-3 py-2 text-xs font-medium",
-                        isQuotaInsufficient ? "bg-rose-50 text-rose-600" : "bg-emerald-50 text-emerald-700",
-                      )}
-                    >
-                      本次消耗 {requestCost} 次
-                    </div>
-                    <Select value={imageModel} onValueChange={(value) => setImageModel(value as ImageModel)}>
-                      <SelectTrigger className="h-10 w-[164px] rounded-full border-stone-200 bg-white text-sm font-medium text-stone-700 shadow-none focus-visible:ring-0">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {imageModelOptions.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>
-                            {item.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                  ) : null}
+                  <label htmlFor="image-prompt" className="sr-only">
+                    输入你想要生成的画面
+                  </label>
+                  <Textarea
+                    id="image-prompt"
+                    ref={textareaRef}
+                    value={imagePrompt}
+                    onChange={(event) => setImagePrompt(event.target.value)}
+                    placeholder="输入你想要生成的画面"
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        if (!isGenerating && !isQuotaInsufficient) {
+                          void handleGenerateImage();
+                        }
+                      }
+                    }}
+                    className="min-h-[136px] resize-none border-0 bg-transparent px-4 pt-4 pb-3 text-[15px] leading-7 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0"
+                  />
 
-                    <div className="flex items-center gap-2 rounded-full border border-stone-200 bg-white px-3 py-1">
-                      <span className="text-sm font-medium text-stone-700">张数</span>
-                      <Input
-                        type="number"
-                        min="1"
-                        max="4"
-                        step="1"
-                        value={imageCount}
-                        onChange={(event) => setImageCount(event.target.value)}
-                        className="h-8 w-[64px] border-0 bg-transparent px-0 text-center text-sm font-medium text-stone-700 shadow-none focus-visible:ring-0"
-                      />
+                  <div className="mt-auto border-t border-stone-100 px-4 py-3">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="flex min-w-0 flex-col gap-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleOpenInputImagePicker}
+                            className={cn(
+                              "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-300",
+                              inputImage
+                                ? "border-stone-900 bg-stone-950 text-white"
+                                : "border-stone-200 bg-white text-stone-700 hover:border-stone-300 hover:bg-stone-100",
+                            )}
+                          >
+                            <ImagePlus className="size-4" />
+                            {inputImage ? "更换图片" : "上传图片"}
+                          </button>
+
+                          <div className="h-4 w-px bg-stone-200" />
+
+                          {(Object.entries(imageModelMeta) as Array<[ImageModel, (typeof imageModelMeta)[ImageModel]]>).map(([model]) => {
+                            const active = imageModel === model;
+                            return (
+                              <button
+                                key={model}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => setImageModel(model)}
+                                className={cn(
+                                  "cursor-pointer rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-300",
+                                  active
+                                    ? "border-stone-900 bg-stone-950 text-white"
+                                    : "border-stone-200 bg-white text-stone-700 hover:border-stone-300 hover:bg-stone-100",
+                                )}
+                              >
+                                {model}
+                              </button>
+                            );
+                          })}
+
+                          <div className="h-4 w-px bg-stone-200" />
+
+                          {IMAGE_COUNT_OPTIONS.map((count) => {
+                            const active = imageCount === count;
+                            return (
+                              <button
+                                key={count}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => setImageCount(count)}
+                                className={cn(
+                                  "cursor-pointer rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-300",
+                                  active
+                                    ? "border-stone-900 bg-stone-900 text-white"
+                                    : "border-stone-200 bg-stone-50 text-stone-600 hover:border-stone-300 hover:bg-stone-100",
+                                )}
+                              >
+                                {count} 张
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <div className={cn("text-xs", isQuotaInsufficient ? "text-rose-600" : "text-stone-500")}>
+                          {isQuotaInsufficient
+                            ? `至少需要 ${requestCost} 次`
+                            : inputImage
+                              ? "已附加 1 张参考图，回车发送"
+                              : "回车发送"}
+                        </div>
+                      </div>
+
+                      <Button
+                        type="button"
+                        onClick={() => void handleGenerateImage()}
+                        disabled={isGenerating || isQuotaInsufficient}
+                        className="h-11 shrink-0 rounded-full bg-stone-950 px-4 text-sm font-medium text-white hover:bg-stone-800 disabled:bg-stone-300"
+                      >
+                        {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+                      </Button>
                     </div>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={() => void handleGenerateImage()}
-                    disabled={isGenerating || isQuotaInsufficient}
-                    className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-stone-950 text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300"
-                    aria-label="生成图片"
-                  >
-                    {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
-                  </button>
                 </div>
-                {isQuotaInsufficient ? (
-                  <div className="px-6 pb-4 text-xs text-rose-600">当前额度不足，本次至少需要 {requestCost} 次。</div>
-                ) : null}
               </div>
             </div>
           </div>
@@ -711,13 +952,10 @@ export default function ImagePage() {
               </div>
 
               <div className="flex items-center justify-center overflow-hidden rounded-[20px] bg-black/60">
-                <Image
+                <img
                   src={previewImage.src}
                   alt={previewImage.alt}
-                  width={1024}
-                  height={1024}
-                  unoptimized
-                  className="h-auto max-h-[82vh] w-full object-contain"
+                  className="h-auto max-h-[82vh] w-auto max-w-full object-contain"
                 />
               </div>
             </div>

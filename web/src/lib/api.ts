@@ -7,6 +7,17 @@ export type ImageModel = "gpt-image-1" | "gpt-image-2";
 export type AuthRole = "user" | "admin";
 export type AuthType = "auth_key" | "admin_auth_key" | "user_key";
 export type UserKeyStatus = "启用" | "停用";
+export type UserKeyPricing = {
+  "gpt-image-1": number;
+  "gpt-image-2": number;
+};
+
+export type ImageBilling = {
+  requested_model: ImageModel;
+  unit_cost: number;
+  charged_quota: number;
+  remaining_quota: number;
+};
 
 export type Account = {
   id: string;
@@ -27,6 +38,12 @@ export type Account = {
   success: number;
   fail: number;
   lastUsedAt: string | null;
+  needsRefresh?: boolean;
+};
+
+export type ImportedAccount = {
+  access_token: string;
+  [key: string]: unknown;
 };
 
 export type UserKey = {
@@ -35,6 +52,7 @@ export type UserKey = {
   label?: string | null;
   quota: number;
   status: UserKeyStatus;
+  pricing: UserKeyPricing;
   createdAt?: string | null;
   updatedAt?: string | null;
   lastUsedAt?: string | null;
@@ -51,6 +69,7 @@ type UserKeyListResponse = {
 type AccountMutationResponse = {
   items: Account[];
   added?: number;
+  updated?: number;
   skipped?: number;
   removed?: number;
   refreshed?: number;
@@ -89,6 +108,7 @@ type AuthSessionResponse = {
   role: AuthRole;
   auth_type?: AuthType;
   remaining_quota?: number | null;
+  pricing?: UserKeyPricing | null;
   user_key_id?: string | null;
   user_key_label?: string | null;
 };
@@ -97,6 +117,23 @@ type QuotaSummaryResponse = {
   available_quota: number;
   auth_type?: AuthType;
   remaining_quota?: number | null;
+  pricing?: UserKeyPricing | null;
+};
+
+export type ImageGenerationResponse = {
+  created: number;
+  data: Array<{ b64_json: string; revised_prompt?: string; mime_type?: string }>;
+  billing?: ImageBilling;
+};
+
+type ResponsesImageGenerationResponse = {
+  created_at?: number;
+  output?: Array<{
+    type?: string;
+    status?: string;
+    result?: string;
+  }>;
+  billing?: ImageBilling;
 };
 
 export async function login(authKey: string) {
@@ -111,33 +148,62 @@ export async function login(authKey: string) {
   });
 }
 
-export async function fetchAuthSession() {
-  return httpRequest<AuthSessionResponse>("/auth/session");
+function wait(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
-export async function fetchAccounts() {
-  return httpRequest<AccountListResponse>("/api/accounts");
+export async function fetchAuthSession(options: { redirectOnUnauthorized?: boolean; retries?: number } = {}) {
+  const { redirectOnUnauthorized = true, retries = 0 } = options;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await httpRequest<AuthSessionResponse>("/auth/session", {
+        redirectOnUnauthorized,
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) {
+        throw error;
+      }
+      await wait(250 * (attempt + 1));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("加载会话失败");
 }
 
-export async function fetchUserKeys() {
-  return httpRequest<UserKeyListResponse>("/api/user-keys");
+export async function fetchAccounts(options: { redirectOnUnauthorized?: boolean } = {}) {
+  return httpRequest<AccountListResponse>("/api/accounts", options);
+}
+
+export async function fetchUserKeys(options: { redirectOnUnauthorized?: boolean } = {}) {
+  return httpRequest<UserKeyListResponse>("/api/user-keys", options);
 }
 
 export async function fetchQuotaSummary() {
   return httpRequest<QuotaSummaryResponse>("/api/quota");
 }
 
-export async function createAccounts(tokens: string[]) {
+export async function createAccounts(options: { tokens?: string[]; accounts?: ImportedAccount[] }) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
-    body: { tokens },
+    body: {
+      tokens: options.tokens || [],
+      accounts: options.accounts || [],
+    },
   });
 }
 
-export async function createDonationAccounts(tokens: string[]) {
+export async function createDonationAccounts(options: { tokens?: string[]; accounts?: ImportedAccount[] }) {
   return httpRequest<AccountMutationResponse>("/api/donations/accounts", {
     method: "POST",
-    body: { tokens },
+    body: {
+      tokens: options.tokens || [],
+      accounts: options.accounts || [],
+    },
   });
 }
 
@@ -186,6 +252,7 @@ export async function createUserKeys(options: {
   prefix?: string;
   label_prefix?: string;
   status?: UserKeyStatus;
+  pricing?: UserKeyPricing;
 }) {
   return httpRequest<UserKeyMutationResponse>("/api/user-keys", {
     method: "POST",
@@ -199,6 +266,7 @@ export async function updateUserKey(
     label?: string;
     quota?: number;
     status?: UserKeyStatus;
+    pricing?: UserKeyPricing;
   },
 ) {
   return httpRequest<UserKeyUpdateResponse>("/api/user-keys/update", {
@@ -210,10 +278,32 @@ export async function updateUserKey(
   });
 }
 
-export async function generateImage(prompt: string, model: ImageModel = "gpt-image-1", n = 1) {
-  return httpRequest<{ created: number; data: Array<{ b64_json: string; revised_prompt?: string }> }>(
-    "/v1/images/generations",
-    {
+function normalizeResponsesImageGenerationResponse(
+  payload: ResponsesImageGenerationResponse,
+): ImageGenerationResponse {
+  const data = Array.isArray(payload.output)
+    ? payload.output
+        .filter((item) => item?.type === "image_generation_call" && String(item.result || "").trim())
+        .map((item) => ({
+          b64_json: String(item?.result || "").trim(),
+        }))
+    : [];
+  return {
+    created: Math.max(0, Number(payload.created_at || 0)) || Math.floor(Date.now() / 1000),
+    data,
+    billing: payload.billing,
+  };
+}
+
+export async function generateImage(
+  prompt: string,
+  model: ImageModel = "gpt-image-1",
+  n = 1,
+  options: { inputImageUrl?: string | null } = {},
+) {
+  const inputImageUrl = String(options.inputImageUrl || "").trim();
+  if (!inputImageUrl) {
+    return httpRequest<ImageGenerationResponse>("/v1/images/generations", {
       method: "POST",
       body: {
         prompt,
@@ -221,6 +311,20 @@ export async function generateImage(prompt: string, model: ImageModel = "gpt-ima
         n,
         response_format: "b64_json",
       },
+    });
+  }
+
+  const payload = await httpRequest<ResponsesImageGenerationResponse>("/v1/responses", {
+    method: "POST",
+    body: {
+      model: "gpt-5",
+      input: [
+        { type: "input_text", text: prompt },
+        { type: "input_image", image_url: inputImageUrl },
+      ],
+      tools: [{ type: "image_generation", model }],
+      n,
     },
-  );
+  });
+  return normalizeResponsesImageGenerationResponse(payload);
 }
