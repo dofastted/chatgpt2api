@@ -13,7 +13,7 @@ export default function HomePage() {
 
     const redirectByRole = async () => {
       try {
-        const session = await fetchAuthSession();
+        const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
         if (!cancelled) {
           router.replace(session.role === "admin" ? "/accounts" : "/image");
         }

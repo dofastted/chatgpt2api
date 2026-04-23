@@ -46,7 +46,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { cleanJsonText, extractAccessTokensFromJson, normalizeTokenList } from "@/lib/account-import";
+import { cleanJsonText, extractAccountsFromJson, normalizeTokenList } from "@/lib/account-import";
 import {
   createAccounts,
   createUserKeys,
@@ -63,6 +63,7 @@ import {
   type AccountStatus,
   type AccountType,
   type UserKey,
+  type UserKeyPricing,
   type UserKeyStatus,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -110,6 +111,11 @@ const metricCards = [
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
 ] as const;
+
+const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
+  "gpt-image-1": 0,
+  "gpt-image-2": 2,
+};
 
 function formatCompact(value: number) {
   if (value >= 1000) {
@@ -168,6 +174,19 @@ function formatDateTime(value?: string | null) {
   )}:${pad(date.getSeconds())}`;
 }
 
+function buildUserKeyPricing(gptImage1: string, gptImage2: string): UserKeyPricing {
+  void gptImage1;
+  return {
+    "gpt-image-1": 0,
+    "gpt-image-2": Math.max(0, Number(gptImage2 || 0)),
+  };
+}
+
+function formatUserKeyPricing(pricing?: UserKeyPricing | null) {
+  const resolved = pricing || DEFAULT_USER_KEY_PRICING;
+  return `gpt-image-2: ${formatQuota(resolved["gpt-image-2"])}`;
+}
+
 function maskToken(token?: string) {
   if (!token) return "—";
   if (token.length <= 18) return token;
@@ -222,9 +241,17 @@ export default function AccountsPage() {
   const [newUserKeyLabelPrefix, setNewUserKeyLabelPrefix] = useState("");
   const [newUserKeyCount, setNewUserKeyCount] = useState("5");
   const [newUserKeyQuota, setNewUserKeyQuota] = useState("20");
+  const [newUserKeyPriceImage1, setNewUserKeyPriceImage1] = useState(String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]));
+  const [newUserKeyPriceImage2, setNewUserKeyPriceImage2] = useState(String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]));
   const [editUserKeyLabel, setEditUserKeyLabel] = useState("");
   const [editUserKeyQuota, setEditUserKeyQuota] = useState("0");
   const [editUserKeyStatus, setEditUserKeyStatus] = useState<UserKeyStatus>("启用");
+  const [editUserKeyPriceImage1, setEditUserKeyPriceImage1] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]),
+  );
+  const [editUserKeyPriceImage2, setEditUserKeyPriceImage2] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]),
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -237,23 +264,58 @@ export default function AccountsPage() {
   const [isUpdatingUserKey, setIsUpdatingUserKey] = useState(false);
   const [isAuthorizing, setIsAuthorizing] = useState(true);
 
-  const loadAccounts = async (silent = false) => {
+  function handleAdminRouteFailure(message: string) {
+    const normalizedMessage = String(message || "").toLowerCase();
+    if (normalizedMessage.includes("authorization is invalid")) {
+      router.replace("/login");
+      return true;
+    }
+    if (normalizedMessage.includes("admin authorization is required")) {
+      toast.error("当前密钥没有号池管理权限");
+      router.replace("/image");
+      return true;
+    }
+    return false;
+  }
+
+  async function loadAccounts(silent = false) {
     if (!silent) {
       setIsLoading(true);
     }
     try {
-      const data = await fetchAccounts();
+      const data = await fetchAccounts({ redirectOnUnauthorized: false });
       setAccounts(normalizeAccounts(data.items));
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
-      toast.error(message);
+      if (!handleAdminRouteFailure(message)) {
+        toast.error(message);
+      }
     } finally {
       if (!silent) {
         setIsLoading(false);
       }
     }
-  };
+  }
+
+  async function loadUserKeys(silent = false) {
+    if (!silent) {
+      setIsLoadingUserKeys(true);
+    }
+    try {
+      const data = await fetchUserKeys({ redirectOnUnauthorized: false });
+      setUserKeys(data.items);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "加载用户 key 失败";
+      if (!handleAdminRouteFailure(message)) {
+        toast.error(message);
+      }
+    } finally {
+      if (!silent) {
+        setIsLoadingUserKeys(false);
+      }
+    }
+  }
 
   useEffect(() => {
     if (didLoadRef.current) {
@@ -264,7 +326,7 @@ export default function AccountsPage() {
     let cancelled = false;
     const bootstrap = async () => {
       try {
-        const session = await fetchAuthSession();
+        const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
         if (cancelled) {
           return;
         }
@@ -275,10 +337,16 @@ export default function AccountsPage() {
         }
         setIsAuthorizing(false);
         await Promise.all([loadAccounts(), loadUserKeys()]);
-      } catch {
-        if (!cancelled) {
-          router.replace("/login");
+      } catch (error) {
+        if (cancelled) {
+          return;
         }
+        const message = error instanceof Error ? error.message : "加载管理员会话失败";
+        if (handleAdminRouteFailure(message)) {
+          return;
+        }
+        setIsAuthorizing(false);
+        toast.error(`加载管理员会话失败：${message}`);
       }
     };
 
@@ -384,7 +452,7 @@ export default function AccountsPage() {
 
     setIsSubmitting(true);
     try {
-      const data = await createAccounts(tokens);
+      const data = await createAccounts({ tokens });
       setAccounts(normalizeAccounts(data.items));
       setSelectedIds([]);
       setOpen(false);
@@ -406,23 +474,6 @@ export default function AccountsPage() {
     }
   };
 
-  const loadUserKeys = async (silent = false) => {
-    if (!silent) {
-      setIsLoadingUserKeys(true);
-    }
-    try {
-      const data = await fetchUserKeys();
-      setUserKeys(data.items);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载用户 key 失败";
-      toast.error(message);
-    } finally {
-      if (!silent) {
-        setIsLoadingUserKeys(false);
-      }
-    }
-  };
-
   const handleUploadJsonAccounts = async (files: File[]) => {
     if (files.length === 0) {
       return;
@@ -431,7 +482,7 @@ export default function AccountsPage() {
     setIsUploadingJson(true);
 
     try {
-      const importedTokens: string[] = [];
+      const importedAccounts: Array<{ access_token: string; [key: string]: unknown }> = [];
       const invalidFiles: string[] = [];
       const emptyFiles: string[] = [];
       let matchedFiles = 0;
@@ -445,21 +496,33 @@ export default function AccountsPage() {
           }
 
           const payload = JSON.parse(text);
-          const fileTokens = extractAccessTokensFromJson(payload);
-          if (fileTokens.length === 0) {
+          const fileAccounts = extractAccountsFromJson(payload);
+          if (fileAccounts.length === 0) {
             emptyFiles.push(file.name);
             continue;
           }
 
           matchedFiles += 1;
-          importedTokens.push(...fileTokens);
+          importedAccounts.push(...fileAccounts);
         } catch {
           invalidFiles.push(file.name);
         }
       }
 
-      const tokens = normalizeTokenList(importedTokens);
-      if (tokens.length === 0) {
+      const indexedAccounts = new Map<string, { access_token: string; [key: string]: unknown }>();
+      importedAccounts.forEach((item) => {
+        const accessToken = String(item.access_token || "").trim();
+        if (!accessToken) {
+          return;
+        }
+        indexedAccounts.set(accessToken, {
+          ...indexedAccounts.get(accessToken),
+          ...item,
+          access_token: accessToken,
+        });
+      });
+      const accountsToImport = Array.from(indexedAccounts.values());
+      if (accountsToImport.length === 0) {
         const errors: string[] = [];
         if (invalidFiles.length > 0) {
           errors.push(`${invalidFiles.length} 个文件不是有效 JSON`);
@@ -471,16 +534,19 @@ export default function AccountsPage() {
         return;
       }
 
-      const data = await createAccounts(tokens);
+      const data = await createAccounts({ accounts: accountsToImport });
       setAccounts(normalizeAccounts(data.items));
       setSelectedIds([]);
       setNewTokens("");
       setPage(1);
       setOpen(false);
 
-      const messages = [`已从 ${matchedFiles} 个文件导入 ${tokens.length} 个 Token`];
+      const messages = [`已从 ${matchedFiles} 个文件导入 ${accountsToImport.length} 个账户`];
+      if ((data.updated ?? 0) > 0) {
+        messages.push(`覆盖 ${data.updated} 个已有账户`);
+      }
       if ((data.skipped ?? 0) > 0) {
-        messages.push(`跳过 ${data.skipped} 个重复项`);
+        messages.push(`跳过 ${data.skipped} 个无效或重复项`);
       }
       if ((data.errors?.length ?? 0) > 0) {
         messages.push(`刷新失败 ${data.errors?.length ?? 0} 个`);
@@ -593,6 +659,8 @@ export default function AccountsPage() {
     setEditUserKeyLabel(String(userKey.label || ""));
     setEditUserKeyQuota(String(userKey.quota));
     setEditUserKeyStatus(userKey.status);
+    setEditUserKeyPriceImage1(String(userKey.pricing["gpt-image-1"]));
+    setEditUserKeyPriceImage2(String(userKey.pricing["gpt-image-2"]));
   };
 
   const handleCreateUserKeys = async () => {
@@ -603,6 +671,7 @@ export default function AccountsPage() {
         quota: Math.max(0, Number(newUserKeyQuota || 0)),
         prefix: newUserKeyPrefix.trim() || undefined,
         label_prefix: newUserKeyLabelPrefix.trim() || undefined,
+        pricing: buildUserKeyPricing(newUserKeyPriceImage1, newUserKeyPriceImage2),
       });
       setUserKeys(data.items);
       toast.success(`已生成 ${data.created_items?.length ?? data.added ?? 0} 个用户 key`);
@@ -639,6 +708,7 @@ export default function AccountsPage() {
         label: editUserKeyLabel.trim() || undefined,
         quota: Math.max(0, Number(editUserKeyQuota || 0)),
         status: editUserKeyStatus,
+        pricing: buildUserKeyPricing(editUserKeyPriceImage1, editUserKeyPriceImage2),
       });
       setUserKeys(data.items);
       setEditingUserKey(null);
@@ -867,7 +937,7 @@ export default function AccountsPage() {
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>编辑用户 key</DialogTitle>
-            <DialogDescription className="text-sm leading-6">手动修改标签、状态和剩余次数。</DialogDescription>
+            <DialogDescription className="text-sm leading-6">手动修改标签、状态、剩余次数和模型单价。</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
@@ -898,6 +968,26 @@ export default function AccountsPage() {
                 onChange={(event) => setEditUserKeyQuota(event.target.value)}
                 className="h-11 rounded-xl border-stone-200 bg-white"
               />
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">gpt-image-1</label>
+                <Input
+                  value={editUserKeyPriceImage1}
+                  onChange={(event) => setEditUserKeyPriceImage1(event.target.value)}
+                  disabled
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-400">已下架，固定为 0。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">gpt-image-2 单价</label>
+                <Input
+                  value={editUserKeyPriceImage2}
+                  onChange={(event) => setEditUserKeyPriceImage2(event.target.value)}
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
             </div>
           </div>
           <DialogFooter className="pt-2">
@@ -1357,7 +1447,7 @@ export default function AccountsPage() {
         </div>
 
         <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_160px] xl:grid-cols-[minmax(0,1fr)_160px_160px_160px_200px]">
+          <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_140px_140px] xl:grid-cols-[minmax(0,1fr)_140px_140px_140px_160px_200px]">
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">前缀</label>
               <Input
@@ -1385,6 +1475,28 @@ export default function AccountsPage() {
                 min="0"
                 value={newUserKeyQuota}
                 onChange={(event) => setNewUserKeyQuota(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">gpt-image-1</label>
+              <Input
+                type="number"
+                min="0"
+                value={newUserKeyPriceImage1}
+                onChange={(event) => setNewUserKeyPriceImage1(event.target.value)}
+                disabled
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+              <p className="text-xs text-stone-400">已下架，固定为 0。</p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">gpt-image-2 单价</label>
+              <Input
+                type="number"
+                min="0"
+                value={newUserKeyPriceImage2}
+                onChange={(event) => setNewUserKeyPriceImage2(event.target.value)}
                 className="h-11 rounded-xl border-stone-200 bg-white"
               />
             </div>
@@ -1438,6 +1550,7 @@ export default function AccountsPage() {
                     <th className="w-36 px-4 py-3">标签</th>
                     <th className="w-24 px-4 py-3">状态</th>
                     <th className="w-24 px-4 py-3">次数</th>
+                    <th className="w-52 px-4 py-3">单价</th>
                     <th className="w-40 px-4 py-3">创建时间</th>
                     <th className="w-40 px-4 py-3">最近使用</th>
                     <th className="w-28 px-4 py-3">操作</th>
@@ -1475,6 +1588,7 @@ export default function AccountsPage() {
                           {formatQuota(item.quota)}
                         </Badge>
                       </td>
+                      <td className="px-4 py-3 text-xs leading-5 text-stone-500">{formatUserKeyPricing(item.pricing)}</td>
                       <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.createdAt)}</td>
                       <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.lastUsedAt)}</td>
                       <td className="px-4 py-3">

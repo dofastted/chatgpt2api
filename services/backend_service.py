@@ -38,6 +38,7 @@ class BackendService:
                         "quota": 0,
                     },
                 )
+            self.account_service.mark_request_failure(access_token)
             return None
         return self.account_service.update_account(access_token, remote_info)
 

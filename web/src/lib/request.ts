@@ -7,9 +7,7 @@ type RequestConfig = AxiosRequestConfig & {
     redirectOnUnauthorized?: boolean;
 };
 
-const request = axios.create({
-    baseURL: webConfig.apiUrl.replace(/\/$/, ""),
-});
+const request = axios.create();
 
 request.interceptors.request.use(async (config) => {
     const nextConfig = {...config};
@@ -55,6 +53,7 @@ type RequestOptions = {
 export async function httpRequest<T>(path: string, options: RequestOptions = {}) {
     const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
     const config: RequestConfig = {
+        baseURL: webConfig.apiUrl.replace(/\/$/, ""),
         url: path,
         method,
         data: body,

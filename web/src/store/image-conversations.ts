@@ -29,6 +29,7 @@ export type ImageConversation = {
   prompt: string;
   model: ImageModel;
   count: number;
+  copiedText?: string;
   inputImage?: StoredInputImage | null;
   images: StoredImage[];
   createdAt: string;
@@ -88,6 +89,7 @@ function normalizeStoredInputImage(inputImage: StoredInputImage | null | undefin
 function normalizeConversation(conversation: ImageConversation): ImageConversation {
   return {
     ...conversation,
+    copiedText: String(conversation.copiedText || "").trim() || undefined,
     inputImage: normalizeStoredInputImage(conversation.inputImage),
     images: (conversation.images || []).map(normalizeStoredImage),
   };

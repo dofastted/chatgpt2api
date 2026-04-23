@@ -29,6 +29,9 @@ DEFAULT_MODEL = "gpt-4o"
 GPT_IMAGE_2_UPSTREAM_MODEL = "gpt-image-2"
 GPT_IMAGE_2_REASONING_EFFORT = None
 MAX_POW_ATTEMPTS = 500000
+UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS = 45
+UPSTREAM_CONVERSATION_TIMEOUT_SECONDS = 90
+TRANSIENT_HTTP_STATUS_CODES = (408, 429, 500, 502, 503, 504, 520, 522, 524)
 SUPPORTED_INPUT_IMAGE_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -359,6 +362,7 @@ def _chat_requirements(session: Session, access_token: str, device_id: str) -> t
             timeout=30,
         ),
         retries=4,
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not response.ok:
         raise ImageGenerationError(response.text[:400] or f"chat-requirements failed: {response.status_code}")
@@ -389,7 +393,29 @@ def is_transient_image_error(message: str) -> bool:
         or "no image returned from upstream" in text
         or "timed out" in text
         or "timeout" in text
+        or "gateway timeout" in text
+        or "http 524" in text
+        or "failed: 524" in text
+        or "status_code=524" in text
+        or "status code 524" in text
+        or "cloudflare" in text
     )
+
+
+def _extract_sse_error_text(value: object) -> str:
+    if isinstance(value, dict):
+        for key in ("message", "detail", "error", "text", "description"):
+            nested = _extract_sse_error_text(value.get(key))
+            if nested:
+                return nested
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            nested = _extract_sse_error_text(item)
+            if nested:
+                return nested
+        return ""
+    return str(value or "").strip()
 
 
 def _send_conversation(
@@ -467,9 +493,10 @@ def _send_conversation(
             headers=headers,
             json=request_body,
             stream=True,
-            timeout=180,
+            timeout=UPSTREAM_CONVERSATION_TIMEOUT_SECONDS,
         ),
         retries=3,
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not response.ok:
         raise ImageGenerationError(response.text[:400] or f"conversation failed: {response.status_code}")
@@ -480,6 +507,7 @@ def _parse_sse(response) -> dict:
     file_ids: list[str] = []
     conversation_id = ""
     text_parts: list[str] = []
+    terminal_error = ""
     for raw_line in response.iter_lines():
         if not raw_line:
             continue
@@ -515,6 +543,10 @@ def _parse_sse(response) -> dict:
             continue
         if not isinstance(obj, dict):
             continue
+        if not terminal_error:
+            terminal_error = _extract_sse_error_text(obj.get("error"))
+        if not terminal_error and str(obj.get("type") or "").strip().lower() in {"error", "conversation_error"}:
+            terminal_error = _extract_sse_error_text(obj)
         conversation_id = str(obj.get("conversation_id") or conversation_id)
         if obj.get("type") in {"resume_conversation_token", "message_marker", "message_stream_complete"}:
             conversation_id = str(obj.get("conversation_id") or conversation_id)
@@ -527,7 +559,12 @@ def _parse_sse(response) -> dict:
             parts = content.get("parts") or []
             if parts:
                 text_parts.append(str(parts[0]))
-    return {"conversation_id": conversation_id, "file_ids": file_ids, "text": "".join(text_parts)}
+    return {
+        "conversation_id": conversation_id,
+        "file_ids": file_ids,
+        "text": "".join(text_parts),
+        "error": terminal_error,
+    }
 
 
 def _extract_image_ids(mapping: dict) -> list[str]:
@@ -559,7 +596,7 @@ def _extract_image_ids(mapping: dict) -> list[str]:
 
 def _poll_image_ids(session: Session, access_token: str, device_id: str, conversation_id: str) -> list[str]:
     started = time.time()
-    while time.time() - started < 180:
+    while time.time() - started < UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS:
         response = _retry(
             lambda: session.get(
                 f"{BASE_URL}/backend-api/conversation/{conversation_id}",
@@ -571,7 +608,7 @@ def _poll_image_ids(session: Session, access_token: str, device_id: str, convers
                 timeout=30,
             ),
             retries=2,
-            retry_on_status=(429, 502, 503, 504),
+            retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
         )
         if response.status_code != 200:
             time.sleep(3)
@@ -605,7 +642,7 @@ def _fetch_download_url(session: Session, access_token: str, device_id: str, con
             timeout=30,
         ),
         retries=3,
-        retry_on_status=(429, 500, 502, 503, 504),
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not response.ok:
         return ""
@@ -678,7 +715,7 @@ def _download_input_image(session: Session, image_url: str) -> tuple[bytes, str]
             timeout=60,
         ),
         retries=3,
-        retry_on_status=(429, 500, 502, 503, 504),
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not response.ok or not response.content:
         raise ImageGenerationError("failed to fetch input image")
@@ -727,7 +764,7 @@ def _build_uploaded_input_image(
             timeout=60,
         ),
         retries=3,
-        retry_on_status=(429, 500, 502, 503, 504),
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not create_response.ok:
         raise ImageGenerationError(
@@ -752,7 +789,7 @@ def _build_uploaded_input_image(
             timeout=120,
         ),
         retries=3,
-        retry_on_status=(429, 500, 502, 503, 504),
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if upload_response.status_code not in (200, 201):
         raise ImageGenerationError(
@@ -766,7 +803,7 @@ def _build_uploaded_input_image(
             timeout=60,
         ),
         retries=3,
-        retry_on_status=(429, 500, 502, 503, 504),
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not uploaded_response.ok:
         raise ImageGenerationError(
@@ -842,7 +879,7 @@ def _download_image_payload(session: Session, download_url: str) -> tuple[str, s
             response = _retry(
                 lambda: session.get(download_url, timeout=60),
                 retries=2,
-                retry_on_status=(429, 500, 502, 503, 504),
+                retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
             )
         except Exception as exc:
             last_error = exc
@@ -929,6 +966,7 @@ def generate_image_result(
             f"requested_model={model} upstream_model={upstream_model} reasoning_effort={reasoning_effort or 'none'} n={n}"
         )
         results: list[GeneratedImage] = []
+        copied_text = ""
         for _ in range(n):
             last_stream_error: Exception | None = None
             for stream_attempt in range(3):
@@ -970,6 +1008,11 @@ def generate_image_result(
                 actual_conversation_id = parsed.get("conversation_id") or ""
                 file_ids = parsed.get("file_ids") or []
                 response_text = str(parsed.get("text") or "").strip()
+                if response_text and not copied_text:
+                    copied_text = response_text
+                terminal_error = str(parsed.get("error") or "").strip()
+                if terminal_error and not file_ids:
+                    raise ImageGenerationError(terminal_error)
                 if actual_conversation_id and not file_ids:
                     file_ids = _poll_image_ids(session, access_token, device_id, actual_conversation_id)
                 if not file_ids:
@@ -1004,7 +1047,7 @@ def generate_image_result(
                     raise ImageGenerationError(str(last_stream_error))
                 raise ImageGenerationError("image stream failed")
         print(f"[image-upstream] success token={access_token[:12]}... images={len(results)}")
-        return {
+        response_payload = {
             "created": time.time_ns() // 1_000_000_000,
             "data": [
                 {
@@ -1015,6 +1058,9 @@ def generate_image_result(
                 for item in results
             ],
         }
+        if copied_text:
+            response_payload["copied_text"] = copied_text
+        return response_payload
     except Exception as exc:
         print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
         raise

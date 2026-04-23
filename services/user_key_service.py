@@ -14,6 +14,11 @@ from services.config import config
 class UserKeyService:
     ENABLED_STATUS = "启用"
     DISABLED_STATUS = "停用"
+    SUPPORTED_MODELS = ("gpt-image-1", "gpt-image-2")
+    DEFAULT_PRICING = {
+        "gpt-image-1": 0,
+        "gpt-image-2": 2,
+    }
 
     def __init__(self, store_file: Path):
         self.store_file = store_file
@@ -30,6 +35,19 @@ class UserKeyService:
             return self.DISABLED_STATUS
         return self.ENABLED_STATUS
 
+    def _normalize_pricing(self, value: Any) -> dict[str, int]:
+        normalized = dict(self.DEFAULT_PRICING)
+        if isinstance(value, dict):
+            for model in self.SUPPORTED_MODELS:
+                if value.get(model) is None:
+                    continue
+                price = int(value.get(model) or 0)
+                normalized[model] = max(0, price)
+        return normalized
+
+    def normalize_pricing(self, value: Any) -> dict[str, int]:
+        return self._normalize_pricing(value)
+
     def _normalize_user_key(self, item: Any) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             return None
@@ -45,6 +63,7 @@ class UserKeyService:
             "label": self._clean_text(item.get("label")) or None,
             "quota": quota,
             "status": self._normalize_status(item.get("status")),
+            "pricing": self._normalize_pricing(item.get("pricing")),
             "created_at": self._clean_text(item.get("created_at")) or None,
             "updated_at": self._clean_text(item.get("updated_at")) or None,
             "last_used_at": self._clean_text(item.get("last_used_at")) or None,
@@ -86,6 +105,7 @@ class UserKeyService:
                 "label": item.get("label"),
                 "quota": max(0, int(item.get("quota") or 0)),
                 "status": self._normalize_status(item.get("status")),
+                "pricing": self._normalize_pricing(item.get("pricing")),
                 "createdAt": self._clean_text(item.get("created_at")) or None,
                 "updatedAt": self._clean_text(item.get("updated_at")) or None,
                 "lastUsedAt": self._clean_text(item.get("last_used_at")) or None,
@@ -126,6 +146,21 @@ class UserKeyService:
         with self._lock:
             return self._public_items(self._user_keys)
 
+    def get_pricing(self, key: str) -> dict[str, int] | None:
+        item = self.get_user_key(key)
+        if item is None:
+            return None
+        return self._normalize_pricing(item.get("pricing"))
+
+    def resolve_request_cost(self, key: str, model: str, n: int) -> int | None:
+        pricing = self.get_pricing(key)
+        if pricing is None:
+            return None
+        normalized_model = self._clean_text(model)
+        if normalized_model not in self.SUPPORTED_MODELS:
+            return None
+        return max(1, int(n or 1)) * max(0, int(pricing.get(normalized_model) or 0))
+
     def create_user_keys(
             self,
             count: int,
@@ -133,11 +168,13 @@ class UserKeyService:
             prefix: str | None = None,
             label_prefix: str | None = None,
             status: str | None = None,
+            pricing: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_count = max(0, int(count or 0))
         normalized_quota = max(0, int(quota or 0))
         normalized_status = self._normalize_status(status)
         cleaned_label_prefix = self._clean_text(label_prefix)
+        normalized_pricing = self._normalize_pricing(pricing)
         if normalized_count <= 0:
             return {"added": 0, "created_items": [], "items": self.list_public_user_keys()}
 
@@ -154,6 +191,7 @@ class UserKeyService:
                         "label": f"{cleaned_label_prefix}{index + 1}" if cleaned_label_prefix else None,
                         "quota": normalized_quota,
                         "status": normalized_status,
+                        "pricing": normalized_pricing,
                         "created_at": now,
                         "updated_at": now,
                         "last_used_at": None,

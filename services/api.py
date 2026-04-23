@@ -29,10 +29,12 @@ WEB_DIST_DIR = BASE_DIR / "web_dist"
 WEB_OUT_DIR = BASE_DIR / "web" / "out"
 DONATION_REWARD_QUOTA = 50
 DEFAULT_USER_KEY_PRICING = dict(user_key_service.DEFAULT_PRICING)
-SUPPORTED_IMAGE_MODELS = tuple(user_key_service.SUPPORTED_MODELS)
+ALL_IMAGE_MODELS = tuple(user_key_service.SUPPORTED_MODELS)
+ENABLED_IMAGE_MODELS = ("gpt-image-2",)
 MAX_IMAGES_PER_REQUEST = 2
 IMAGE_REQUEST_COOLDOWN_SECONDS = 10
 MAX_QUEUED_IMAGE_REQUESTS = 100
+DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
 RESPONSES_STORE: dict[str, dict[str, object]] = {}
 RESPONSES_STORE_LOCK = Lock()
@@ -42,8 +44,8 @@ IMAGE_REQUEST_SLEEP = asyncio.sleep
 
 
 class UserKeyPricingRequest(BaseModel):
-    gpt_image_1: int = Field(default=1, ge=0, alias="gpt-image-1")
-    gpt_image_2: int = Field(default=4, ge=0, alias="gpt-image-2")
+    gpt_image_1: int = Field(default=0, ge=0, alias="gpt-image-1")
+    gpt_image_2: int = Field(default=2, ge=0, alias="gpt-image-2")
 
     model_config = {"populate_by_name": True}
 
@@ -56,7 +58,7 @@ class UserKeyPricingRequest(BaseModel):
 
 class ImageGenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
-    model: str = "gpt-image-1"
+    model: str = DEFAULT_IMAGE_MODEL
     n: int = Field(default=1, ge=1, le=MAX_IMAGES_PER_REQUEST)
     response_format: str = "b64_json"
     output_format: str | None = None
@@ -213,9 +215,13 @@ def build_billing_payload(
 
 
 def normalize_requested_image_model(model: str) -> str:
-    normalized_model = str(model or "").strip() or "gpt-image-1"
-    if normalized_model not in SUPPORTED_IMAGE_MODELS:
-        raise HTTPException(status_code=400, detail={"error": f"unsupported image model: {normalized_model}"})
+    normalized_model = str(model or "").strip() or DEFAULT_IMAGE_MODEL
+    if normalized_model not in ENABLED_IMAGE_MODELS:
+        enabled = ", ".join(ENABLED_IMAGE_MODELS)
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"unsupported image model: {normalized_model}. enabled models: {enabled}"},
+        )
     return normalized_model
 
 
@@ -373,9 +379,9 @@ def resolve_requested_response_image_model(body: ResponsesCreateRequest) -> str:
     if tool_model:
         return normalize_requested_image_model(tool_model)
     requested_model = str(body.model or "").strip()
-    if requested_model in SUPPORTED_IMAGE_MODELS:
+    if requested_model in ENABLED_IMAGE_MODELS:
         return normalize_requested_image_model(requested_model)
-    return "gpt-image-1"
+    return DEFAULT_IMAGE_MODEL
 
 
 def _normalize_response_input_image_url(item: dict[str, Any]) -> str:
@@ -502,6 +508,9 @@ def build_images_response_payload(
             if str((item or {}).get("b64_json") or "").strip()
         ],
     }
+    copied_text = str(image_result.get("copied_text") or "").strip()
+    if copied_text:
+        payload["copied_text"] = copied_text
     if billing is not None:
         payload["billing"] = billing
     return payload
@@ -530,6 +539,7 @@ def build_responses_payload(
                 "result": result,
             }
         )
+    copied_text = str(image_result.get("copied_text") or "").strip()
     payload = {
         "id": response_id,
         "object": "response",
@@ -547,6 +557,8 @@ def build_responses_payload(
         "text": {"format": {"type": "text"}},
         "usage": None,
     }
+    if copied_text:
+        payload["copied_text"] = copied_text
     if billing is not None:
         payload["billing"] = billing
     return payload
@@ -766,7 +778,6 @@ def create_app() -> FastAPI:
         return {
             "object": "list",
             "data": [
-                build_model_item("gpt-image-1"),
                 build_model_item("gpt-image-2"),
             ],
         }
@@ -804,7 +815,7 @@ def create_app() -> FastAPI:
         await wait_for_image_request_turn(extract_bearer_token(authorization))
 
         response_model = str(body.model or "").strip() or DEFAULT_RESPONSES_MODEL
-        if response_model in SUPPORTED_IMAGE_MODELS:
+        if response_model in ALL_IMAGE_MODELS:
             response_model = DEFAULT_RESPONSES_MODEL
         requested_model = resolve_requested_response_image_model(body)
         image_result, billing_payload = await generate_image_payload(

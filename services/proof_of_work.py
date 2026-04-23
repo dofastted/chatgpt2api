@@ -4,10 +4,19 @@ import random
 import re
 import time
 import uuid
+import base64
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 
-import pybase64
+try:
+    import pybase64 as _base64_impl
+except ImportError:
+    class _Base64Compat:
+        @staticmethod
+        def b64encode(value: bytes) -> bytes:
+            return base64.b64encode(value)
+
+    _base64_impl = _Base64Compat()
 
 
 class _Logger:
@@ -477,12 +486,12 @@ def generate_answer(seed, diff, config):
         dynamic_json_i = str(i).encode()
         dynamic_json_j = str(i >> 1).encode()
         final_json_bytes = static_config_part1 + dynamic_json_i + static_config_part2 + dynamic_json_j + static_config_part3
-        base_encode = pybase64.b64encode(final_json_bytes)
+        base_encode = _base64_impl.b64encode(final_json_bytes)
         hash_value = hashlib.sha3_512(seed_encoded + base_encode).digest()
         if hash_value[:diff_len] <= target_diff:
             return base_encode.decode(), True
 
-    return "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D" + pybase64.b64encode(f'"{seed}"'.encode()).decode(), False
+    return "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D" + _base64_impl.b64encode(f'"{seed}"'.encode()).decode(), False
 
 
 def get_requirements_token(config):

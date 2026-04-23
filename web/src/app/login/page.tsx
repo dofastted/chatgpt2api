@@ -27,7 +27,8 @@ export default function LoginPage() {
     try {
       const session = await login(normalizedAuthKey);
       await setStoredAuthKey(normalizedAuthKey);
-      router.replace(session.role === "admin" ? "/accounts" : "/image");
+      const targetPath = session.role === "admin" ? "/accounts" : "/image";
+      router.replace(targetPath);
     } catch (error) {
       const message = error instanceof Error ? error.message : "登录失败";
       toast.error(message);

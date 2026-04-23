@@ -124,6 +124,7 @@ export type ImageGenerationResponse = {
   created: number;
   data: Array<{ b64_json: string; revised_prompt?: string; mime_type?: string }>;
   billing?: ImageBilling;
+  copied_text?: string;
 };
 
 type ResponsesImageGenerationResponse = {
@@ -134,6 +135,7 @@ type ResponsesImageGenerationResponse = {
     result?: string;
   }>;
   billing?: ImageBilling;
+  copied_text?: string;
 };
 
 export async function login(authKey: string) {
@@ -292,12 +294,13 @@ function normalizeResponsesImageGenerationResponse(
     created: Math.max(0, Number(payload.created_at || 0)) || Math.floor(Date.now() / 1000),
     data,
     billing: payload.billing,
+    copied_text: String(payload.copied_text || "").trim() || undefined,
   };
 }
 
 export async function generateImage(
   prompt: string,
-  model: ImageModel = "gpt-image-1",
+  model: ImageModel = "gpt-image-2",
   n = 1,
   options: { inputImageUrl?: string | null } = {},
 ) {

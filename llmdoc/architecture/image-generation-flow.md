@@ -22,13 +22,15 @@
 - 如果请求里带 `input_image`，会先抓取或解码图片，再走 `/backend-api/files` 上传并写进会话 `attachments`。
 - 会话流请求在 `services/image_service.py:215` 发出。
 - SSE 解析在 `services/image_service.py:295`，会从流里提取文件标识和文字结果。
-- `gpt-image-1` 继续走原生生图路径；`gpt-image-2` 现在直接走真实上游模型 `gpt-image-2`，转换逻辑在 `services/image_service.py` 的 `_resolve_upstream_target`。
+- 当前公开模型只保留 `gpt-image-2`。API 层会在 `services/api.py:217` 拒绝 `gpt-image-1`，默认模型也改成 `gpt-image-2`。
+- `gpt-image-2` 直接走真实上游模型 `gpt-image-2`，转换逻辑在 `services/image_service.py` 的 `_resolve_upstream_target`。
 - 如果请求来自 `user_key`，成功响应还会附带 `billing`，里面有本次模型、单价、实际扣减次数和剩余次数，公共逻辑在 `services/api.py:206`。
-- 如果入口是 `/v1/response` 或 `/v1/responses`，结果还会被包成 `response.output[]`，图片项类型是 `image_generation_call`。对外应按官方格式把文本模型放在顶层 `model`，把真实图片模型放在 `tools[].model`；如果没传图片模型，当前默认按 `gpt-image-1` 处理。
+- 如果入口是 `/v1/response` 或 `/v1/responses`，结果还会被包成 `response.output[]`，图片项类型是 `image_generation_call`。对外应按官方格式把文本模型放在顶层 `model`，把真实图片模型放在 `tools[].model`；如果没传图片模型，当前默认按 `gpt-image-2` 处理。
 - 对外协议转换都在 `services/api.py`。`build_responses_payload` 和 `iter_responses_stream` 负责 Responses 风格输出；`build_images_response_payload` 和 `iter_images_stream` 负责图片接口风格输出。
+- 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
 - `/v1/images/generations` 流式时，最后一定会给 `image_generation.completed` 和 `data: [DONE]`。
 - `/v1/response` 或 `/v1/responses` 流式时，最后一定会给 `response.completed` 和 `data: [DONE]`。
-- 前端图片页现在会把已选参考图存进本地会话历史，刷新后仍能在对话记录里区分“参考图”和“生成结果”。
+- 前端图片页现在会把已选参考图和 `copied_text` 一起存进本地会话历史，刷新后仍能区分“参考图”“生成结果”和“可复制文本”，实现见 `web/src/app/image/page.tsx:434` 和 `web/src/store/image-conversations.ts:26`。
 
 2026-04-22 本地实测现状：
 
@@ -40,5 +42,7 @@
 
 - 成功和失败统计都回写账号池，见 `services/account_service.py:329`。
 - 如果报错命中失效 token 条件，判断在 `services/image_service.py:205`，随后 `services/backend_service.py:68` 会把 token 从池里删掉。
+- 如果请求前刷新失败，`services/backend_service.py:27` 会把这个账号标成 3 分钟冷却，跳过后继续试下一个。
+- 如果上游会话返回 `524`、网关超时、Cloudflare 类错误，`services/image_service.py:387` 会把它们当作瞬时失败；`services/backend_service.py:104` 会跳过当前账号继续试。
 - 如果整个池里没有可用 token，`services/backend_service.py:38` 会抛出 `503`。
 - 如果上游失败、接口中途抛错或路由层提前拒绝，`user_key` 的预扣次数会退回，公共逻辑在 `services/api.py:220`。

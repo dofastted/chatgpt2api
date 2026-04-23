@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from curl_cffi.requests import Session
 
@@ -17,6 +17,7 @@ from services.config import config
 class AccountService:
     DEFAULT_CATEGORY = "普通"
     DONATION_CATEGORY = "捐赠"
+    FAILURE_COOLDOWN_SECONDS = 180
 
     ACCOUNT_TYPE_MAP = {
         "free": "Free",
@@ -55,12 +56,86 @@ class AccountService:
         return -1
 
     @staticmethod
+    def _parse_time_text(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S",):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                return parsed.replace(tzinfo=None)
+            except ValueError:
+                continue
+        try:
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed.replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _normalize_future_time_text(cls, value: Any) -> str | None:
+        parsed = cls._parse_time_text(value)
+        if parsed is None or parsed <= datetime.now():
+            return None
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+    @classmethod
+    def _build_cooldown_until(cls, seconds: int) -> str | None:
+        normalized_seconds = max(0, int(seconds or 0))
+        if normalized_seconds <= 0:
+            return None
+        return (datetime.now() + timedelta(seconds=normalized_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+
+    @classmethod
+    def _is_in_cooldown(cls, account: dict[str, Any]) -> bool:
+        if not isinstance(account, dict):
+            return False
+        cooldown_until = cls._parse_time_text(account.get("cooldown_until"))
+        return cooldown_until is not None and cooldown_until > datetime.now()
+
+    @staticmethod
     def _is_image_account_available(account: dict) -> bool:
         if not isinstance(account, dict):
             return False
-        if account.get("status") == "禁用":
+        if account.get("status") in {"禁用", "异常"}:
             return False
+        if AccountService._is_in_cooldown(account):
+            return False
+        if bool(account.get("needs_refresh")):
+            return True
         return int(account.get("quota") or 0) > 0
+
+    @staticmethod
+    def _has_known_quota_state(item: dict[str, Any]) -> bool:
+        if not isinstance(item, dict):
+            return False
+        if item.get("quota") is not None:
+            return True
+        limits_progress = item.get("limits_progress")
+        if isinstance(limits_progress, list) and len(limits_progress) > 0:
+            return True
+        if item.get("restore_at") is not None:
+            return True
+        return False
+
+    @classmethod
+    def _is_bare_import_item(cls, item: dict[str, Any]) -> bool:
+        if not isinstance(item, dict):
+            return False
+        if cls._has_known_quota_state(item):
+            return False
+        for key in ("status", "type", "default_model_slug", "success", "fail", "last_used_at", "needs_refresh"):
+            value = item.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                if value.strip():
+                    return False
+                continue
+            return False
+        return True
 
     def _decode_access_token_payload(self, access_token: str) -> dict[str, Any]:
         parts = self._clean_token(access_token).split(".")
@@ -138,6 +213,14 @@ class AccountService:
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
+        normalized["cooldown_until"] = self._normalize_future_time_text(normalized.get("cooldown_until"))
+        raw_needs_refresh = normalized.get("needs_refresh")
+        if raw_needs_refresh is None:
+            normalized["needs_refresh"] = (
+                normalized["status"] == "正常" and not self._has_known_quota_state(normalized)
+            )
+        else:
+            normalized["needs_refresh"] = bool(raw_needs_refresh)
         return normalized
 
     @staticmethod
@@ -218,6 +301,8 @@ class AccountService:
                 "success": int(account.get("success") or 0),
                 "fail": int(account.get("fail") or 0),
                 "lastUsedAt": account.get("last_used_at"),
+                "cooldownUntil": account.get("cooldown_until"),
+                "needsRefresh": bool(account.get("needs_refresh")),
             }
             for account in accounts
             if (access_token := self._clean_token(account.get("access_token")))
@@ -269,12 +354,13 @@ class AccountService:
     def add_accounts(self, tokens: list[str], category: str | None = None) -> dict:
         cleaned_tokens = self._clean_tokens(tokens)
         if not cleaned_tokens:
-            return {"added": 0, "skipped": 0, "added_tokens": [], "items": self.list_accounts()}
+            return {"added": 0, "updated": 0, "skipped": 0, "added_tokens": [], "items": self.list_accounts()}
         normalized_category = self.DONATION_CATEGORY if self._clean_token(category) == self.DONATION_CATEGORY else self.DEFAULT_CATEGORY
 
         with self._lock:
             indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
             added = 0
+            updated = 0
             skipped = 0
             added_tokens: list[str] = []
             for access_token in cleaned_tokens:
@@ -285,20 +371,90 @@ class AccountService:
                     current = {}
                 else:
                     skipped += 1
+                resolved_status = self._clean_token(current.get("status"))
+                if resolved_status != "禁用":
+                    resolved_status = "正常"
                 account = self._normalize_account(
                     {
                         **current,
                         "access_token": access_token,
                         "category": normalized_category,
                         "type": str(current.get("type") or "Free"),
+                        "status": resolved_status,
+                        "quota": 0,
+                        "limits_progress": [],
+                        "restore_at": None,
+                        "default_model_slug": None,
+                        "needs_refresh": True,
                     }
                 )
                 if account is not None:
+                    if current:
+                        updated += 1
                     indexed[access_token] = account
             self._accounts = list(indexed.values())
             self._save_accounts()
             items = self._public_items(self._accounts)
-        return {"added": added, "skipped": skipped, "added_tokens": added_tokens, "items": items}
+        return {"added": added, "updated": updated, "skipped": skipped, "added_tokens": added_tokens, "items": items}
+
+    def add_account_items(self, accounts: list[dict[str, Any]], category: str | None = None) -> dict:
+        if not accounts:
+            return {"added": 0, "updated": 0, "skipped": 0, "added_tokens": [], "items": self.list_accounts()}
+        normalized_category = self.DONATION_CATEGORY if self._clean_token(category) == self.DONATION_CATEGORY else None
+
+        with self._lock:
+            indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
+            added = 0
+            updated = 0
+            skipped = 0
+            added_tokens: list[str] = []
+            seen_tokens: set[str] = set()
+            for raw_item in accounts:
+                if not isinstance(raw_item, dict):
+                    continue
+                access_token = self._clean_token(raw_item.get("access_token"))
+                if not access_token or access_token in seen_tokens:
+                    if access_token:
+                        skipped += 1
+                    continue
+                seen_tokens.add(access_token)
+                current = indexed.get(access_token)
+                current_category = self._clean_token(current.get("category")) if current else ""
+                resolved_category = normalized_category or self._clean_token(raw_item.get("category")) or current_category
+                merged_item = {
+                    **(current or {}),
+                    **raw_item,
+                    "access_token": access_token,
+                    "category": resolved_category or self.DEFAULT_CATEGORY,
+                }
+                if self._is_bare_import_item(raw_item):
+                    resolved_status = self._clean_token(current.get("status")) if current else ""
+                    merged_item.update(
+                        {
+                            "quota": 0,
+                            "limits_progress": [],
+                            "restore_at": None,
+                            "default_model_slug": None,
+                            "needs_refresh": True,
+                            "status": resolved_status if resolved_status == "禁用" else "正常",
+                        }
+                    )
+                elif "needs_refresh" not in merged_item and not self._has_known_quota_state(merged_item):
+                    merged_item["needs_refresh"] = True
+                account = self._normalize_account(merged_item)
+                if account is None:
+                    skipped += 1
+                    continue
+                if current is None:
+                    added += 1
+                    added_tokens.append(access_token)
+                else:
+                    updated += 1
+                indexed[access_token] = account
+            self._accounts = list(indexed.values())
+            self._save_accounts()
+            items = self._public_items(self._accounts)
+        return {"added": added, "updated": updated, "skipped": skipped, "added_tokens": added_tokens, "items": items}
 
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(self._clean_tokens(tokens))
@@ -336,6 +492,28 @@ class AccountService:
             return dict(account)
         return None
 
+    def mark_request_failure(self, access_token: str, cooldown_seconds: int | None = None) -> dict | None:
+        access_token = self._clean_token(access_token)
+        if not access_token:
+            return None
+        with self._lock:
+            index = self._find_account_index(access_token)
+            if index < 0:
+                return None
+            next_item = dict(self._accounts[index])
+            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["fail"] = int(next_item.get("fail") or 0) + 1
+            next_item["cooldown_until"] = self._build_cooldown_until(
+                self.FAILURE_COOLDOWN_SECONDS if cooldown_seconds is None else cooldown_seconds
+            )
+            account = self._normalize_account(next_item)
+            if account is None:
+                return None
+            self._accounts[index] = account
+            self._save_accounts()
+            return dict(account)
+        return None
+
     def mark_image_result(self, access_token: str, success: bool) -> dict | None:
         access_token = self._clean_token(access_token)
         if not access_token:
@@ -349,6 +527,7 @@ class AccountService:
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1
                 next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
+                next_item["cooldown_until"] = None
                 if next_item["quota"] == 0:
                     next_item["status"] = "限流"
                     next_item["restore_at"] = next_item.get("restore_at") or None
@@ -356,6 +535,7 @@ class AccountService:
                     next_item["status"] = "正常"
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
+                next_item["cooldown_until"] = self._build_cooldown_until(self.FAILURE_COOLDOWN_SECONDS)
             account = self._normalize_account(next_item)
             if account is None:
                 return None
@@ -423,6 +603,8 @@ class AccountService:
                 "default_model_slug": init_payload.get("default_model_slug"),
                 "restore_at": restore_at,
                 "status": status,
+                "cooldown_until": None,
+                "needs_refresh": False,
             }
             print(
                 "[account-refresh] ok",

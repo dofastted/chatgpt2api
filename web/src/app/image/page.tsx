@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { ArrowLeft, ArrowRight, ArrowUp, Download, ImagePlus, LoaderCircle, MessageSquarePlus, Trash2, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUp, Copy, Download, ImagePlus, LoaderCircle, MessageSquarePlus, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 
 const imageModelMeta: Record<ImageModel, { helperText: string }> = {
   "gpt-image-1": {
-    helperText: "当前直接走标准生图链路。",
+    helperText: "gpt-image-1 已下架。",
   },
   "gpt-image-2": {
     helperText: "当前直接走真实 gpt-image-2 生图链路。",
@@ -31,8 +31,8 @@ const imageModelMeta: Record<ImageModel, { helperText: string }> = {
 };
 
 const DEFAULT_IMAGE_PRICING: Record<ImageModel, number> = {
-  "gpt-image-1": 1,
-  "gpt-image-2": 4,
+  "gpt-image-1": 0,
+  "gpt-image-2": 2,
 };
 const MAX_IMAGES_PER_REQUEST = 2;
 const IMAGE_COUNT_OPTIONS = Array.from({ length: MAX_IMAGES_PER_REQUEST }, (_, index) => String(index + 1));
@@ -148,7 +148,7 @@ export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
-  const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-1");
+  const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
@@ -437,6 +437,7 @@ export default function ImagePage() {
       prompt,
       model: imageModel,
       count: parsedCount,
+      copiedText: undefined,
       inputImage: draftInputImage,
       images: Array.from({ length: parsedCount }, (_, index) => ({
         id: `${conversationId}-${index}`,
@@ -487,6 +488,7 @@ export default function ImagePage() {
 
       await updateConversation(conversationId, (current) => ({
         ...(current ?? draftConversation),
+        copiedText: String(data.copied_text || "").trim() || undefined,
         images: nextImages,
         status: failedCount > 0 ? "error" : "success",
         error: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
@@ -719,6 +721,30 @@ export default function ImagePage() {
                       </span>
                     </div>
 
+                    {selectedConversation.copiedText ? (
+                      <div className="mb-4 rounded-[20px] border border-stone-200 bg-stone-50/80 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-xs font-medium uppercase tracking-[0.16em] text-stone-400">可复制文本</div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 rounded-full border-stone-200 bg-white text-stone-600 hover:bg-stone-100"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(selectedConversation.copiedText || "");
+                              toast.success("文本已复制");
+                            }}
+                          >
+                            <Copy className="size-4" />
+                            复制
+                          </Button>
+                        </div>
+                        <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-stone-700">
+                          {selectedConversation.copiedText}
+                        </pre>
+                      </div>
+                    ) : null}
+
                     {selectedConversation.status === "error" && selectedConversation.images.length === 0 ? (
                       <div className="border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600">
                         {selectedConversation.error || "生成失败"}
@@ -861,7 +887,9 @@ export default function ImagePage() {
 
                           <div className="h-4 w-px bg-stone-200" />
 
-                          {(Object.entries(imageModelMeta) as Array<[ImageModel, (typeof imageModelMeta)[ImageModel]]>).map(([model]) => {
+                          {(Object.entries(imageModelMeta) as Array<[ImageModel, (typeof imageModelMeta)[ImageModel]]>)
+                            .filter(([model]) => model === "gpt-image-2")
+                            .map(([model]) => {
                             const active = imageModel === model;
                             return (
                               <button

@@ -17,7 +17,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import webConfig from "@/constants/common-env";
-import { cleanJsonText, extractAccessTokensFromJson, normalizeTokenList } from "@/lib/account-import";
+import { cleanJsonText, extractAccountsFromJson } from "@/lib/account-import";
 import { createDonationAccounts, fetchAuthSession, type AuthRole } from "@/lib/api";
 import { clearStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
@@ -43,7 +43,7 @@ export function TopNav() {
     let cancelled = false;
     const loadSession = async () => {
       try {
-        const session = await fetchAuthSession();
+        const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
         if (!cancelled) {
           setAuthRole(session.role);
         }
@@ -73,7 +73,7 @@ export function TopNav() {
     setIsUploadingDonation(true);
 
     try {
-      const importedTokens: string[] = [];
+      const importedAccounts: Array<{ access_token: string; [key: string]: unknown }> = [];
       const invalidFiles: string[] = [];
       const emptyFiles: string[] = [];
       let matchedFiles = 0;
@@ -87,21 +87,33 @@ export function TopNav() {
           }
 
           const payload = JSON.parse(text);
-          const fileTokens = extractAccessTokensFromJson(payload);
-          if (fileTokens.length === 0) {
+          const fileAccounts = extractAccountsFromJson(payload);
+          if (fileAccounts.length === 0) {
             emptyFiles.push(file.name);
             continue;
           }
 
           matchedFiles += 1;
-          importedTokens.push(...fileTokens);
+          importedAccounts.push(...fileAccounts);
         } catch {
           invalidFiles.push(file.name);
         }
       }
 
-      const tokens = normalizeTokenList(importedTokens);
-      if (tokens.length === 0) {
+      const indexedAccounts = new Map<string, { access_token: string; [key: string]: unknown }>();
+      importedAccounts.forEach((item) => {
+        const accessToken = String(item.access_token || "").trim();
+        if (!accessToken) {
+          return;
+        }
+        indexedAccounts.set(accessToken, {
+          ...indexedAccounts.get(accessToken),
+          ...item,
+          access_token: accessToken,
+        });
+      });
+      const accountsToImport = Array.from(indexedAccounts.values());
+      if (accountsToImport.length === 0) {
         const errors: string[] = [];
         if (invalidFiles.length > 0) {
           errors.push(`${invalidFiles.length} 个文件不是有效 JSON`);
@@ -113,13 +125,13 @@ export function TopNav() {
         return;
       }
 
-      const data = await createDonationAccounts(tokens);
+      const data = await createDonationAccounts({ accounts: accountsToImport });
       const errorCount = data.errors?.length ?? 0;
       const rewardedQuota = Math.max(0, Number(data.rewarded_quota || 0));
       const rewardedAccounts = Math.max(0, Number(data.rewarded_accounts || 0));
       setDonationOpen(false);
 
-      const messages = [`已提交 ${matchedFiles} 个文件，共 ${tokens.length} 个 Token`];
+      const messages = [`已提交 ${matchedFiles} 个文件，共 ${accountsToImport.length} 个账户`];
       messages.push("这些账户会按捐赠账户入池");
       if ((data.skipped ?? 0) > 0) {
         messages.push(`跳过 ${data.skipped} 个重复项`);
