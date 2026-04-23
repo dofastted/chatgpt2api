@@ -344,6 +344,20 @@ class ImageServiceAttachmentTests(unittest.TestCase):
     def test_is_transient_image_error_treats_conversation_422_as_retryable(self) -> None:
         self.assertTrue(image_service.is_transient_image_error("conversation failed: 422"))
 
+    def test_is_transient_image_error_treats_json_status_code_429_as_retryable(self) -> None:
+        self.assertTrue(
+            image_service.is_transient_image_error(
+                '{"detail":{"message":"upstream rate limit","status_code":429}}'
+            )
+        )
+
+    def test_is_transient_image_error_treats_cloudflare_code_string_as_retryable(self) -> None:
+        self.assertTrue(
+            image_service.is_transient_image_error(
+                '{"error":{"code":"cf_bad_gateway","message":"temporarily unavailable"}}'
+            )
+        )
+
     def test_generate_image_result_retries_when_text_render_quality_is_rejected_once(self) -> None:
         with (
             patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),

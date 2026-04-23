@@ -59,7 +59,7 @@ POST /v1/images/generations
 - 响应会额外返回 `billing`，包含本次模型、单价、实际扣减次数和剩余次数
 - 如果上游页面返回了可复制文本，响应还会额外带 `copied_text`
 - 同一个 key 在 10 秒间隔内的新请求会进入等待队列，不会立刻返回 429；等待队列超过 100 个时才会拒绝
-- 如果上游返回 `524`、网关超时或 Cloudflare 类错误，服务会自动换下一个可用账号重试
+- 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
 - 支持 `stream: true`。流式时会返回 `image_generation.partial_image`，最后返回 `image_generation.completed` 和 `data: [DONE]`
 
@@ -82,11 +82,11 @@ POST /v1/response
 - 如果上游页面返回了可复制文本，响应顶层还会带 `copied_text`
 - 同样会按 `user key` 自己的模型单价扣费，并在响应里返回 `billing`
 - 同一个 key 在 10 秒间隔内的新请求会进入等待队列，不会立刻返回 429；等待队列超过 100 个时才会拒绝
-- 如果上游返回 `524`、网关超时或 Cloudflare 类错误，服务会自动换下一个可用账号重试
+- 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
 - 支持 `stream: true`。流式时会依次返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后返回 `data: [DONE]`
 
-前端图片页现在会先把参考图上传到本地接口，再在 `/v1/responses` 里提交 `input_image.file_id`。本地历史仍保留缩略图预览和 `fileId`，刷新页面后还能区分输入图和生成结果。如果上游页面返回了可复制文本，前端会把这段文本保存到当前会话，并提供复制按钮。
+前端图片页现在会先把参考图上传到本地接口，再在 `/v1/responses` 里提交 `input_image.file_id`。本地历史仍保留缩略图预览和 `fileId`，刷新页面后还能区分输入图和生成结果。同一页面里切到别的会话时，正在生成的结果也会继续写回原会话。如果上游页面返回了可复制文本，前端会把这段文本保存到当前会话，并提供复制按钮。
 
 当前暂不支持：
 

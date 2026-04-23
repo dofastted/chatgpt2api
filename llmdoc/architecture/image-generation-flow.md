@@ -33,7 +33,8 @@
 - 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
 - `/v1/images/generations` 流式时，最后一定会给 `image_generation.completed` 和 `data: [DONE]`。
 - `/v1/response` 或 `/v1/responses` 流式时，最后一定会给 `response.completed` 和 `data: [DONE]`。
-- 前端图片页现在会把已选参考图的缩略图、`fileId` 和 `copied_text` 一起存进本地会话历史，刷新后仍能区分“参考图”“生成结果”和“可复制文本”，实现见 `web/src/store/image-conversations.ts:16` 到 `web/src/store/image-conversations.ts:89`。
+- 前端图片页现在会把已选参考图的缩略图、`fileId` 和 `copied_text` 一起存进本地会话历史，刷新后仍能区分“参考图”“生成结果”和“可复制文本”，实现见 `web/src/store/image-conversations.ts`。
+- 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。
 
 2026-04-23 本地实测现状：
 
@@ -46,6 +47,6 @@
 - 成功和失败统计都回写账号池，见 `services/account_service.py:329`。
 - 如果报错命中失效 token 条件，判断在 `services/image_service.py:205`，随后 `services/backend_service.py:68` 会把 token 从池里删掉。
 - 如果请求前刷新失败，`services/backend_service.py:27` 会把这个账号标成 3 分钟冷却，跳过后继续试下一个。
-- 如果上游会话返回 `524`、网关超时、Cloudflare 类错误，`services/image_service.py:387` 会把它们当作瞬时失败；`services/backend_service.py:104` 会跳过当前账号继续试。
+- 如果上游会话返回瞬时错误，`services/image_service.py` 会把 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit、temporarily unavailable 这类信号都当作可重试失败；`services/backend_service.py` 会跳过当前账号继续试。
 - 如果整个池里没有可用 token，`services/backend_service.py:38` 会抛出 `503`。
 - 如果上游失败、接口中途抛错或路由层提前拒绝，`user_key` 的预扣次数会退回，公共逻辑在 `services/api.py:220`。

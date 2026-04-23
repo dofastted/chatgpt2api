@@ -41,6 +41,7 @@ SUPPORTED_INPUT_IMAGE_EXTENSIONS = {
     "image/bmp": ".bmp",
     "image/avif": ".avif",
 }
+TRANSIENT_UPSTREAM_STATUS_CODES = frozenset((*TRANSIENT_HTTP_STATUS_CODES, 422))
 
 _CORES = [16, 24, 32]
 _SCREENS = [3000, 4000, 6000]
@@ -385,9 +386,59 @@ def is_low_quality_image_error(message: str) -> bool:
     return "low quality text render" in str(message or "").lower()
 
 
+def _iter_nested_error_values(value: object):
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_nested_error_values(nested)
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_nested_error_values(item)
+        return
+    yield value
+
+
+def _extract_upstream_status_codes(message: str) -> set[int]:
+    text = str(message or "").strip()
+    if not text:
+        return set()
+
+    codes: set[int] = set()
+    for match in re.finditer(r"\b(408|422|429|500|502|503|504|520|522|524)\b", text):
+        try:
+            codes.add(int(match.group(1)))
+        except Exception:
+            continue
+
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return codes
+
+    for value in _iter_nested_error_values(payload):
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, (int, float)):
+            numeric = int(value)
+            if numeric in TRANSIENT_UPSTREAM_STATUS_CODES:
+                codes.add(numeric)
+            continue
+        nested_text = str(value or "").strip()
+        if not nested_text:
+            continue
+        for match in re.finditer(r"\b(408|422|429|500|502|503|504|520|522|524)\b", nested_text):
+            try:
+                codes.add(int(match.group(1)))
+            except Exception:
+                continue
+    return codes
+
+
 def is_transient_image_error(message: str) -> bool:
     text = str(message or "").lower()
     return (
+        bool(_extract_upstream_status_codes(text) & TRANSIENT_UPSTREAM_STATUS_CODES)
+        or
         _is_transient_stream_error(Exception(text))
         or "download image failed" in text
         or "failed to get download url" in text
@@ -395,12 +446,12 @@ def is_transient_image_error(message: str) -> bool:
         or "timed out" in text
         or "timeout" in text
         or "gateway timeout" in text
-        or "http 524" in text
-        or "failed: 524" in text
-        or "status_code=524" in text
-        or "status code 524" in text
         or "cloudflare" in text
-        or "conversation failed: 422" in text
+        or "rate limit" in text
+        or "too many requests" in text
+        or "temporarily unavailable" in text
+        or "upstream_error" in text
+        or "overloaded_error" in text
     )
 
 

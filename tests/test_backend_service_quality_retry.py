@@ -13,6 +13,10 @@ class FakeAccountService:
         self.index = 0
         self.removed: list[str] = []
         self.failed: list[str] = []
+        self.accounts = {
+            "bad-token": {"access_token": "bad-token", "quota": 5, "status": "正常"},
+            "good-token": {"access_token": "good-token", "quota": 5, "status": "正常"},
+        }
 
     def next_token(self, excluded_tokens: set[str] | None = None) -> str:
         excluded = excluded_tokens or set()
@@ -21,14 +25,31 @@ class FakeAccountService:
                 return token
         raise RuntimeError("no token")
 
+    def get_account(self, access_token: str) -> dict | None:
+        item = self.accounts.get(access_token)
+        return dict(item) if item is not None else None
+
     def fetch_remote_info(self, access_token: str) -> dict:
-        return {"status": "正常", "quota": 5}
+        item = self.accounts.get(access_token) or {"access_token": access_token}
+        return {**item, "status": "正常", "quota": 5}
 
     def update_account(self, access_token: str, updates: dict) -> dict:
-        return {"access_token": access_token, **updates}
+        next_item = {
+            **(self.accounts.get(access_token) or {"access_token": access_token}),
+            **updates,
+        }
+        self.accounts[access_token] = next_item
+        return dict(next_item)
 
     def mark_image_result(self, access_token: str, success: bool) -> dict:
-        return {"access_token": access_token, "quota": 5, "status": "正常", "success": success}
+        next_item = {
+            **(self.accounts.get(access_token) or {"access_token": access_token}),
+            "quota": 5,
+            "status": "正常",
+            "success": success,
+        }
+        self.accounts[access_token] = next_item
+        return dict(next_item)
 
     def remove_token(self, access_token: str) -> None:
         self.removed.append(access_token)
@@ -92,6 +113,26 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
             del prompt, model, n, input_images
             if access_token == "bad-token":
                 raise ImageGenerationError("conversation failed: 524")
+            return {"created": 1, "data": [{"b64_json": "ok"}]}
+
+        with patch("services.backend_service.generate_image_result", side_effect=fake_generate):
+            payload = service.generate_with_pool("draw ABCD", "gpt-image-2", 1)
+
+        self.assertEqual(payload["data"][0]["b64_json"], "ok")
+
+    def test_generate_with_pool_retries_next_token_when_upstream_returns_json_429(self) -> None:
+        service = BackendService(FakeAccountService())
+
+        def fake_generate(
+            access_token: str,
+            prompt: str,
+            model: str,
+            n: int,
+            input_images: list[dict[str, str]] | None = None,
+        ) -> dict:
+            del prompt, model, n, input_images
+            if access_token == "bad-token":
+                raise ImageGenerationError('{"detail":{"message":"rate limited","status_code":429}}')
             return {"created": 1, "data": [{"b64_json": "ok"}]}
 
         with patch("services.backend_service.generate_image_result", side_effect=fake_generate):

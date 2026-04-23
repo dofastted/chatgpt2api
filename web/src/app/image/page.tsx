@@ -13,6 +13,7 @@ import {
   clearImageConversations,
   deleteImageConversation,
   listImageConversations,
+  replaceImageConversations,
   saveImageConversation,
   type ImageConversation,
   type StoredInputImage,
@@ -37,6 +38,7 @@ const DEFAULT_IMAGE_PRICING: Record<ImageModel, number> = {
 const MAX_IMAGES_PER_REQUEST = 2;
 const IMAGE_COUNT_OPTIONS = Array.from({ length: MAX_IMAGES_PER_REQUEST }, (_, index) => String(index + 1));
 const MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024;
+const activeGenerationKeys = new Set<string>();
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -116,7 +118,7 @@ function readFileAsDataUrl(file: File) {
 
 async function normalizeConversationHistory(items: ImageConversation[], scope: string) {
   const normalized = items.map((item) =>
-    item.status === "generating"
+    item.status === "generating" && !activeGenerationKeys.has(`${scope}:${item.id}`)
       ? {
           ...item,
           status: "error" as const,
@@ -136,17 +138,16 @@ async function normalizeConversationHistory(items: ImageConversation[], scope: s
       : item,
   );
 
-  await Promise.all(
-    normalized
-      .filter((item, index) => item !== items[index])
-      .map((item) => saveImageConversation(scope, item)),
-  );
+  if (normalized.some((item, index) => item !== items[index])) {
+    await replaceImageConversations(scope, normalized);
+  }
 
   return normalized;
 }
 
 export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
+  const conversationsRef = useRef<ImageConversation[]>([]);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
@@ -252,6 +253,7 @@ export default function ImagePage() {
         if (cancelled) {
           return;
         }
+        conversationsRef.current = normalizedItems;
         setConversations(normalizedItems);
       } catch (error) {
         const message = error instanceof Error ? error.message : "读取会话记录失败";
@@ -324,10 +326,17 @@ export default function ImagePage() {
     });
   }, [selectedConversation, isGenerating]);
 
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
   const persistConversation = async (conversation: ImageConversation) => {
     if (!conversationScope) {
       return;
     }
+    conversationsRef.current = [conversation, ...conversationsRef.current.filter((item) => item.id !== conversation.id)].sort(
+      (a, b) => b.createdAt.localeCompare(a.createdAt),
+    );
     setConversations((prev) => {
       const next = [conversation, ...prev.filter((item) => item.id !== conversation.id)];
       return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -342,18 +351,14 @@ export default function ImagePage() {
     if (!conversationScope) {
       return;
     }
-    let nextConversation: ImageConversation | null = null;
+    const current = conversationsRef.current.find((item) => item.id === conversationId) ?? null;
+    const nextConversation = updater(current);
+    conversationsRef.current = [nextConversation, ...conversationsRef.current.filter((item) => item.id !== conversationId)].sort(
+      (a, b) => b.createdAt.localeCompare(a.createdAt),
+    );
+    setConversations(conversationsRef.current);
 
-    setConversations((prev) => {
-      const current = prev.find((item) => item.id === conversationId) ?? null;
-      nextConversation = updater(current);
-      const next = [nextConversation, ...prev.filter((item) => item.id !== conversationId)];
-      return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    });
-
-    if (nextConversation) {
-      await saveImageConversation(conversationScope, nextConversation);
-    }
+    await saveImageConversation(conversationScope, nextConversation);
   };
 
   const handleCreateDraft = () => {
@@ -366,6 +371,7 @@ export default function ImagePage() {
 
   const handleDeleteConversation = async (id: string) => {
     const nextConversations = conversations.filter((item) => item.id !== id);
+    conversationsRef.current = nextConversations;
     setConversations(nextConversations);
     setSelectedConversationId((prev) => (prev === id ? null : prev));
     if (selectedConversationId === id) {
@@ -381,6 +387,7 @@ export default function ImagePage() {
       const message = error instanceof Error ? error.message : "删除会话失败";
       toast.error(message);
       const items = conversationScope ? await listImageConversations(conversationScope) : [];
+      conversationsRef.current = items;
       setConversations(items);
     }
   };
@@ -391,6 +398,7 @@ export default function ImagePage() {
         return;
       }
       await clearImageConversations(conversationScope);
+      conversationsRef.current = [];
       setConversations([]);
       setSelectedConversationId(null);
       setPreviewImageId(null);
@@ -413,7 +421,7 @@ export default function ImagePage() {
       return;
     }
     if (isQuotaInsufficient) {
-      toast.error(`当前额度不足，本次需要 ${requestCost} 次`);
+      toast.error(`当前额度不足，本次需要 ${requestCost} 额度`);
       return;
     }
 
@@ -449,6 +457,7 @@ export default function ImagePage() {
       createdAt: now,
       status: "generating",
     };
+    const activeGenerationKey = `${conversationScope}:${conversationId}`;
 
     setIsGenerating(true);
     setSelectedConversationId(conversationId);
@@ -456,6 +465,7 @@ export default function ImagePage() {
     setInputImage(null);
 
     try {
+      activeGenerationKeys.add(activeGenerationKey);
       await persistConversation(draftConversation);
 
       const data = await generateImage(prompt, imageModel, parsedCount, {
@@ -513,6 +523,7 @@ export default function ImagePage() {
       });
       toast.error(message);
     } finally {
+      activeGenerationKeys.delete(activeGenerationKey);
       setIsGenerating(false);
     }
   };
@@ -627,10 +638,10 @@ export default function ImagePage() {
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-stone-400">本次消耗</span>
-                  <span className="font-medium text-stone-900">{requestCost} 次</span>
+                  <span className="font-medium text-stone-900">{requestCost} 额度</span>
                 </div>
               </div>
-              <p className="mt-4 text-[11px] leading-5 text-stone-400">{currentUnitCost} / 张</p>
+              <p className="mt-4 text-[11px] leading-5 text-stone-400">当前单价 {currentUnitCost} 额度 / 张</p>
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -944,7 +955,7 @@ export default function ImagePage() {
 
                         <div className={cn("text-xs", isQuotaInsufficient ? "text-rose-600" : "text-stone-500")}>
                           {isQuotaInsufficient
-                            ? `至少需要 ${requestCost} 次`
+                            ? `至少需要 ${requestCost} 额度`
                             : isUploadingInputImage
                               ? "图片上传中"
                               : inputImage

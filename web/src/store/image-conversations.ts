@@ -45,6 +45,7 @@ const imageConversationStorage = localforage.createInstance({
 
 const IMAGE_CONVERSATIONS_KEY_PREFIX = "items";
 const IMAGE_CONVERSATIONS_DEFAULT_SCOPE = "__anonymous__";
+const conversationWriteQueues = new Map<string, Promise<void>>();
 
 function normalizeConversationScope(scope: string): string {
   const normalized = String(scope || "").trim();
@@ -53,6 +54,25 @@ function normalizeConversationScope(scope: string): string {
 
 function buildConversationStorageKey(scope: string): string {
   return `${IMAGE_CONVERSATIONS_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
+}
+
+function enqueueConversationWrite<T>(scope: string, operation: () => Promise<T>): Promise<T> {
+  const normalizedScope = normalizeConversationScope(scope);
+  const previous = conversationWriteQueues.get(normalizedScope) || Promise.resolve();
+  const next = previous.catch(() => undefined).then(operation);
+  const queued = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  conversationWriteQueues.set(
+    normalizedScope,
+    queued,
+  );
+  return next.finally(() => {
+    if (conversationWriteQueues.get(normalizedScope) === queued) {
+      conversationWriteQueues.delete(normalizedScope);
+    }
+  });
 }
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
@@ -104,20 +124,34 @@ export async function listImageConversations(scope: string): Promise<ImageConver
 }
 
 export async function saveImageConversation(scope: string, conversation: ImageConversation): Promise<void> {
-  const items = await listImageConversations(scope);
-  const nextItems = [normalizeConversation(conversation), ...items.filter((item) => item.id !== conversation.id)];
-  nextItems.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  await imageConversationStorage.setItem(buildConversationStorageKey(scope), nextItems);
+  await enqueueConversationWrite(scope, async () => {
+    const items = await listImageConversations(scope);
+    const nextItems = [normalizeConversation(conversation), ...items.filter((item) => item.id !== conversation.id)];
+    nextItems.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    await imageConversationStorage.setItem(buildConversationStorageKey(scope), nextItems);
+  });
+}
+
+export async function replaceImageConversations(scope: string, conversations: ImageConversation[]): Promise<void> {
+  await enqueueConversationWrite(scope, async () => {
+    const nextItems = conversations.map(normalizeConversation);
+    nextItems.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    await imageConversationStorage.setItem(buildConversationStorageKey(scope), nextItems);
+  });
 }
 
 export async function deleteImageConversation(scope: string, id: string): Promise<void> {
-  const items = await listImageConversations(scope);
-  await imageConversationStorage.setItem(
-    buildConversationStorageKey(scope),
-    items.filter((item) => item.id !== id),
-  );
+  await enqueueConversationWrite(scope, async () => {
+    const items = await listImageConversations(scope);
+    await imageConversationStorage.setItem(
+      buildConversationStorageKey(scope),
+      items.filter((item) => item.id !== id),
+    );
+  });
 }
 
 export async function clearImageConversations(scope: string): Promise<void> {
-  await imageConversationStorage.removeItem(buildConversationStorageKey(scope));
+  await enqueueConversationWrite(scope, async () => {
+    await imageConversationStorage.removeItem(buildConversationStorageKey(scope));
+  });
 }
