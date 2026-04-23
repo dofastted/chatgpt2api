@@ -19,7 +19,10 @@
 
 - Session 和指纹头在 `services/image_service.py:88` 组装。
 - Chat requirements token 在 `services/image_service.py:184` 获取。
-- 如果请求里带 `input_image`，会先抓取或解码图片，再走 `/backend-api/files` 上传并写进会话 `attachments`。
+- 如果请求里带 `input_image.image_url`，会先抓取或解码图片；如果带 `input_image.file_id`，会先从 `services/uploaded_image_service.py:212` 读取本地已上传文件。
+- 本地上传入口是 `services/api.py:859` 到 `services/api.py:913`。前端图片页会先调用 `web/src/lib/api.ts:350` 到 `web/src/lib/api.ts:364` 上传图片，再在 `web/src/app/image/page.tsx:545` 到 `web/src/app/image/page.tsx:558` 把 `fileId` 保存到当前输入图状态。
+- 上传到 ChatGPT 上游的过程在 `services/image_service.py:760` 到 `services/image_service.py:840`。这里仍然使用上游的 `/backend-api/files` 和上传确认接口。
+- 组装会话消息时，文本只保留在 `services/image_service.py:843` 到 `services/image_service.py:884` 的 `content.parts`，图片只放在 `metadata.attachments`，不再把图片指针塞进 `content.parts`。
 - 会话流请求在 `services/image_service.py:215` 发出。
 - SSE 解析在 `services/image_service.py:295`，会从流里提取文件标识和文字结果。
 - 当前公开模型只保留 `gpt-image-2`。API 层会在 `services/api.py:217` 拒绝 `gpt-image-1`，默认模型也改成 `gpt-image-2`。
@@ -30,13 +33,13 @@
 - 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
 - `/v1/images/generations` 流式时，最后一定会给 `image_generation.completed` 和 `data: [DONE]`。
 - `/v1/response` 或 `/v1/responses` 流式时，最后一定会给 `response.completed` 和 `data: [DONE]`。
-- 前端图片页现在会把已选参考图和 `copied_text` 一起存进本地会话历史，刷新后仍能区分“参考图”“生成结果”和“可复制文本”，实现见 `web/src/app/image/page.tsx:434` 和 `web/src/store/image-conversations.ts:26`。
+- 前端图片页现在会把已选参考图的缩略图、`fileId` 和 `copied_text` 一起存进本地会话历史，刷新后仍能区分“参考图”“生成结果”和“可复制文本”，实现见 `web/src/store/image-conversations.ts:16` 到 `web/src/store/image-conversations.ts:89`。
 
-2026-04-22 本地实测现状：
+2026-04-23 本地实测现状：
 
-- 用本地 `3002` 上的真实接口、现有管理员密钥和提示词 `ABCD一二三` 做验收时，`gpt-image-1` 没有稳定输出目标文本，而是偏成了字母卡片和词汇配图。
-- 同一组测试里，`gpt-image-2` 能稳定给出 `A B C D`，也能给出接近 `一 二 三` 的横线字形，但版式会被改写，不会严格原样排成连续的 `ABCD一二三`。
-- 因此当前仓库层面的状态是：`gpt-image-2` 的文字控制明显好于 `gpt-image-1`，但两者都不能承诺“按提示逐字忠实还原”。
+- 用本地 `3002` 上的真实接口、`Authorization: Bearer test-123` 和 `.llmdoc-tmp/api-image-tests/gpt-image-2.png` 先调本地上传接口，再用返回的 `file_id` 请求 `/v1/responses`，返回 200。
+- 本次结果图保存到 `.llmdoc-tmp/api-image-tests/uploaded-abc123-result.png`，实测内容是 `ABC123`。
+- 这说明当前仓库已经支持“本地上传参考图 -> Responses `file_id` 输入图 -> 上游附件生图 -> 本地拿回结果图”的整条路径。
 
 失败处理：
 

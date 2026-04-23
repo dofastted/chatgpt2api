@@ -17,6 +17,7 @@ from curl_cffi.requests import Session
 from services.account_service import account_service
 from services.config import config
 from services import proof_of_work
+from services.uploaded_image_service import uploaded_image_service
 
 
 BASE_URL = "https://chatgpt.com"
@@ -399,6 +400,7 @@ def is_transient_image_error(message: str) -> bool:
         or "status_code=524" in text
         or "status code 524" in text
         or "cloudflare" in text
+        or "conversation failed: 422" in text
     )
 
 
@@ -736,13 +738,32 @@ def _detect_input_image_dimensions(image_bytes: bytes) -> tuple[int | None, int 
         return None, None
 
 
+def _normalize_input_image_ref(input_image: dict[str, str] | str) -> dict[str, str]:
+    if isinstance(input_image, str):
+        return {"image_url": str(input_image or "").strip()}
+    return dict(input_image or {})
+
+
+def _load_input_image_bytes(session: Session, input_image: dict[str, str] | str) -> tuple[bytes, str]:
+    normalized_input_image = _normalize_input_image_ref(input_image)
+    file_id = str(normalized_input_image.get("file_id") or "").strip()
+    if file_id:
+        stored = uploaded_image_service.read_bytes(file_id, str(normalized_input_image.get("owner_auth_token") or ""))
+        if stored is None:
+            raise ImageGenerationError("input image file_id was not found")
+        image_bytes, item = stored
+        mime_type = _normalize_input_image_mime_type(image_bytes, str(item.get("mime_type") or ""))
+        return image_bytes, mime_type
+    return _download_input_image(session, str(normalized_input_image.get("image_url") or "").strip())
+
+
 def _build_uploaded_input_image(
     session: Session,
     access_token: str,
     device_id: str,
-    image_url: str,
+    input_image: dict[str, str] | str,
 ) -> UploadedInputImage:
-    image_bytes, mime_type = _download_input_image(session, image_url)
+    image_bytes, mime_type = _load_input_image_bytes(session, input_image)
     width, height = _detect_input_image_dimensions(image_bytes)
     file_ext = SUPPORTED_INPUT_IMAGE_EXTENSIONS.get(mime_type, ".png")
     file_name = f"input-{uuid.uuid4().hex}{file_ext}"
@@ -835,20 +856,14 @@ def _build_conversation_message(
             "metadata": {"attachments": []},
         }
 
-    parts: list[object] = [prompt]
     attachments: list[dict[str, object]] = []
     for image in normalized_input_images:
         uploaded = _build_uploaded_input_image(
             session,
             access_token,
             device_id,
-            str((image or {}).get("image_url") or "").strip(),
+            image,
         )
-        image_part: dict[str, object] = {
-            "content_type": "image_asset_pointer",
-            "asset_pointer": f"file-service://{uploaded.file_id}",
-            "size_bytes": uploaded.size_bytes,
-        }
         attachment: dict[str, object] = {
             "id": uploaded.file_id,
             "name": uploaded.file_name,
@@ -856,18 +871,15 @@ def _build_conversation_message(
             "size": uploaded.size_bytes,
         }
         if uploaded.width is not None:
-            image_part["width"] = uploaded.width
             attachment["width"] = uploaded.width
         if uploaded.height is not None:
-            image_part["height"] = uploaded.height
             attachment["height"] = uploaded.height
-        parts.append(image_part)
         attachments.append(attachment)
 
     return {
         "id": str(uuid.uuid4()),
         "author": {"role": "user"},
-        "content": {"content_type": "multimodal_text", "parts": parts},
+        "content": {"content_type": "text", "parts": [prompt]},
         "metadata": {"attachments": attachments},
     }
 
@@ -949,7 +961,8 @@ def generate_image_result(
     n: int = 1,
     input_images: list[dict[str, str]] | None = None,
 ) -> dict:
-    prompt = _refine_prompt_for_text_rendering(prompt)
+    if not input_images:
+        prompt = _refine_prompt_for_text_rendering(prompt)
     access_token = str(access_token or "").strip()
     if not prompt:
         raise ImageGenerationError("prompt is required")

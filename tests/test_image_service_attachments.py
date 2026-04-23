@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.modules.setdefault("pybase64", base64)
 
 from services import image_service
+from services.uploaded_image_service import uploaded_image_service
 from PIL import Image, ImageDraw
 
 
@@ -108,11 +109,83 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             )
 
         self.assertEqual(message["author"]["role"], "user")
-        self.assertEqual(message["content"]["content_type"], "multimodal_text")
-        self.assertEqual(message["content"]["parts"][0], "edit this image")
-        self.assertEqual(message["content"]["parts"][1]["asset_pointer"], "file-service://file-input-1")
-        self.assertEqual(message["metadata"]["attachments"][0]["id"], "file-input-1")
-        self.assertEqual(message["metadata"]["attachments"][0]["mimeType"], "image/png")
+        self.assertEqual(message["content"]["content_type"], "text")
+        self.assertEqual(message["content"]["parts"], ["edit this image"])
+        self.assertEqual(
+            message["metadata"]["attachments"],
+            [
+                {
+                    "id": "file-input-1",
+                    "name": "input.png",
+                    "mimeType": "image/png",
+                    "size": 321,
+                    "width": 512,
+                    "height": 256,
+                }
+            ],
+        )
+        self.assertNotIn("attachments", message["content"])
+
+    def test_build_uploaded_input_image_supports_local_file_id(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+
+        class Response:
+            def __init__(self, *, ok: bool = True, payload: dict | None = None, status_code: int = 200, text: str = ""):
+                self.ok = ok
+                self._payload = payload or {}
+                self.status_code = status_code
+                self.text = text
+
+            def json(self) -> dict:
+                return dict(self._payload)
+
+        class Session(FakeSession):
+            def __init__(self) -> None:
+                self.post_calls: list[tuple[str, dict | None]] = []
+                self.put_calls: list[tuple[str, bytes, dict[str, str] | None]] = []
+
+            def post(self, url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 60) -> Response:
+                del headers, timeout
+                self.post_calls.append((url, json))
+                if url.endswith("/backend-api/files"):
+                    return Response(payload={"file_id": "file-upload-2", "upload_url": "https://upload.example.com/blob"})
+                if url.endswith("/backend-api/files/file-upload-2/uploaded"):
+                    return Response(payload={"status": "success"})
+                raise AssertionError(f"unexpected post url: {url}")
+
+            def put(
+                self,
+                url: str,
+                data: bytes | None = None,
+                headers: dict[str, str] | None = None,
+                timeout: int = 120,
+            ) -> Response:
+                del timeout
+                self.put_calls.append((url, data or b"", headers))
+                return Response(status_code=201)
+
+        session = Session()
+        with patch.object(
+            uploaded_image_service,
+            "read_bytes",
+            return_value=(
+                png_bytes,
+                {"mime_type": "image/png"},
+            ),
+        ):
+            uploaded = image_service._build_uploaded_input_image(
+                session,
+                "token-123",
+                "device-1",
+                {"file_id": "upload-local-1", "owner_auth_token": "test-auth-key"},
+            )
+
+        self.assertEqual(uploaded.file_id, "file-upload-2")
+        self.assertEqual(uploaded.mime_type, "image/png")
+        self.assertEqual(uploaded.size_bytes, len(png_bytes))
+        self.assertEqual(session.put_calls[0][1], png_bytes)
 
     def test_build_conversation_message_surfaces_upload_failure(self) -> None:
         with patch.object(
@@ -174,6 +247,36 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertIn("Keep one centered line only", refined)
         self.assertIn("No blur, glow, bloom", refined)
         self.assertTrue(refined.startswith(text_prompt))
+
+    def test_generate_image_result_skips_prompt_refinement_when_input_image_exists(self) -> None:
+        with (
+            patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),
+            patch.object(image_service, "_resolve_upstream_target", return_value=("gpt-image-2", None)),
+            patch.object(image_service, "_bootstrap", return_value="device-1"),
+            patch.object(image_service, "_chat_requirements", return_value=("chat-token", {})),
+            patch.object(image_service, "_send_conversation", return_value=object()) as send_conversation,
+            patch.object(
+                image_service,
+                "_parse_sse",
+                return_value={
+                    "conversation_id": "conv-input-1",
+                    "file_ids": ["file-5"],
+                    "text": "",
+                },
+            ),
+            patch.object(image_service, "_fetch_download_url", return_value="https://example.com/5"),
+            patch.object(image_service, "_download_image_payload", return_value=("aW1hZ2UtNQ==", "image/png")),
+        ):
+            image_service.generate_image_result(
+                "token-123",
+                "black background with white letters ABCD",
+                model="gpt-image-2",
+                n=1,
+                input_images=[{"type": "input_image", "file_id": "upload_1", "owner_auth_token": "test-auth-key"}],
+            )
+
+        sent_prompt = send_conversation.call_args.args[6]
+        self.assertEqual(sent_prompt, "black background with white letters ABCD")
 
     def test_generate_image_result_returns_all_upstream_attachments(self) -> None:
         with (
@@ -237,6 +340,9 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertEqual(parse_calls["count"], 2)
         self.assertEqual(len(payload["data"]), 1)
         self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtMw==")
+
+    def test_is_transient_image_error_treats_conversation_422_as_retryable(self) -> None:
+        self.assertTrue(image_service.is_transient_image_error("conversation failed: 422"))
 
     def test_generate_image_result_retries_when_text_render_quality_is_rejected_once(self) -> None:
         with (

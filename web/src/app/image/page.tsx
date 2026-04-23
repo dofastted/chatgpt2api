@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { buildImageDataUrl, detectImageFileExtension, detectImageMimeType } from "@/lib/image-data";
 import { Textarea } from "@/components/ui/textarea";
-import { fetchQuotaSummary, generateImage, type ImageModel } from "@/lib/api";
+import { fetchQuotaSummary, generateImage, uploadInputImage, type ImageModel } from "@/lib/api";
 import {
   clearImageConversations,
   deleteImageConversation,
@@ -83,6 +83,7 @@ type PreviewableImage = {
 
 type PendingInputImage = {
   id: string;
+  fileId: string;
   fileName: string;
   dataUrl: string;
   sizeBytes: number;
@@ -155,6 +156,7 @@ export default function ImagePage() {
   const [conversationScope, setConversationScope] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isUploadingInputImage, setIsUploadingInputImage] = useState(false);
   const [inputImage, setInputImage] = useState<PendingInputImage | null>(null);
   const [availableQuota, setAvailableQuota] = useState<number | null>(null);
   const [currentPricing, setCurrentPricing] = useState<Record<ImageModel, number> | null>(null);
@@ -423,6 +425,7 @@ export default function ImagePage() {
     const draftInputImage: StoredInputImage | null = currentInputImage
       ? {
           id: currentInputImage.id,
+          fileId: currentInputImage.fileId,
           fileName: currentInputImage.fileName,
           dataUrl: currentInputImage.dataUrl,
           mimeType: currentInputImage.dataUrl.startsWith("data:")
@@ -457,6 +460,7 @@ export default function ImagePage() {
 
       const data = await generateImage(prompt, imageModel, parsedCount, {
         inputImageUrl: currentInputImage?.dataUrl,
+        inputImageFileId: currentInputImage?.fileId,
       });
       const returnedItems = Array.isArray(data.data) ? data.data : [];
       if (data.billing) {
@@ -539,13 +543,15 @@ export default function ImagePage() {
       return;
     }
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      setIsUploadingInputImage(true);
+      const [dataUrl, uploadedImage] = await Promise.all([readFileAsDataUrl(file), uploadInputImage(file)]);
       const imageId =
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       setInputImage({
         id: imageId,
+        fileId: uploadedImage.file_id,
         fileName: file.name,
         dataUrl,
         sizeBytes: file.size,
@@ -553,6 +559,8 @@ export default function ImagePage() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "读取图片失败";
       toast.error(message);
+    } finally {
+      setIsUploadingInputImage(false);
     }
   };
 
@@ -859,7 +867,7 @@ export default function ImagePage() {
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey) {
                         event.preventDefault();
-                        if (!isGenerating && !isQuotaInsufficient) {
+                        if (!isGenerating && !isQuotaInsufficient && !isUploadingInputImage) {
                           void handleGenerateImage();
                         }
                       }
@@ -874,15 +882,17 @@ export default function ImagePage() {
                           <button
                             type="button"
                             onClick={handleOpenInputImagePicker}
+                            disabled={isUploadingInputImage}
                             className={cn(
                               "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-300",
                               inputImage
                                 ? "border-stone-900 bg-stone-950 text-white"
                                 : "border-stone-200 bg-white text-stone-700 hover:border-stone-300 hover:bg-stone-100",
+                              isUploadingInputImage ? "cursor-not-allowed opacity-60" : "",
                             )}
                           >
-                            <ImagePlus className="size-4" />
-                            {inputImage ? "更换图片" : "上传图片"}
+                            {isUploadingInputImage ? <LoaderCircle className="size-4 animate-spin" /> : <ImagePlus className="size-4" />}
+                            {isUploadingInputImage ? "上传中" : inputImage ? "更换图片" : "上传图片"}
                           </button>
 
                           <div className="h-4 w-px bg-stone-200" />
@@ -935,7 +945,9 @@ export default function ImagePage() {
                         <div className={cn("text-xs", isQuotaInsufficient ? "text-rose-600" : "text-stone-500")}>
                           {isQuotaInsufficient
                             ? `至少需要 ${requestCost} 次`
-                            : inputImage
+                            : isUploadingInputImage
+                              ? "图片上传中"
+                              : inputImage
                               ? "已附加 1 张参考图，回车发送"
                               : "回车发送"}
                         </div>
@@ -944,7 +956,7 @@ export default function ImagePage() {
                       <Button
                         type="button"
                         onClick={() => void handleGenerateImage()}
-                        disabled={isGenerating || isQuotaInsufficient}
+                        disabled={isGenerating || isQuotaInsufficient || isUploadingInputImage}
                         className="h-11 shrink-0 rounded-full bg-stone-950 px-4 text-sm font-medium text-white hover:bg-stone-800 disabled:bg-stone-300"
                       >
                         {isGenerating ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}

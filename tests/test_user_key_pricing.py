@@ -21,6 +21,7 @@ sys.modules.setdefault("pybase64", base64)
 
 from services import api  # noqa: E402
 from services.image_service import ImageGenerationError  # noqa: E402
+from services.uploaded_image_service import uploaded_image_service  # noqa: E402
 from services.user_key_service import UserKeyService  # noqa: E402
 
 
@@ -76,8 +77,13 @@ class UserKeyPricingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="chatgpt2api-tests-"))
         self.user_keys_file = self.temp_dir / "user_keys.json"
+        self.upload_store_file = self.temp_dir / "uploaded_images.json"
+        self.upload_files_dir = self.temp_dir / "uploaded_images"
         api.user_key_service.store_file = self.user_keys_file
         api.user_key_service._user_keys = []
+        uploaded_image_service.store_file = self.upload_store_file
+        uploaded_image_service.files_dir = self.upload_files_dir
+        uploaded_image_service._items = []
         with api.RESPONSES_STORE_LOCK:
             api.RESPONSES_STORE.clear()
         api.clear_image_request_timestamps()
@@ -217,7 +223,68 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"]["error"], "upstream failed")
         current_item = api.user_key_service.get_user_key(user_key)
         self.assertIsNotNone(current_item)
-        self.assertEqual(current_item["quota"], 9)
+        self.assertEqual(current_item["quota"], 15)
+
+    def test_process_upload_stream_and_recent_uploaded_images(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                files={"file": ("pixel.png", png_bytes, "image/png")},
+            )
+            self.assertEqual(upload_response.status_code, 200)
+            uploaded = upload_response.json()
+            self.assertTrue(str(uploaded["file_id"]).startswith("upload_"))
+            self.assertEqual(uploaded["mime_type"], "image/png")
+
+            list_response = client.get(
+                "/backend-api/my/recent/uploaded_images?limit=25&images_app_only=false",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+            )
+            self.assertEqual(list_response.status_code, 200)
+            items = list_response.json()["items"]
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["file_id"], uploaded["file_id"])
+
+    def test_responses_accepts_uploaded_image_file_id(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                files={"file": ("pixel.png", png_bytes, "image/png")},
+            )
+            self.assertEqual(upload_response.status_code, 200)
+            file_id = upload_response.json()["file_id"]
+
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "model": "gpt-5",
+                    "input": [
+                        {"type": "input_text", "text": "repeat ABC123"},
+                        {"type": "input_image", "file_id": file_id},
+                    ],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(FakeBackendService.last_call)
+        self.assertEqual(FakeBackendService.last_call["prompt"], "repeat ABC123")
+        self.assertEqual(
+            FakeBackendService.last_call["input_images"],
+            [{"type": "input_image", "file_id": file_id, "owner_auth_token": api.config.auth_key}],
+        )
 
     def test_image_generation_rejects_more_than_two_images(self) -> None:
         created = api.user_key_service.create_user_keys(
@@ -432,16 +499,12 @@ class UserKeyPricingTests(unittest.TestCase):
             "responses input_image data URL must use an image mime type",
         )
 
-    def test_extract_responses_input_rejects_file_id_for_now(self) -> None:
-        with self.assertRaises(api.HTTPException) as raised:
+    def test_extract_responses_input_accepts_file_id(self) -> None:
+        self.assertEqual(
             api.extract_image_inputs_from_responses_input(
                 [{"type": "input_image", "file_id": "file_123"}]
-            )
-
-        self.assertEqual(raised.exception.status_code, 400)
-        self.assertEqual(
-            raised.exception.detail["error"],
-            "responses input_image file_id is not supported yet",
+            ),
+            [{"type": "input_image", "file_id": "file_123"}],
         )
 
     def test_validate_responses_input_images_rejects_multiple_input_images_for_now(self) -> None:
@@ -547,7 +610,7 @@ class UserKeyPricingTests(unittest.TestCase):
     def test_generate_image_payload_with_input_image_refunds_user_key_on_failure(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,
-            quota=9,
+            quota=15,
             prefix="uk",
             pricing={"gpt-image-1": 3, "gpt-image-2": 6},
         )

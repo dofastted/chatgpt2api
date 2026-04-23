@@ -13,6 +13,7 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 - 提供 Web 后台管理账号和生成图片
 - 支持 `user key` 直调图片接口，并按每个 key 自己的模型单价扣减次数
 - 当前公开生图模型只保留 `gpt-image-2`
+- 支持本地参考图上传，上传记录按当前 Bearer Token 隔离保存
 
 生图界面：
 ![image](assets/image.png)
@@ -74,7 +75,7 @@ POST /v1/response
 - 走 `tools: [{ "type": "image_generation" }]` 的生图请求
 - 支持文本输入生图，也支持文本加 1 张 `input_image`
 - 顶层 `model` 按 OpenAI 官方格式应传文本模型，比如 `gpt-5`、`gpt-5.4`
-- `input_image.image_url` 只支持 `http(s)` 或 `data:image/*`
+- `input_image` 支持两种写法：`image_url` 只接受 `http(s)` 或 `data:image/*`，`file_id` 对应本地上传接口返回的文件标识
 - 图片模型放在 `tools[].model`，当前只支持 `gpt-image-2`；如果没传，默认按 `gpt-image-2` 处理
 - `n` 最多 2
 - 返回 `response.output[]`，其中图片结果项是 `type: "image_generation_call"`，图片 base64 在 `result`
@@ -85,12 +86,44 @@ POST /v1/response
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
 - 支持 `stream: true`。流式时会依次返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后返回 `data: [DONE]`
 
-前端图片页现在也支持上传 1 张参考图。上传后会在聊天输入框里显示缩略图，发送后本地历史会保留这张参考图，刷新页面后仍能区分输入图和生成结果。如果上游页面返回了可复制文本，前端会把这段文本保存到当前会话，并提供复制按钮。
+前端图片页现在会先把参考图上传到本地接口，再在 `/v1/responses` 里提交 `input_image.file_id`。本地历史仍保留缩略图预览和 `fileId`，刷新页面后还能区分输入图和生成结果。如果上游页面返回了可复制文本，前端会把这段文本保存到当前会话，并提供复制按钮。
 
 当前暂不支持：
 
 - `previous_response_id`
 - 多张输入图
+
+### 本地上传接口
+
+```http
+POST /backend-api/files/process_upload_stream
+GET /backend-api/my/recent/uploaded_images?limit=25&images_app_only=false
+GET /backend-api/files/{file_id}/content
+```
+
+说明：
+
+- 上传接口接收 `multipart/form-data`，字段名是 `file`
+- 单张图片大小上限是 8 MB
+- 支持的输入图片类型有 `png`、`jpeg`、`webp`、`gif`、`bmp`、`avif`
+- 上传记录保存在本地 `data/uploaded_images/` 和 `data/uploaded_images.json`
+- 上传列表会按当前 Bearer Token 隔离，只返回自己的记录
+- 上传成功后会返回 `file_id`、尺寸、大小和下载地址；这个 `file_id` 可以直接放进 `/v1/responses` 的 `input_image`
+- 前端图片页选图时默认先走这组接口，不再把大图直接塞进请求体
+
+### 上传验收
+
+- 2026-04-23 在本地 `http://127.0.0.1:3002` 上，用 `Authorization: Bearer test-123`
+- 先上传 `.llmdoc-tmp/api-image-tests/gpt-image-2.png`
+- 再调用 `/v1/responses`，用上传返回的 `file_id` 作为 `input_image`
+- 返回 200，结果图保存在 `.llmdoc-tmp/api-image-tests/uploaded-abc123-result.png`
+- 实际结果图内容是 `ABC123`
+
+### 账号刷新兜底
+
+- 账号池请求前会先刷新远端信息
+- 如果刷新时只是瞬时网络错误，比如 TLS、连接重置、超时，而本地缓存账号仍可用，则会临时使用缓存状态继续请求
+- 如果是 `401` 这类确定失效，则仍按异常账号处理
 
 ## 部署
 

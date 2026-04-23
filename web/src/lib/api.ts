@@ -127,6 +127,18 @@ export type ImageGenerationResponse = {
   copied_text?: string;
 };
 
+export type UploadedInputImage = {
+  id: string;
+  file_id: string;
+  name: string;
+  mime_type: string;
+  size_bytes: number;
+  width?: number | null;
+  height?: number | null;
+  created_at?: string | null;
+  download_url: string;
+};
+
 type ResponsesImageGenerationResponse = {
   created_at?: number;
   output?: Array<{
@@ -302,10 +314,11 @@ export async function generateImage(
   prompt: string,
   model: ImageModel = "gpt-image-2",
   n = 1,
-  options: { inputImageUrl?: string | null } = {},
+  options: { inputImageUrl?: string | null; inputImageFileId?: string | null } = {},
 ) {
   const inputImageUrl = String(options.inputImageUrl || "").trim();
-  if (!inputImageUrl) {
+  const inputImageFileId = String(options.inputImageFileId || "").trim();
+  if (!inputImageUrl && !inputImageFileId) {
     return httpRequest<ImageGenerationResponse>("/v1/images/generations", {
       method: "POST",
       body: {
@@ -323,11 +336,30 @@ export async function generateImage(
       model: "gpt-5",
       input: [
         { type: "input_text", text: prompt },
-        { type: "input_image", image_url: inputImageUrl },
+        inputImageFileId
+          ? { type: "input_image", file_id: inputImageFileId }
+          : { type: "input_image", image_url: inputImageUrl },
       ],
       tools: [{ type: "image_generation", model }],
       n,
     },
   });
   return normalizeResponsesImageGenerationResponse(payload);
+}
+
+export async function uploadInputImage(file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+  return httpRequest<UploadedInputImage>("/backend-api/files/process_upload_stream", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function listRecentUploadedImages(limit = 25, imagesAppOnly = false) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    images_app_only: String(imagesAppOnly),
+  });
+  return httpRequest<{ items: UploadedInputImage[] }>(`/backend-api/my/recent/uploaded_images?${params.toString()}`);
 }

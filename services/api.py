@@ -10,7 +10,7 @@ from threading import Event, Thread
 from time import time
 from typing import Any
 from uuid import uuid4
-from fastapi import APIRouter, FastAPI, Header, HTTPException
+from fastapi import APIRouter, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -20,6 +20,7 @@ from services.account_service import account_service
 from services.config import config
 from services.backend_service import BackendService
 from services.image_service import ImageGenerationError
+from services.uploaded_image_service import uploaded_image_service
 from services.user_key_service import user_key_service
 from services.version import get_app_version
 
@@ -36,6 +37,7 @@ IMAGE_REQUEST_COOLDOWN_SECONDS = 10
 MAX_QUEUED_IMAGE_REQUESTS = 100
 DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
+MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024
 RESPONSES_STORE: dict[str, dict[str, object]] = {}
 RESPONSES_STORE_LOCK = Lock()
 IMAGE_REQUEST_SCHEDULER: dict[str, dict[str, float | int]] = {}
@@ -416,11 +418,9 @@ def extract_image_inputs_from_responses_input(value: Any) -> list[dict[str, str]
     if isinstance(value, dict):
         item_type = str(value.get("type") or "").strip()
         if item_type == "input_image":
-            if value.get("file_id") is not None:
-                raise HTTPException(
-                    status_code=400,
-                    detail={"error": "responses input_image file_id is not supported yet"},
-                )
+            file_id = str(value.get("file_id") or "").strip()
+            if file_id:
+                return [{"type": "input_image", "file_id": file_id}]
             return [{"type": "input_image", "image_url": _normalize_response_input_image_url(value)}]
         if item_type in {"image", "image_generation_call"}:
             raise HTTPException(
@@ -811,8 +811,16 @@ def create_app() -> FastAPI:
             )
         validate_responses_tool_choice(body.tool_choice)
         input_images = validate_responses_input_images(body.input)
+        request_auth_token = extract_bearer_token(authorization)
+        input_images = [
+            {
+                **item,
+                **({"owner_auth_token": request_auth_token} if str(item.get("file_id") or "").strip() else {}),
+            }
+            for item in input_images
+        ]
         prompt = extract_responses_prompt(body.input)
-        await wait_for_image_request_turn(extract_bearer_token(authorization))
+        await wait_for_image_request_turn(request_auth_token)
 
         response_model = str(body.model or "").strip() or DEFAULT_RESPONSES_MODEL
         if response_model in ALL_IMAGE_MODELS:
@@ -847,6 +855,62 @@ def create_app() -> FastAPI:
                 },
             )
         return payload
+
+    @router.post("/backend-api/files/process_upload_stream")
+    async def process_upload_stream(
+            file: UploadFile = File(...),
+            authorization: str | None = Header(default=None),
+    ):
+        require_auth_key(authorization)
+        auth_token = extract_bearer_token(authorization)
+        image_bytes = await file.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail={"error": "image file is required"})
+        if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
+            raise HTTPException(status_code=400, detail={"error": "image file must be <= 8 MB"})
+        try:
+            item = uploaded_image_service.save_upload(
+                auth_token=auth_token,
+                file_name=str(file.filename or "").strip() or "upload.png",
+                content_type=file.content_type,
+                image_bytes=image_bytes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return item
+
+    @router.get("/backend-api/my/recent/uploaded_images")
+    async def list_uploaded_images(
+            authorization: str | None = Header(default=None),
+            limit: int = Query(default=25, ge=1, le=100),
+            images_app_only: bool = Query(default=False),
+    ):
+        require_auth_key(authorization)
+        auth_token = extract_bearer_token(authorization)
+        return {
+            "items": uploaded_image_service.list_items(
+                auth_token,
+                limit=limit,
+                images_app_only=images_app_only,
+            )
+        }
+
+    @router.get("/backend-api/files/{file_id}/content")
+    async def get_uploaded_image_content(file_id: str, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        auth_token = extract_bearer_token(authorization)
+        stored = uploaded_image_service.read_bytes(file_id, auth_token)
+        if stored is None:
+            raise HTTPException(status_code=404, detail={"error": "uploaded image not found"})
+        _, item = stored
+        file_path = uploaded_image_service.files_dir / str(item.get("stored_name") or "")
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail={"error": "uploaded image not found"})
+        return FileResponse(
+            file_path,
+            media_type=str(item.get("mime_type") or "image/png"),
+            filename=str(item.get("file_name") or file_path.name),
+        )
 
     @router.get("/v1/response/{response_id}")
     @router.get("/v1/responses/{response_id}")

@@ -15,6 +15,7 @@ export type StoredImage = {
 
 export type StoredInputImage = {
   id: string;
+  fileId?: string;
   fileName?: string;
   dataUrl: string;
   mimeType?: string;
@@ -79,6 +80,7 @@ function normalizeStoredInputImage(inputImage: StoredInputImage | null | undefin
   const mimePrefix = dataUrl.startsWith("data:") ? dataUrl.slice(5).split(";", 1)[0].trim() : "";
   return {
     ...inputImage,
+    fileId: String(inputImage.fileId || "").trim() || undefined,
     dataUrl,
     mimeType: String(inputImage.mimeType || "").trim() || mimePrefix || "image/png",
     fileName: String(inputImage.fileName || "").trim() || undefined,

@@ -17,6 +17,18 @@ class BackendService:
         self.account_service = account_service
 
     @staticmethod
+    def _is_transient_refresh_error(message: str) -> bool:
+        normalized = str(message or "").lower()
+        return (
+            "tls connect error" in normalized
+            or "failed to perform, curl:" in normalized
+            or "timeout" in normalized
+            or "timed out" in normalized
+            or "connection was reset" in normalized
+            or "recv failure" in normalized
+        )
+
+    @staticmethod
     def _is_account_ready_for_image(account: dict | None) -> bool:
         if not isinstance(account, dict):
             return False
@@ -25,6 +37,7 @@ class BackendService:
         return int(account.get("quota") or 0) > 0
 
     def _refresh_request_token(self, access_token: str) -> dict | None:
+        cached_account = self.account_service.get_account(access_token)
         try:
             remote_info = self.account_service.fetch_remote_info(access_token)
         except Exception as exc:
@@ -38,6 +51,9 @@ class BackendService:
                         "quota": 0,
                     },
                 )
+            if self._is_transient_refresh_error(message) and self._is_account_ready_for_image(cached_account):
+                print(f"[image-generate] refresh fallback token={access_token[:12]}... use cached account state")
+                return cached_account
             self.account_service.mark_request_failure(access_token)
             return None
         return self.account_service.update_account(access_token, remote_info)
