@@ -19,6 +19,7 @@ class AppSettings:
     port: int
     accounts_file: Path
     user_keys_file: Path
+    redeem_codes_file: Path
     tls_verify: bool
 
 
@@ -73,6 +74,13 @@ def _load_settings() -> AppSettings:
         accounts_file=DATA_DIR / "accounts.json",
         user_keys_file=Path(
             str(os.getenv("CHATGPT2API_USER_KEYS_FILE") or raw_config.get("user-keys-file") or DATA_DIR / "user_keys.json")
+        ),
+        redeem_codes_file=Path(
+            str(
+                os.getenv("CHATGPT2API_REDEEM_CODES_FILE")
+                or raw_config.get("redeem-codes-file")
+                or DATA_DIR / "redeem_codes.json"
+            )
         ),
         tls_verify=tls_verify,
     )

@@ -31,6 +31,8 @@ class FakeThread:
 
 
 class FakeAccountService:
+    DONATION_CATEGORY = "捐赠"
+
     def __init__(self, items: list[dict] | None = None):
         self.items = items or [{"quota": 9, "status": "正常"}]
 
@@ -39,6 +41,51 @@ class FakeAccountService:
 
     def list_accounts(self) -> list[dict]:
         return list(self.items)
+
+    def list_tokens(self) -> list[str]:
+        return [str(item.get("access_token") or "").strip() for item in self.items if str(item.get("access_token") or "").strip()]
+
+    def add_account_items(self, items: list[dict], category: str = "普通") -> dict:
+        added_tokens = [str(item.get("access_token") or "").strip() for item in items if str(item.get("access_token") or "").strip()]
+        return {
+            "items": list(self.items),
+            "added": len(added_tokens),
+            "updated": 0,
+            "skipped": 0,
+            "added_tokens": added_tokens,
+            "category": category,
+        }
+
+    def add_accounts(self, tokens: list[str], category: str = "普通") -> dict:
+        added_tokens = [str(token or "").strip() for token in tokens if str(token or "").strip()]
+        return {
+            "items": list(self.items),
+            "added": len(added_tokens),
+            "updated": 0,
+            "skipped": 0,
+            "added_tokens": added_tokens,
+            "category": category,
+        }
+
+    def refresh_accounts(self, access_tokens: list[str]) -> dict:
+        refreshed_items = []
+        for token in access_tokens:
+            normalized = str(token or "").strip()
+            if not normalized:
+                continue
+            refreshed_items.append(
+                {
+                    "access_token": normalized,
+                    "type": "Free" if "free" in normalized.lower() else "Plus",
+                    "status": "正常",
+                    "quota": 9,
+                }
+            )
+        return {
+            "items": refreshed_items,
+            "refreshed": len(refreshed_items),
+            "errors": [],
+        }
 
 
 class FakeBackendService:
@@ -58,7 +105,9 @@ class FakeBackendService:
         model: str,
         n: int,
         input_images: list[dict[str, str]] | None = None,
+        queue_request_id: str | None = None,
     ) -> dict:
+        del queue_request_id
         self.__class__.last_call = {
             "prompt": prompt,
             "model": model,
@@ -77,10 +126,13 @@ class UserKeyPricingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="chatgpt2api-tests-"))
         self.user_keys_file = self.temp_dir / "user_keys.json"
+        self.redeem_codes_file = self.temp_dir / "redeem_codes.json"
         self.upload_store_file = self.temp_dir / "uploaded_images.json"
         self.upload_files_dir = self.temp_dir / "uploaded_images"
         api.user_key_service.store_file = self.user_keys_file
         api.user_key_service._user_keys = []
+        api.redeem_code_service.store_file = self.redeem_codes_file
+        api.redeem_code_service._items = []
         uploaded_image_service.store_file = self.upload_store_file
         uploaded_image_service.files_dir = self.upload_files_dir
         uploaded_image_service._items = []
@@ -225,6 +277,190 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertIsNotNone(current_item)
         self.assertEqual(current_item["quota"], 15)
 
+    def test_quota_is_not_deducted_before_backend_returns_success(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=18,
+            prefix="uk",
+            pricing={"gpt-image-1": 0, "gpt-image-2": 6},
+        )
+        user_key = created["created_items"][0]["key"]
+        context = api.resolve_auth_context(f"Bearer {user_key}")
+        self.assertIsNotNone(context)
+        seen_quota: list[int] = []
+
+        class InspectBackendService:
+            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None, queue_request_id=None) -> dict:
+                del prompt, model, n, input_images, queue_request_id
+                current_item = api.user_key_service.get_user_key(user_key)
+                assert current_item is not None
+                seen_quota.append(int(current_item["quota"]))
+                return {
+                    "created": 123,
+                    "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
+                }
+
+        async def fake_run_in_threadpool(func, *args):
+            return func(*args)
+
+        with patch.object(api, "run_in_threadpool", side_effect=fake_run_in_threadpool):
+            result, billing_payload = asyncio.run(
+                api.generate_image_payload(
+                    service=InspectBackendService(),
+                    context=context,
+                    authorization=f"Bearer {user_key}",
+                    prompt="draw a cat",
+                    model="gpt-image-2",
+                    n=1,
+                )
+            )
+
+        self.assertEqual(seen_quota, [18])
+        self.assertEqual(result["billing"]["charged_quota"], 6)
+        assert billing_payload is not None
+        self.assertEqual(billing_payload["remaining_quota"], 12)
+
+    def test_purchase_quota_uses_ldc_balance(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=10,
+            prefix="uk",
+        )
+        user_key = created["created_items"][0]["key"]
+        api.user_key_service.update_user_key(user_key, {"ldc_balance": 40})
+
+        with self.make_client() as client:
+            response = client.post(
+                "/api/quota/purchase",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={"package_count": 2},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["purchased_quota"], 40)
+        self.assertEqual(response.json()["spent_ldc"], 40)
+        self.assertEqual(response.json()["remaining_quota"], 50)
+        self.assertEqual(response.json()["ldc_balance"], 0)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        assert current_item is not None
+        self.assertEqual(current_item["quota"], 50)
+        self.assertEqual(current_item["ldc_balance"], 0)
+
+    def test_redeem_code_adds_20_quota_to_current_user_key(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=5,
+            prefix="uk",
+        )
+        user_key = created["created_items"][0]["key"]
+
+        with self.make_client() as client:
+            create_response = client.post(
+                "/api/redeem-codes",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json={"count": 1, "target_quota": 20, "prefix": "RDM", "label": "test-batch"},
+            )
+            self.assertEqual(create_response.status_code, 200)
+            code = create_response.json()["created_items"][0]["code"]
+
+            redeem_response = client.post(
+                "/api/redeem-codes/redeem",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={"code": code},
+            )
+            second_redeem_response = client.post(
+                "/api/redeem-codes/redeem",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={"code": code},
+            )
+
+        self.assertEqual(redeem_response.status_code, 200)
+        self.assertEqual(redeem_response.json()["previous_quota"], 5)
+        self.assertEqual(redeem_response.json()["added_quota"], 20)
+        self.assertEqual(redeem_response.json()["remaining_quota"], 25)
+        self.assertEqual(second_redeem_response.status_code, 404)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        assert current_item is not None
+        self.assertEqual(current_item["quota"], 25)
+        redeemed_item = api.redeem_code_service.list_public_codes()[0]
+        self.assertEqual(redeemed_item["status"], "已使用")
+        self.assertEqual(redeemed_item["usedByKey"], user_key)
+
+    def test_redeem_code_adds_100_quota_to_current_user_key(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=5,
+            prefix="uk",
+        )
+        user_key = created["created_items"][0]["key"]
+
+        with self.make_client() as client:
+            create_response = client.post(
+                "/api/redeem-codes",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json={"count": 1, "target_quota": 100, "prefix": "RDM", "label": "test-batch"},
+            )
+            self.assertEqual(create_response.status_code, 200)
+            code = create_response.json()["created_items"][0]["code"]
+
+            redeem_response = client.post(
+                "/api/redeem-codes/redeem",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={"code": code},
+            )
+
+        self.assertEqual(redeem_response.status_code, 200)
+        self.assertEqual(redeem_response.json()["previous_quota"], 5)
+        self.assertEqual(redeem_response.json()["added_quota"], 100)
+        self.assertEqual(redeem_response.json()["remaining_quota"], 105)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        assert current_item is not None
+        self.assertEqual(current_item["quota"], 105)
+
+    def test_redeem_code_create_rejects_unsupported_quota(self) -> None:
+        with self.make_client() as client:
+            create_response = client.post(
+                "/api/redeem-codes",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json={"count": 1, "target_quota": 80, "prefix": "RDM", "label": "test-batch"},
+            )
+
+        self.assertEqual(create_response.status_code, 400)
+
+    def test_donation_rewards_ldc_only_for_free_accounts(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=10,
+            prefix="uk",
+        )
+        user_key = created["created_items"][0]["key"]
+
+        with self.make_client() as client:
+            response = client.post(
+                "/api/donations/accounts",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={
+                    "tokens": [],
+                    "accounts": [
+                        {"access_token": "free-token-1"},
+                        {"access_token": "plus-token-1"},
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["rewarded_accounts"], 1)
+        self.assertEqual(response.json()["rewarded_ldc"], 20)
+        self.assertEqual(response.json()["remaining_quota"], 10)
+        self.assertEqual(response.json()["ldc_balance"], 20)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        assert current_item is not None
+        self.assertEqual(current_item["ldc_balance"], 20)
+
     def test_process_upload_stream_and_recent_uploaded_images(self) -> None:
         png_bytes = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
@@ -349,44 +585,34 @@ class UserKeyPricingTests(unittest.TestCase):
         assert FakeBackendService.last_call is not None
         self.assertEqual(FakeBackendService.last_call["model"], "gpt-image-2")
 
-    def test_image_generation_waits_instead_of_returning_429_during_cooldown(self) -> None:
-        sleep_calls: list[float] = []
+    def test_image_queue_status_reports_current_request(self) -> None:
+        auth_key = api.config.auth_key
+        api.image_queue_service.create_ticket(auth_key, "req-1", "draw a cat")
+        api.image_queue_service.wait_for_turn("req-1")
+        api.image_queue_service.mark_status("req-1", "running")
 
-        async def fake_sleep(delay: float) -> None:
-            sleep_calls.append(delay)
-
-        async def run_test() -> None:
-            await api.wait_for_image_request_turn("demo-user-key")
-            await api.wait_for_image_request_turn("demo-user-key")
-
-        with patch.object(api, "time", side_effect=[100.0, 100.0, 100.0]):
-            with patch.object(api, "IMAGE_REQUEST_SLEEP", side_effect=fake_sleep):
-                asyncio.run(run_test())
-
-        self.assertEqual(sleep_calls, [10.0])
-        with api.IMAGE_REQUEST_SCHEDULER_LOCK:
-            self.assertEqual(
-                api.IMAGE_REQUEST_SCHEDULER["demo-user-key"],
-                {"next_available_at": 120.0, "waiting": 0},
+        with self.make_client() as client:
+            response = client.get(
+                "/api/image-queue/me?request_id=req-1",
+                headers={"Authorization": f"Bearer {auth_key}"},
             )
 
-    def test_image_generation_rejects_when_wait_queue_exceeds_limit(self) -> None:
-        auth_key = "queued-user-key"
-        with api.IMAGE_REQUEST_SCHEDULER_LOCK:
-            api.IMAGE_REQUEST_SCHEDULER[auth_key] = {
-                "next_available_at": 200.0,
-                "waiting": api.MAX_QUEUED_IMAGE_REQUESTS,
-            }
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["user"], {"waiting": 0, "running": 1})
+        self.assertEqual(body["request"]["status"], "running")
+        self.assertEqual(body["request"]["request_id"], "req-1")
 
-        with patch.object(api, "time", return_value=100.0):
-            with self.assertRaises(api.HTTPException) as raised:
-                asyncio.run(api.wait_for_image_request_turn(auth_key))
+    def test_register_image_queue_request_enforces_per_user_limit(self) -> None:
+        auth_key = "queued-user-key"
+        for index in range(api.image_queue_service.PER_USER_WAIT_LIMIT):
+            api.image_queue_service.create_ticket(auth_key, f"req-{index}")
+
+        with self.assertRaises(api.HTTPException) as raised:
+            asyncio.run(api.register_image_queue_request(auth_key, "overflow", "draw overflow"))
 
         self.assertEqual(raised.exception.status_code, 429)
-        self.assertEqual(
-            raised.exception.detail["error"],
-            f"image queue is full, max_waiting={api.MAX_QUEUED_IMAGE_REQUESTS}",
-        )
+        self.assertIn("max_waiting", raised.exception.detail["error"])
 
     def test_admin_can_create_and_update_user_key_pricing(self) -> None:
         with self.make_client() as client:

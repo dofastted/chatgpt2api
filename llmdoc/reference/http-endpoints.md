@@ -18,11 +18,13 @@
 
 - `GET /api/quota`，普通密钥返回账号池总额度。用户 key 返回自己的剩余次数和 `pricing`，位置在 `services/api.py:399`。
 - `POST /api/donations/accounts`，接收 `tokens: string[]` 或 `accounts: object[]`，把账户按“捐赠”分类入池，然后刷新账号信息，位置在 `services/api.py:635`。
+- `POST /api/redeem-codes/redeem`，只给 `user_key` 使用。请求体是 `code`。成功后返回这次增加的 `added_quota`、最新 `remaining_quota` 和兑换码条目；这次额度会直接加到当前剩余额度上。
 - `POST /backend-api/files/process_upload_stream`，接收 `multipart/form-data` 的 `file` 字段，大小上限 8 MB，返回 `file_id`、`mime_type`、尺寸、大小和下载地址，位置在 `services/api.py:859` 到 `services/api.py:880` 与 `services/uploaded_image_service.py:143` 到 `services/uploaded_image_service.py:184`。
 - `GET /backend-api/my/recent/uploaded_images?limit=25&images_app_only=false`，返回当前 Bearer Token 自己最近上传的图片，位置在 `services/api.py:882` 到 `services/api.py:896`。
 - `GET /backend-api/files/{file_id}/content`，读取当前 Bearer Token 自己的已上传原图，位置在 `services/api.py:898` 到 `services/api.py:913`。
-- `POST /v1/images/generations`，请求体是 `prompt`、`model`、`n`，也兼容 `stream`、`background`、`quality`、`size`、`output_format`、`partial_images`、`output_compression`。`model` 当前只接受 `gpt-image-2`。用户 key 会先按自己 `pricing[model] * n` 预扣，成功保留，失败退回；成功响应里还会带 `billing`。如果上游页面正文里带了可复制文本，响应顶层还会多一个 `copied_text`。同一个 key 在 10 秒间隔内的新请求会进入等待队列，等待数超过 100 才返回 429。若上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试；当前账号会暂停 3 分钟后再参与下一轮选号。流式时会先给可选的 `image_generation.partial_image`，最后给 `image_generation.completed` 和 `data: [DONE]`。
-- `POST /v1/response`，当前支持 `input_text` 加 `tools: [{ "type": "image_generation" }]` 的生图请求，也支持再附带 1 张 `input_image`。`input_image.image_url` 只接受 `http(s)` 或 `data:image/*`；`input_image.file_id` 对应本地上传接口返回的文件标识。顶层 `model` 按官方格式应传文本模型，图片模型放在 `tools[].model`，当前只支持 `gpt-image-2`；如果没传图片模型，默认 `gpt-image-2`。请求体还支持 `n`，最多 2。结果放在 `response.output[]` 里的 `image_generation_call`，图片 base64 在 `result`。如果上游页面正文里带了可复制文本，响应顶层还会多一个 `copied_text`。同一个 key 在 10 秒间隔内的新请求会进入等待队列，等待数超过 100 才返回 429。若上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试；当前账号会暂停 3 分钟后再参与下一轮选号。流式时会返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后给 `data: [DONE]`。
+- `GET /api/image-queue/me`，返回当前 Bearer Token 的队列状态。可选查询参数 `request_id` 会带回那一条请求的 `status`、`position`、`ahead`、`started_at`、`finished_at` 和错误信息。接口同时返回当前 Bearer Token 的等待数、运行数，以及全局等待数、运行数。
+- `POST /v1/images/generations`，请求体是 `prompt`、`model`、`n`，也兼容 `stream`、`background`、`quality`、`size`、`output_format`、`partial_images`、`output_compression`。`model` 当前只接受 `gpt-image-2`。用户 key 会按自己 `pricing[model] * n` 扣费；成功响应里还会带 `billing`。如果上游页面正文里带了可复制文本，响应顶层还会多一个 `copied_text`。这条接口支持可选请求头 `X-Image-Queue-Request-Id`，会先进入三层队列：单个账号最多 2 并发、单个 Bearer Token 最多 10 个等待请求、全局等待超过 2000 时返回 `503`。若上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试；当前账号会暂停 3 分钟后再参与下一轮选号。流式时会先给可选的 `image_generation.partial_image`，最后给 `image_generation.completed` 和 `data: [DONE]`。
+- `POST /v1/response`，当前支持 `input_text` 加 `tools: [{ "type": "image_generation" }]` 的生图请求，也支持再附带 1 张 `input_image`。`input_image.image_url` 只接受 `http(s)` 或 `data:image/*`；`input_image.file_id` 对应本地上传接口返回的文件标识。顶层 `model` 按官方格式应传文本模型，图片模型放在 `tools[].model`，当前只支持 `gpt-image-2`；如果没传图片模型，默认 `gpt-image-2`。请求体还支持 `n`，最多 2。结果放在 `response.output[]` 里的 `image_generation_call`，图片 base64 在 `result`。如果上游页面正文里带了可复制文本，响应顶层还会多一个 `copied_text`。这条接口也支持 `X-Image-Queue-Request-Id`，并走同一套三层队列。流式时会返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后给 `data: [DONE]`。
 - `GET /v1/response/{response_id}`，可读回本进程内刚生成过的 Response 结果；当前不做持久化。复数路径保留兼容。
 - 当前 `gpt-image-2` 直接走真实上游 `gpt-image-2`，不再转 `gpt-5.4-thinking`。
 
@@ -38,6 +40,9 @@
 - `POST /api/user-keys`，接收 `count`、`quota`、`prefix`、`label_prefix`，也可选传 `pricing`，批量生成用户 key，位置在 `services/api.py:362`。
 - `DELETE /api/user-keys`，接收 `keys: string[]`，位置在 `services/api.py:388`。
 - `POST /api/user-keys/update`，接收 `key` 和部分更新字段，更新字段可包含 `pricing`，位置在 `services/api.py:453`。
+- `GET /api/redeem-codes`，返回兑换码列表。
+- `POST /api/redeem-codes`，接收 `count`、`target_quota`、`prefix`、`label`。`target_quota` 现在只允许 `20` 或 `100`。
+- `DELETE /api/redeem-codes`，接收 `codes: string[]`。
 
 前端对应封装：
 

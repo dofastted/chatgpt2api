@@ -44,9 +44,12 @@
 
 失败处理：
 
+- 请求先进入 `services/image_queue_service.py` 的进程内队列。等待中的请求按全局 FIFO 排；同一个 Bearer Token 最多保留 10 个等待请求；全局等待数超过 2000 时直接拒绝。
+- 进入运行阶段后，真正的并发上限由 `services/account_service.py` 的账号槽位控制。单个账号最多同时跑 2 个生图；如果没有空闲槽位，请求会保持在 `assigning_account` 状态继续等。
+- 前端会给每次请求附带 `X-Image-Queue-Request-Id`，再通过 `GET /api/image-queue/me` 查询当前 Bearer Token 的等待数、运行数、当前请求位置和状态。
 - 成功和失败统计都回写账号池，见 `services/account_service.py:329`。
 - 如果报错命中失效 token 条件，判断在 `services/image_service.py:205`，随后 `services/backend_service.py:68` 会把 token 从池里删掉。
 - 如果请求前刷新失败，`services/backend_service.py:27` 会把这个账号标成 3 分钟冷却，跳过后继续试下一个。
 - 如果上游会话返回瞬时错误，`services/image_service.py` 会把 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit、temporarily unavailable 这类信号都当作可重试失败；`services/backend_service.py` 会跳过当前账号继续试。
 - 如果整个池里没有可用 token，`services/backend_service.py:38` 会抛出 `503`。
-- 如果上游失败、接口中途抛错或路由层提前拒绝，`user_key` 的预扣次数会退回，公共逻辑在 `services/api.py:220`。
+- 请求完成后，不论是 JSON 还是 SSE，都会在响应真正发完后才从运行态移除。`/v1/images/generations` 要等 `image_generation.completed` 与 `data: [DONE]` 发完；`/v1/response` 要等 `response.completed` 与 `data: [DONE]` 发完。

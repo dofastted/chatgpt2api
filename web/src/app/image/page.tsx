@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { buildImageDataUrl, detectImageFileExtension, detectImageMimeType } from "@/lib/image-data";
 import { Textarea } from "@/components/ui/textarea";
-import { fetchQuotaSummary, generateImage, uploadInputImage, type ImageModel } from "@/lib/api";
+import { fetchImageQueueStatus, fetchQuotaSummary, generateImage, uploadInputImage, type ImageModel, type ImageQueueItem } from "@/lib/api";
 import {
   clearImageConversations,
   deleteImageConversation,
@@ -91,11 +91,73 @@ type PendingInputImage = {
   sizeBytes: number;
 };
 
+type ImageQueueStatusSnapshot = Awaited<ReturnType<typeof fetchImageQueueStatus>>;
+
 function formatInputImageSize(sizeBytes: number) {
   if (sizeBytes >= 1024 * 1024) {
     return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
   }
   return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
+}
+
+function formatQueueItemLabel(item: ImageQueueItem, localTitles: Record<string, string>) {
+  const localTitle = String(localTitles[item.request_id] || "").trim();
+  if (localTitle) {
+    return localTitle;
+  }
+  return `请求 ${item.request_id.slice(-8)}`;
+}
+
+function formatQueueProgressText(item: ImageQueueItem | null | undefined) {
+  if (!item) {
+    return "正在同步排队状态";
+  }
+  if (item.status === "waiting") {
+    if (item.position) {
+      return `排队中，第 ${item.position} 位，前面还有 ${Math.max(0, Number(item.ahead || 0))} 个`;
+    }
+    return "排队中";
+  }
+  if (item.status === "assigning_account") {
+    return "已轮到当前请求，正在等待可用账号";
+  }
+  if (item.status === "running") {
+    return "已开始生成，正在等待图片返回";
+  }
+  if (item.status === "failed") {
+    return item.error || "生成失败";
+  }
+  if (item.status === "finished") {
+    return "已完成";
+  }
+  return "正在同步排队状态";
+}
+
+function formatQueueStatusBadge(item: ImageQueueItem) {
+  if (item.status === "waiting") {
+    return "排队中";
+  }
+  if (item.status === "assigning_account") {
+    return "等账号";
+  }
+  if (item.status === "running") {
+    return "生成中";
+  }
+  if (item.status === "finished") {
+    return "已完成";
+  }
+  if (item.status === "failed") {
+    return "失败";
+  }
+  return item.status;
+}
+
+function createClientRequestId(prefix = "") {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    const value = crypto.randomUUID();
+    return prefix ? `${prefix}${value}` : value;
+  }
+  return prefix ? `${prefix}fallback-request-id` : "fallback-request-id";
 }
 
 function readFileAsDataUrl(file: File) {
@@ -148,6 +210,7 @@ async function normalizeConversationHistory(items: ImageConversation[], scope: s
 export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
+  const activeQueueRequestIdRef = useRef<string | null>(null);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
@@ -161,6 +224,9 @@ export default function ImagePage() {
   const [inputImage, setInputImage] = useState<PendingInputImage | null>(null);
   const [availableQuota, setAvailableQuota] = useState<number | null>(null);
   const [currentPricing, setCurrentPricing] = useState<Record<ImageModel, number> | null>(null);
+  const [activeQueueRequestId, setActiveQueueRequestId] = useState<string | null>(null);
+  const [queueStatus, setQueueStatus] = useState<ImageQueueStatusSnapshot | null>(null);
+  const [queueTitles, setQueueTitles] = useState<Record<string, string>>({});
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputImageRef = useRef<HTMLInputElement>(null);
@@ -213,6 +279,15 @@ export default function ImagePage() {
   const previewImage = previewImageIndex >= 0 ? previewableImages[previewImageIndex] : null;
   const hasPreviousPreviewImage = previewImageIndex > 0;
   const hasNextPreviewImage = previewImageIndex >= 0 && previewImageIndex < previewableImages.length - 1;
+  const currentQueueRequest = useMemo(() => queueStatus?.request ?? null, [queueStatus]);
+  const activeQueueItems = useMemo(
+    () => (queueStatus?.items || []).filter((item) => item.status === "waiting" || item.status === "assigning_account" || item.status === "running"),
+    [queueStatus],
+  );
+  const currentQueueProgressText = useMemo(
+    () => formatQueueProgressText(currentQueueRequest),
+    [currentQueueRequest],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -314,6 +389,41 @@ export default function ImagePage() {
       window.removeEventListener("chatgpt2api:quota-changed", handleQuotaChanged);
     };
   }, [loadQuota]);
+
+  useEffect(() => {
+    if (conversationScope === null) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncQueueStatus = async () => {
+      try {
+        const snapshot = await fetchImageQueueStatus(activeQueueRequestIdRef.current);
+        if (!cancelled) {
+          setQueueStatus(snapshot);
+        }
+      } catch {
+        if (!cancelled) {
+          setQueueStatus(null);
+        }
+      }
+    };
+
+    void syncQueueStatus();
+    const intervalId = window.setInterval(() => {
+      void syncQueueStatus();
+    }, 1500);
+    const handleFocus = () => {
+      void syncQueueStatus();
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [activeQueueRequestId, conversationScope]);
 
   useEffect(() => {
     if (!selectedConversation && !isGenerating) {
@@ -426,10 +536,8 @@ export default function ImagePage() {
     }
 
     const now = new Date().toISOString();
-    const conversationId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const conversationId = createClientRequestId("conv-");
+    const queueRequestId = createClientRequestId("queue-");
     const draftInputImage: StoredInputImage | null = currentInputImage
       ? {
           id: currentInputImage.id,
@@ -458,8 +566,14 @@ export default function ImagePage() {
       status: "generating",
     };
     const activeGenerationKey = `${conversationScope}:${conversationId}`;
+    activeQueueRequestIdRef.current = queueRequestId;
+    setQueueTitles((prev) => ({
+      ...prev,
+      [queueRequestId]: draftConversation.title,
+    }));
 
     setIsGenerating(true);
+    setActiveQueueRequestId(queueRequestId);
     setSelectedConversationId(conversationId);
     setImagePrompt("");
     setInputImage(null);
@@ -471,6 +585,7 @@ export default function ImagePage() {
       const data = await generateImage(prompt, imageModel, parsedCount, {
         inputImageUrl: currentInputImage?.dataUrl,
         inputImageFileId: currentInputImage?.fileId,
+        queueRequestId,
       });
       const returnedItems = Array.isArray(data.data) ? data.data : [];
       if (data.billing) {
@@ -524,6 +639,8 @@ export default function ImagePage() {
       toast.error(message);
     } finally {
       activeGenerationKeys.delete(activeGenerationKey);
+      activeQueueRequestIdRef.current = null;
+      setActiveQueueRequestId(null);
       setIsGenerating(false);
     }
   };
@@ -640,8 +757,48 @@ export default function ImagePage() {
                   <span className="text-stone-400">本次消耗</span>
                   <span className="font-medium text-stone-900">{requestCost} 额度</span>
                 </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-stone-400">当前队列</span>
+                  <span className="font-medium text-stone-900">
+                    {queueStatus ? `${queueStatus.user.waiting} 等待 / ${queueStatus.user.running} 运行` : "加载中"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-stone-400">当前请求</span>
+                  <span className="text-right font-medium text-stone-900">
+                    {currentQueueRequest?.position ? `第 ${currentQueueRequest.position} 位` : currentQueueRequest ? formatQueueStatusBadge(currentQueueRequest) : "空闲"}
+                  </span>
+                </div>
               </div>
               <p className="mt-4 text-[11px] leading-5 text-stone-400">当前单价 {currentUnitCost} 额度 / 张</p>
+              <p className="mt-2 text-[11px] leading-5 text-stone-400">{currentQueueProgressText}</p>
+            </div>
+
+            <div className="rounded-[22px] border border-stone-200/80 bg-white px-4 py-4 shadow-[0_12px_30px_rgba(0,0,0,0.03)]">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-400">当前用户队列</div>
+              <div className="mt-4 space-y-2">
+                {activeQueueItems.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50 px-3 py-3 text-xs leading-5 text-stone-500">
+                    当前没有等待中的请求
+                  </div>
+                ) : (
+                  activeQueueItems.map((item) => (
+                    <div key={item.request_id} className="rounded-2xl border border-stone-200 bg-stone-50/80 px-3 py-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-stone-900">
+                            {formatQueueItemLabel(item, queueTitles)}
+                          </div>
+                          <div className="mt-1 text-xs leading-5 text-stone-500">{formatQueueProgressText(item)}</div>
+                        </div>
+                        <div className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] text-stone-600">
+                          {formatQueueStatusBadge(item)}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -739,6 +896,16 @@ export default function ImagePage() {
                         {formatConversationTime(selectedConversation.createdAt)}
                       </span>
                     </div>
+
+                    {selectedConversation.status === "generating" ? (
+                      <div className="mb-4 rounded-[20px] border border-stone-200 bg-stone-50/90 px-4 py-4">
+                        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-stone-400">
+                          <LoaderCircle className="size-4 animate-spin" />
+                          排队进度
+                        </div>
+                        <div className="mt-3 text-sm leading-6 text-stone-700">{currentQueueProgressText}</div>
+                      </div>
+                    ) : null}
 
                     {selectedConversation.copiedText ? (
                       <div className="mb-4 rounded-[20px] border border-stone-200 bg-stone-50/80 px-4 py-4">

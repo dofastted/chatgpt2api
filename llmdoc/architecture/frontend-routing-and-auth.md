@@ -10,7 +10,8 @@
 
 - 首页 `web/src/app/page.tsx:8` 启动后读取会话并按角色分流。
 - 登录页 `web/src/app/login/page.tsx:28` 登录成功后也按角色分流。
-- 顶部导航 `web/src/components/top-nav.tsx:25` 只在 `admin` 时显示“号池管理”，但“捐赠上传”对所有已登录用户都可见，逻辑在 `web/src/components/top-nav.tsx:68` 到 `web/src/components/top-nav.tsx:229`。
+- 顶部导航 `web/src/components/top-nav.tsx` 只在 `admin` 时显示“号池管理”。所有已登录用户都能看到“兑换中心”；里面保留捐赠上传，也给 `user_key` 提供兑换码输入和直达购买链接。
+- 兑换中心的购买链接是 `https://ldc.fkcodex.com/buy/4` 和 `https://ldc.fkcodex.com/buy/5`，分别对应 20 额度和 100 额度兑换码；弹窗里不再显示购买积分。
 - 账号页 `web/src/app/accounts/page.tsx:251` 会再次检查角色，普通用户会被送回 `/image`。如果只是会话探测失败或请求地址不通，不会再直接误跳 `/login`，而是停留当前页报错。
 
 错误处理：
@@ -21,10 +22,12 @@
 账号页 JSON 导入：
 
 - 递归查找 `access_token` 字段的逻辑在 `web/src/lib/account-import.ts:1`。
-- 账号页管理员启动时会同时拉账户列表和用户 key 列表，入口见 `web/src/app/accounts/page.tsx:251`。
+- 账号页管理员启动时会同时拉账户列表、用户 key 列表和兑换码列表。
 - 账号列表支持按账户来源筛选，也能在编辑弹窗里把来源改成“普通”或“捐赠”，见 `web/src/app/accounts/page.tsx:277`、`web/src/app/accounts/page.tsx:504`、`web/src/app/accounts/page.tsx:795`。
-- 用户 key 管理区支持批量生成、复制、编辑和删除。当前公开生图只保留 `gpt-image-2`，所以页面里 `gpt-image-1` 会显示为已下架且固定为 0，交互入口见 `web/src/app/accounts/page.tsx:661`、`web/src/app/accounts/page.tsx:972`、`web/src/app/accounts/page.tsx:1481`。
-- 用户 key 对应的请求封装在 `web/src/lib/api.ts:43`、`web/src/lib/api.ts:98`、`web/src/lib/api.ts:109`、`web/src/lib/api.ts:203`、`web/src/lib/api.ts:217`。
+- 账号页现在是 tab 布局，分成“账号池”“用户 Key”“兑换码”三块；`user key` 和兑换码列表默认每页 10 条。
+- 用户 key 管理区支持批量生成、复制、编辑和删除。当前公开生图只保留 `gpt-image-2`，所以页面里 `gpt-image-1` 会显示为已下架且固定为 0。
+- 兑换码管理区支持批量生成、复制、删除；管理员只能生成 `20` 或 `100` 两档额度。
+- 用户 key 和兑换码对应的请求封装都在 `web/src/lib/api.ts`。
 
 画图页：
 

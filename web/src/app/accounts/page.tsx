@@ -18,6 +18,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Ticket,
   Trash2,
   Upload,
   UserRound,
@@ -35,7 +36,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
@@ -49,11 +49,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { cleanJsonText, extractAccountsFromJson, normalizeTokenList } from "@/lib/account-import";
 import {
   createAccounts,
+  createRedeemCodes,
   createUserKeys,
   deleteAccounts,
+  deleteRedeemCodes,
   deleteUserKeys,
   fetchAuthSession,
   fetchAccounts,
+  fetchRedeemCodes,
   fetchUserKeys,
   refreshAccounts,
   updateAccount,
@@ -62,6 +65,7 @@ import {
   type AccountCategory,
   type AccountStatus,
   type AccountType,
+  type RedeemCode,
   type UserKey,
   type UserKeyPricing,
   type UserKeyStatus,
@@ -116,6 +120,10 @@ const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
   "gpt-image-1": 0,
   "gpt-image-2": 2,
 };
+
+const ADMIN_SECONDARY_PAGE_SIZE = 10;
+
+type AdminTab = "accounts" | "userKeys" | "redeemCodes";
 
 function formatCompact(value: number) {
   if (value >= 1000) {
@@ -221,14 +229,19 @@ export default function AccountsPage() {
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [userKeys, setUserKeys] = useState<UserKey[]>([]);
+  const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
+  const [activeTab, setActiveTab] = useState<AdminTab>("accounts");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [userKeyQuery, setUserKeyQuery] = useState("");
+  const [redeemCodeQuery, setRedeemCodeQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<AccountCategory | "all">("all");
   const [typeFilter, setTypeFilter] = useState<AccountType | "all">("all");
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
+  const [userKeyPage, setUserKeyPage] = useState(1);
+  const [redeemCodePage, setRedeemCodePage] = useState(1);
   const [open, setOpen] = useState(false);
   const [newTokens, setNewTokens] = useState("");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
@@ -245,6 +258,7 @@ export default function AccountsPage() {
   const [newUserKeyPriceImage2, setNewUserKeyPriceImage2] = useState(String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]));
   const [editUserKeyLabel, setEditUserKeyLabel] = useState("");
   const [editUserKeyQuota, setEditUserKeyQuota] = useState("0");
+  const [editUserKeyLdcBalance, setEditUserKeyLdcBalance] = useState("0");
   const [editUserKeyStatus, setEditUserKeyStatus] = useState<UserKeyStatus>("启用");
   const [editUserKeyPriceImage1, setEditUserKeyPriceImage1] = useState(
     String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]),
@@ -259,10 +273,17 @@ export default function AccountsPage() {
   const [isUpdating, setIsUpdating] = useState(false);
   const [isUploadingJson, setIsUploadingJson] = useState(false);
   const [isLoadingUserKeys, setIsLoadingUserKeys] = useState(true);
+  const [isLoadingRedeemCodes, setIsLoadingRedeemCodes] = useState(true);
   const [isSubmittingUserKeys, setIsSubmittingUserKeys] = useState(false);
+  const [isSubmittingRedeemCodes, setIsSubmittingRedeemCodes] = useState(false);
   const [isDeletingUserKeys, setIsDeletingUserKeys] = useState(false);
+  const [isDeletingRedeemCodes, setIsDeletingRedeemCodes] = useState(false);
   const [isUpdatingUserKey, setIsUpdatingUserKey] = useState(false);
   const [isAuthorizing, setIsAuthorizing] = useState(true);
+  const [newRedeemCodePrefix, setNewRedeemCodePrefix] = useState("RDM");
+  const [newRedeemCodeCount, setNewRedeemCodeCount] = useState("5");
+  const [newRedeemCodeTargetQuota, setNewRedeemCodeTargetQuota] = useState<"20" | "100">("20");
+  const [newRedeemCodeLabel, setNewRedeemCodeLabel] = useState("");
 
   function handleAdminRouteFailure(message: string) {
     const normalizedMessage = String(message || "").toLowerCase();
@@ -317,6 +338,25 @@ export default function AccountsPage() {
     }
   }
 
+  async function loadRedeemCodes(silent = false) {
+    if (!silent) {
+      setIsLoadingRedeemCodes(true);
+    }
+    try {
+      const data = await fetchRedeemCodes({ redirectOnUnauthorized: false });
+      setRedeemCodes(data.items);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "加载兑换码失败";
+      if (!handleAdminRouteFailure(message)) {
+        toast.error(message);
+      }
+    } finally {
+      if (!silent) {
+        setIsLoadingRedeemCodes(false);
+      }
+    }
+  }
+
   useEffect(() => {
     if (didLoadRef.current) {
       return;
@@ -336,7 +376,7 @@ export default function AccountsPage() {
           return;
         }
         setIsAuthorizing(false);
-        await Promise.all([loadAccounts(), loadUserKeys()]);
+        await Promise.all([loadAccounts(), loadUserKeys(), loadRedeemCodes()]);
       } catch (error) {
         if (cancelled) {
           return;
@@ -355,6 +395,14 @@ export default function AccountsPage() {
       cancelled = true;
     };
   }, [router]);
+
+  useEffect(() => {
+    setUserKeyPage(1);
+  }, [userKeyQuery]);
+
+  useEffect(() => {
+    setRedeemCodePage(1);
+  }, [redeemCodeQuery]);
 
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -417,6 +465,33 @@ export default function AccountsPage() {
     const quota = formatUserKeyQuotaSummary(userKeys);
     return { total, enabled, disabled, quota };
   }, [userKeys]);
+
+  const filteredRedeemCodes = useMemo(() => {
+    const normalizedQuery = redeemCodeQuery.trim().toLowerCase();
+    return redeemCodes.filter((item) => {
+      if (normalizedQuery.length === 0) {
+        return true;
+      }
+      return (
+        item.code.toLowerCase().includes(normalizedQuery) ||
+        String(item.label || "")
+          .toLowerCase()
+          .includes(normalizedQuery)
+      );
+    });
+  }, [redeemCodeQuery, redeemCodes]);
+
+  const userKeyPageCount = Math.max(1, Math.ceil(filteredUserKeys.length / ADMIN_SECONDARY_PAGE_SIZE));
+  const safeUserKeyPage = Math.min(userKeyPage, userKeyPageCount);
+  const userKeyStartIndex = (safeUserKeyPage - 1) * ADMIN_SECONDARY_PAGE_SIZE;
+  const currentUserKeys = filteredUserKeys.slice(userKeyStartIndex, userKeyStartIndex + ADMIN_SECONDARY_PAGE_SIZE);
+  const redeemCodePageCount = Math.max(1, Math.ceil(filteredRedeemCodes.length / ADMIN_SECONDARY_PAGE_SIZE));
+  const safeRedeemCodePage = Math.min(redeemCodePage, redeemCodePageCount);
+  const redeemCodeStartIndex = (safeRedeemCodePage - 1) * ADMIN_SECONDARY_PAGE_SIZE;
+  const currentRedeemCodes = filteredRedeemCodes.slice(
+    redeemCodeStartIndex,
+    redeemCodeStartIndex + ADMIN_SECONDARY_PAGE_SIZE,
+  );
 
   const paginationItems = useMemo(() => {
     const items: (number | "...")[] = [];
@@ -658,6 +733,7 @@ export default function AccountsPage() {
     setEditingUserKey(userKey);
     setEditUserKeyLabel(String(userKey.label || ""));
     setEditUserKeyQuota(String(userKey.quota));
+    setEditUserKeyLdcBalance(String(userKey.ldcBalance || 0));
     setEditUserKeyStatus(userKey.status);
     setEditUserKeyPriceImage1(String(userKey.pricing["gpt-image-1"]));
     setEditUserKeyPriceImage2(String(userKey.pricing["gpt-image-2"]));
@@ -707,6 +783,7 @@ export default function AccountsPage() {
       const data = await updateUserKey(editingUserKey.key, {
         label: editUserKeyLabel.trim() || undefined,
         quota: Math.max(0, Number(editUserKeyQuota || 0)),
+        ldc_balance: Math.max(0, Number(editUserKeyLdcBalance || 0)),
         status: editUserKeyStatus,
         pricing: buildUserKeyPricing(editUserKeyPriceImage1, editUserKeyPriceImage2),
       });
@@ -721,6 +798,39 @@ export default function AccountsPage() {
     }
   };
 
+  const handleCreateRedeemCodes = async () => {
+    setIsSubmittingRedeemCodes(true);
+    try {
+      const data = await createRedeemCodes({
+        count: Math.max(1, Number(newRedeemCodeCount || 1)),
+        target_quota: Math.max(0, Number(newRedeemCodeTargetQuota || 0)),
+        prefix: newRedeemCodePrefix.trim() || undefined,
+        label: newRedeemCodeLabel.trim() || undefined,
+      });
+      setRedeemCodes(data.items);
+      toast.success(`已生成 ${data.created_items?.length ?? data.added ?? 0} 个兑换码`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生成兑换码失败";
+      toast.error(message);
+    } finally {
+      setIsSubmittingRedeemCodes(false);
+    }
+  };
+
+  const handleDeleteRedeemCode = async (code: string) => {
+    setIsDeletingRedeemCodes(true);
+    try {
+      const data = await deleteRedeemCodes([code]);
+      setRedeemCodes(data.items);
+      toast.success(`已删除 ${data.removed ?? 0} 个兑换码`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除兑换码失败";
+      toast.error(message);
+    } finally {
+      setIsDeletingRedeemCodes(false);
+    }
+  };
+
   const toggleSelectAll = (checked: boolean) => {
     if (checked) {
       setSelectedIds((prev) => Array.from(new Set([...prev, ...currentRows.map((item) => item.id)])));
@@ -729,119 +839,106 @@ export default function AccountsPage() {
     setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.id === id)));
   };
 
+  const adminTabs: Array<{ value: AdminTab; label: string }> = [
+    { value: "accounts", label: "账号池" },
+    { value: "userKeys", label: "用户 Key" },
+    { value: "redeemCodes", label: "兑换码" },
+  ];
+
   return (
     <>
-      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+      <section className="space-y-4">
         <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-            Account Pool
-          </div>
-          <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
+          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Admin System</div>
+          <h1 className="text-2xl font-semibold tracking-tight">管理后台</h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadAccounts()}
-            disabled={isLoading || isRefreshing || isSubmitting || isDeleting}
-          >
-            <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-            刷新
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
-            disabled={isLoading || isRefreshing || isSubmitting || isDeleting || accounts.length === 0}
-          >
-            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            一键刷新所有账号信息和额度
-          </Button>
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild>
-              <Button className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
-                <Plus className="size-4" />
-                新增
-              </Button>
-            </DialogTrigger>
-            <DialogContent showCloseButton={false} className="rounded-2xl p-6">
-              <DialogHeader className="gap-2">
-                <DialogTitle>新增账户</DialogTitle>
-                <DialogDescription className="text-sm leading-6">
-                  支持批量上传标准 JSON 或 CPA 格式 JSON，也支持手动粘贴 Access Token。
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4">
-                <input
-                  ref={uploadInputRef}
-                  type="file"
-                  accept=".json,application/json"
-                  multiple
-                  className="hidden"
-                  onChange={(event) => void handleUploadJsonAccounts(Array.from(event.target.files ?? []))}
-                />
-                <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50/70 p-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="space-y-1">
-                      <div className="text-sm font-medium text-stone-800">批量上传 JSON</div>
-                      <p className="text-xs leading-5 text-stone-500">
-                        可多选文件。系统会自动识别 `access_token`、`accessToken`、`token` 等字段，然后直接调用新增接口。
-                      </p>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-100"
-                      onClick={() => uploadInputRef.current?.click()}
-                      disabled={isSubmitting || isUploadingJson}
-                    >
-                      {isUploadingJson ? <LoaderCircle className="size-4 animate-spin" /> : <Upload className="size-4" />}
-                      上传 JSON
-                    </Button>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-stone-700">Token 列表</label>
-                  <Textarea
-                    placeholder="粘贴 Token，每行一个..."
-                    value={newTokens}
-                    onChange={(event) => setNewTokens(event.target.value)}
-                    className="min-h-48 resize-none rounded-xl border-stone-200"
-                  />
-                </div>
-              </div>
-              <DialogFooter className="pt-2">
-                <Button
-                  variant="secondary"
-                  className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
-                  onClick={() => setOpen(false)}
-                  disabled={isSubmitting}
-                >
-                  取消
-                </Button>
-                <Button
-                  className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-                  onClick={() => void handleAddAccounts()}
-                  disabled={isSubmitting}
-                >
-                  {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-                  新增账户
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => downloadTokens(accounts)}
-            disabled={accounts.length === 0}
-          >
-            <Download className="size-4" />
-            导出全部 Token
-          </Button>
+        <div className="flex flex-wrap gap-2">
+          {adminTabs.map((tab) => (
+            <Button
+              key={tab.value}
+              variant={activeTab === tab.value ? "default" : "outline"}
+              className={cn(
+                "h-10 rounded-xl px-4",
+                activeTab === tab.value
+                  ? "bg-stone-950 text-white hover:bg-stone-800"
+                  : "border-stone-200 bg-white/80 text-stone-700 hover:bg-white",
+              )}
+              onClick={() => setActiveTab(tab.value)}
+            >
+              {tab.label}
+            </Button>
+          ))}
         </div>
       </section>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>新增账户</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              支持批量上传标准 JSON 或 CPA 格式 JSON，也支持手动粘贴 Access Token。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <input
+              ref={uploadInputRef}
+              type="file"
+              accept=".json,application/json"
+              multiple
+              className="hidden"
+              onChange={(event) => void handleUploadJsonAccounts(Array.from(event.target.files ?? []))}
+            />
+            <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50/70 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="space-y-1">
+                  <div className="text-sm font-medium text-stone-800">批量上传 JSON</div>
+                  <p className="text-xs leading-5 text-stone-500">
+                    可多选文件。系统会自动识别 `access_token`、`accessToken`、`token` 等字段，然后直接调用新增接口。
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-100"
+                  onClick={() => uploadInputRef.current?.click()}
+                  disabled={isSubmitting || isUploadingJson}
+                >
+                  {isUploadingJson ? <LoaderCircle className="size-4 animate-spin" /> : <Upload className="size-4" />}
+                  上传 JSON
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">Token 列表</label>
+              <Textarea
+                placeholder="粘贴 Token，每行一个..."
+                value={newTokens}
+                onChange={(event) => setNewTokens(event.target.value)}
+                className="min-h-48 resize-none rounded-xl border-stone-200"
+              />
+            </div>
+          </div>
+          <DialogFooter className="pt-2">
+            <Button
+              variant="secondary"
+              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              onClick={() => setOpen(false)}
+              disabled={isSubmitting}
+            >
+              取消
+            </Button>
+            <Button
+              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              onClick={() => void handleAddAccounts()}
+              disabled={isSubmitting}
+            >
+              {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              新增账户
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
@@ -969,6 +1066,14 @@ export default function AccountsPage() {
                 className="h-11 rounded-xl border-stone-200 bg-white"
               />
             </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">积分余额</label>
+              <Input
+                value={editUserKeyLdcBalance}
+                onChange={(event) => setEditUserKeyLdcBalance(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-stone-700">gpt-image-1</label>
@@ -1010,6 +1115,54 @@ export default function AccountsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {activeTab === "accounts" ? (
+        <>
+      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="space-y-1">
+          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+            Account Pool
+          </div>
+          <h2 className="text-2xl font-semibold tracking-tight">号池管理</h2>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => void loadAccounts()}
+            disabled={isLoading || isRefreshing || isSubmitting || isDeleting}
+          >
+            <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
+            刷新
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
+            disabled={isLoading || isRefreshing || isSubmitting || isDeleting || accounts.length === 0}
+          >
+            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+            一键刷新所有账号信息和额度
+          </Button>
+          <Button
+            className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+            onClick={() => setOpen(true)}
+          >
+            <Plus className="size-4" />
+            新增
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => downloadTokens(accounts)}
+            disabled={accounts.length === 0}
+          >
+            <Download className="size-4" />
+            导出全部 Token
+          </Button>
+        </div>
+      </section>
 
       <section className="space-y-3">
         <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -1395,7 +1548,10 @@ export default function AccountsPage() {
           </CardContent>
         </Card>
       </section>
+        </>
+      ) : null}
 
+      {activeTab === "userKeys" ? (
       <section className="space-y-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
@@ -1535,7 +1691,10 @@ export default function AccountsPage() {
                 <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
                 <Input
                   value={userKeyQuery}
-                  onChange={(event) => setUserKeyQuery(event.target.value)}
+                  onChange={(event) => {
+                    setUserKeyQuery(event.target.value);
+                    setUserKeyPage(1);
+                  }}
                   placeholder="搜索 key 或标签"
                   className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
                 />
@@ -1557,7 +1716,7 @@ export default function AccountsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredUserKeys.map((item) => (
+                  {currentUserKeys.map((item) => (
                     <tr
                       key={item.id}
                       className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
@@ -1628,9 +1787,261 @@ export default function AccountsPage() {
                 </div>
               ) : null}
             </div>
+            <div className="border-t border-stone-100 px-4 py-4">
+              <div className="flex items-center justify-between gap-3 text-sm text-stone-500">
+                <div>
+                  显示第 {filteredUserKeys.length === 0 ? 0 : userKeyStartIndex + 1} -{" "}
+                  {Math.min(userKeyStartIndex + ADMIN_SECONDARY_PAGE_SIZE, filteredUserKeys.length)} 条，共{" "}
+                  {filteredUserKeys.length} 条，每页 {ADMIN_SECONDARY_PAGE_SIZE} 条
+                </div>
+                <div className="flex items-center gap-2">
+                  <span>
+                    {safeUserKeyPage} / {userKeyPageCount} 页
+                  </span>
+                  <Button
+                    variant="outline"
+                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                    disabled={safeUserKeyPage <= 1}
+                    onClick={() => setUserKeyPage((prev) => Math.max(1, prev - 1))}
+                  >
+                    <ChevronLeft className="size-4" />
+                    上一页
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                    disabled={safeUserKeyPage >= userKeyPageCount}
+                    onClick={() => setUserKeyPage((prev) => Math.min(userKeyPageCount, prev + 1))}
+                  >
+                    下一页
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
           </CardContent>
         </Card>
       </section>
+      ) : null}
+
+      {activeTab === "redeemCodes" ? (
+      <section className="space-y-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
+              <Ticket className="size-4" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold tracking-tight">兑换码</h2>
+              <p className="text-sm text-stone-500">兑换后会给当前用户 key 增加指定额度。</p>
+            </div>
+          </div>
+
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => void loadRedeemCodes()}
+            disabled={isLoadingRedeemCodes || isSubmittingRedeemCodes || isDeletingRedeemCodes}
+          >
+            <RefreshCw className={cn("size-4", isLoadingRedeemCodes ? "animate-spin" : "")} />
+            刷新兑换码
+          </Button>
+        </div>
+
+        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <CardContent className="grid gap-4 p-4 lg:grid-cols-[140px_140px_180px_minmax(0,1fr)_auto]">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">前缀</label>
+              <Input
+                value={newRedeemCodePrefix}
+                onChange={(event) => setNewRedeemCodePrefix(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+                placeholder="RDM"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">数量</label>
+              <Input
+                type="number"
+                min="1"
+                max="100"
+                value={newRedeemCodeCount}
+                onChange={(event) => setNewRedeemCodeCount(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">兑换额度</label>
+              <Select
+                value={newRedeemCodeTargetQuota}
+                onValueChange={(value) => setNewRedeemCodeTargetQuota(value as "20" | "100")}
+              >
+                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="20">20 额度</SelectItem>
+                  <SelectItem value="100">100 额度</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">备注</label>
+              <Input
+                value={newRedeemCodeLabel}
+                onChange={(event) => setNewRedeemCodeLabel(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+                placeholder="可留空"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                className="h-11 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+                onClick={() => void handleCreateRedeemCodes()}
+                disabled={isSubmittingRedeemCodes}
+              >
+                {isSubmittingRedeemCodes ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                生成兑换码
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <CardContent className="space-y-0 p-0">
+            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-center gap-3">
+                <h3 className="text-lg font-semibold tracking-tight">兑换码列表</h3>
+                <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
+                  {filteredRedeemCodes.length}
+                </Badge>
+              </div>
+              <div className="relative min-w-[260px]">
+                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+                <Input
+                  value={redeemCodeQuery}
+                  onChange={(event) => {
+                    setRedeemCodeQuery(event.target.value);
+                    setRedeemCodePage(1);
+                  }}
+                  placeholder="搜索兑换码或备注"
+                  className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                />
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[880px] text-left">
+                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+                  <tr>
+                    <th className="w-56 px-4 py-3">兑换码</th>
+                    <th className="w-24 px-4 py-3">状态</th>
+                    <th className="w-24 px-4 py-3">增加额度</th>
+                    <th className="w-40 px-4 py-3">备注</th>
+                    <th className="w-40 px-4 py-3">创建时间</th>
+                    <th className="w-40 px-4 py-3">使用时间</th>
+                    <th className="w-40 px-4 py-3">使用 key</th>
+                    <th className="w-20 px-4 py-3">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {currentRedeemCodes.map((item) => (
+                    <tr
+                      key={item.id}
+                      className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                    >
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium tracking-tight text-stone-700">{item.code}</span>
+                          <button
+                            type="button"
+                            className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(item.code);
+                              toast.success("兑换码已复制");
+                            }}
+                          >
+                            <Copy className="size-4" />
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge variant={item.status === "未使用" ? "success" : "secondary"} className="rounded-md">
+                          {item.status}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge variant="info" className="rounded-md">
+                          {formatQuota(item.targetQuota)}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-3 text-stone-500">{item.label || "—"}</td>
+                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.createdAt)}</td>
+                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.usedAt)}</td>
+                      <td className="px-4 py-3 text-xs text-stone-500">{item.usedByKey ? maskToken(item.usedByKey) : "—"}</td>
+                      <td className="px-4 py-3">
+                        <button
+                          type="button"
+                          className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500"
+                          onClick={() => void handleDeleteRedeemCode(item.code)}
+                          disabled={isDeletingRedeemCodes}
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {!isLoadingRedeemCodes && filteredRedeemCodes.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                    <Ticket className="size-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-stone-700">还没有兑换码</p>
+                    <p className="text-sm text-stone-500">先选额度和数量，再生成一批。</p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <div className="border-t border-stone-100 px-4 py-4">
+              <div className="flex items-center justify-between gap-3 text-sm text-stone-500">
+                <div>
+                  显示第 {filteredRedeemCodes.length === 0 ? 0 : redeemCodeStartIndex + 1} -{" "}
+                  {Math.min(redeemCodeStartIndex + ADMIN_SECONDARY_PAGE_SIZE, filteredRedeemCodes.length)} 条，共{" "}
+                  {filteredRedeemCodes.length} 条，每页 {ADMIN_SECONDARY_PAGE_SIZE} 条
+                </div>
+                <div className="flex items-center gap-2">
+                  <span>
+                    {safeRedeemCodePage} / {redeemCodePageCount} 页
+                  </span>
+                  <Button
+                    variant="outline"
+                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                    disabled={safeRedeemCodePage <= 1}
+                    onClick={() => setRedeemCodePage((prev) => Math.max(1, prev - 1))}
+                  >
+                    <ChevronLeft className="size-4" />
+                    上一页
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                    disabled={safeRedeemCodePage >= redeemCodePageCount}
+                    onClick={() => setRedeemCodePage((prev) => Math.min(redeemCodePageCount, prev + 1))}
+                  >
+                    下一页
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+      ) : null}
     </>
   );
 }

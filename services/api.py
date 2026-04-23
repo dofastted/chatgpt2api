@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
@@ -13,13 +12,16 @@ from uuid import uuid4
 from fastapi import APIRouter, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from services.account_service import account_service
 from services.config import config
 from services.backend_service import BackendService
 from services.image_service import ImageGenerationError
+from services.image_queue_service import image_queue_service
+from services.redeem_code_service import redeem_code_service
 from services.uploaded_image_service import uploaded_image_service
 from services.user_key_service import user_key_service
 from services.version import get_app_version
@@ -28,21 +30,18 @@ from services.version import get_app_version
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
 WEB_OUT_DIR = BASE_DIR / "web" / "out"
-DONATION_REWARD_QUOTA = 50
+FREE_DONATION_REWARD_LDC = 20
+PURCHASE_QUOTA_PER_ORDER = 20
+PURCHASE_LDC_COST_PER_ORDER = 20
 DEFAULT_USER_KEY_PRICING = dict(user_key_service.DEFAULT_PRICING)
 ALL_IMAGE_MODELS = tuple(user_key_service.SUPPORTED_MODELS)
 ENABLED_IMAGE_MODELS = ("gpt-image-2",)
 MAX_IMAGES_PER_REQUEST = 2
-IMAGE_REQUEST_COOLDOWN_SECONDS = 10
-MAX_QUEUED_IMAGE_REQUESTS = 100
 DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
 MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024
 RESPONSES_STORE: dict[str, dict[str, object]] = {}
 RESPONSES_STORE_LOCK = Lock()
-IMAGE_REQUEST_SCHEDULER: dict[str, dict[str, float | int]] = {}
-IMAGE_REQUEST_SCHEDULER_LOCK = Lock()
-IMAGE_REQUEST_SLEEP = asyncio.sleep
 
 
 class UserKeyPricingRequest(BaseModel):
@@ -133,8 +132,28 @@ class UserKeyUpdateRequest(BaseModel):
     key: str = Field(default="")
     label: str | None = None
     quota: int | None = None
+    ldc_balance: int | None = None
     status: str | None = None
     pricing: UserKeyPricingRequest | None = None
+
+
+class QuotaPurchaseRequest(BaseModel):
+    package_count: int = Field(default=1, ge=1, le=100)
+
+
+class RedeemCodeCreateRequest(BaseModel):
+    count: int = Field(default=1, ge=1, le=100)
+    target_quota: int = Field(default=0, ge=0)
+    prefix: str | None = None
+    label: str | None = None
+
+
+class RedeemCodeDeleteRequest(BaseModel):
+    codes: list[str] = Field(default_factory=list)
+
+
+class RedeemCodeRedeemRequest(BaseModel):
+    code: str = Field(default="")
 
 
 @dataclass(frozen=True)
@@ -142,6 +161,7 @@ class AuthContext:
     role: str
     auth_type: str
     remaining_quota: int | None = None
+    ldc_balance: int | None = None
     user_key_id: str | None = None
     user_key_label: str | None = None
     pricing: dict[str, int] | None = None
@@ -163,6 +183,7 @@ def resolve_auth_context(authorization: str | None) -> AuthContext | None:
         role="user",
         auth_type="user_key",
         remaining_quota=max(0, int(user_key.get("quota") or 0)),
+        ldc_balance=max(0, int(user_key.get("ldc_balance") or 0)),
         user_key_id=str(user_key.get("id") or "") or None,
         user_key_label=str(user_key.get("label") or "") or None,
         pricing=user_key_service.normalize_pricing(user_key.get("pricing")),
@@ -183,6 +204,7 @@ def build_auth_session_payload(app_version: str, context: AuthContext) -> dict[s
         "role": context.role,
         "auth_type": context.auth_type,
         "remaining_quota": context.remaining_quota,
+        "ldc_balance": context.ldc_balance,
         "user_key_id": context.user_key_id,
         "user_key_label": context.user_key_label,
         "pricing": context.pricing,
@@ -198,6 +220,7 @@ def build_quota_payload(context: AuthContext, available_quota: int) -> dict[str,
         "available_quota": available_quota,
         "auth_type": context.auth_type,
         "remaining_quota": available_quota if context.auth_type == "user_key" else None,
+        "ldc_balance": context.ldc_balance if context.auth_type == "user_key" else None,
         "pricing": resolve_user_key_pricing(context.pricing) if context.auth_type == "user_key" else None,
     }
 
@@ -228,55 +251,40 @@ def normalize_requested_image_model(model: str) -> str:
 
 
 def clear_image_request_timestamps() -> None:
-    with IMAGE_REQUEST_SCHEDULER_LOCK:
-        IMAGE_REQUEST_SCHEDULER.clear()
+    image_queue_service.clear()
 
 
-def release_image_request_waiter(auth_token: str) -> None:
-    normalized_token = str(auth_token or "").strip()
-    if not normalized_token:
-        return
-    with IMAGE_REQUEST_SCHEDULER_LOCK:
-        state = IMAGE_REQUEST_SCHEDULER.get(normalized_token)
-        if state is None:
-            return
-        waiting = max(0, int(state.get("waiting") or 0) - 1)
-        state["waiting"] = waiting
-        if waiting == 0 and float(state.get("next_available_at") or 0.0) <= float(time()):
-            IMAGE_REQUEST_SCHEDULER.pop(normalized_token, None)
+def resolve_queue_request_id(header_value: str | None) -> str:
+    normalized_header = str(header_value or "").strip()
+    return normalized_header or f"iq_{uuid4().hex}"
 
 
-async def wait_for_image_request_turn(auth_token: str, now_value: float | None = None) -> None:
-    normalized_token = str(auth_token or "").strip()
-    if not normalized_token:
-        return
-    current_time = float(time() if now_value is None else now_value)
-    wait_seconds = 0.0
-    is_waiting = False
-    with IMAGE_REQUEST_SCHEDULER_LOCK:
-        state = IMAGE_REQUEST_SCHEDULER.setdefault(
-            normalized_token,
-            {"next_available_at": 0.0, "waiting": 0},
-        )
-        scheduled_start = max(current_time, float(state.get("next_available_at") or 0.0))
-        wait_seconds = max(0.0, scheduled_start - current_time)
-        if wait_seconds > 0:
-            waiting = int(state.get("waiting") or 0)
-            if waiting >= MAX_QUEUED_IMAGE_REQUESTS:
-                raise HTTPException(
-                    status_code=429,
-                    detail={"error": f"image queue is full, max_waiting={MAX_QUEUED_IMAGE_REQUESTS}"},
-                )
-            state["waiting"] = waiting + 1
-            is_waiting = True
-        state["next_available_at"] = scheduled_start + IMAGE_REQUEST_COOLDOWN_SECONDS
-    if wait_seconds <= 0:
-        return
+def build_queue_title(prompt: str) -> str:
+    trimmed = str(prompt or "").strip()
+    if len(trimmed) <= 40:
+        return trimmed
+    return f"{trimmed[:40]}..."
+
+
+async def register_image_queue_request(auth_token: str, request_id: str, title: str) -> None:
     try:
-        await IMAGE_REQUEST_SLEEP(wait_seconds)
-    finally:
-        if is_waiting:
-            release_image_request_waiter(normalized_token)
+        await run_in_threadpool(image_queue_service.create_ticket, auth_token, request_id, title)
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
+
+
+async def wait_for_image_request_turn(request_id: str) -> None:
+    await run_in_threadpool(image_queue_service.wait_for_turn, request_id)
+
+
+def build_queue_background_task(request_id: str) -> BackgroundTask:
+    return BackgroundTask(image_queue_service.finish_ticket, request_id)
+
+
+def fail_queue_request(request_id: str, error: str | None = None) -> None:
+    image_queue_service.finish_ticket(request_id, error=error)
 
 
 async def generate_image_payload(
@@ -288,23 +296,22 @@ async def generate_image_payload(
         model: str,
         n: int,
         input_images: list[dict[str, str]] | None = None,
+        queue_request_id: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
-    reserved_user_key = ""
+    settled_user_key = ""
     request_cost = 0
     unit_cost = 0
     remaining_quota_after_charge = max(0, int(context.remaining_quota or 0))
     if context.auth_type == "user_key":
-        reserved_user_key = extract_bearer_token(authorization)
+        settled_user_key = extract_bearer_token(authorization)
         pricing = resolve_user_key_pricing(context.pricing)
         unit_cost = max(0, int(pricing.get(model) or 0))
         request_cost = max(1, int(n or 1)) * unit_cost
-        reserved = user_key_service.consume_quota(reserved_user_key, request_cost)
-        if reserved is None:
+        if remaining_quota_after_charge < request_cost:
             raise HTTPException(
                 status_code=403,
                 detail={"error": f"quota is insufficient for this request, required={request_cost}"},
             )
-        remaining_quota_after_charge = max(0, int(reserved.get("quota") or 0))
     try:
         result = await run_in_threadpool(
             service.generate_with_pool,
@@ -312,16 +319,21 @@ async def generate_image_payload(
             model,
             n,
             input_images,
+            queue_request_id,
         )
         billing_payload = None
-        if reserved_user_key:
-            used_item = user_key_service.mark_used(reserved_user_key)
+        if settled_user_key:
+            charged_item = user_key_service.consume_quota(settled_user_key, request_cost)
+            if charged_item is not None:
+                remaining_quota_after_charge = max(0, int(charged_item.get("quota") or 0))
+            latest_item = user_key_service.mark_used(settled_user_key)
+            used_item = latest_item or charged_item
             if used_item is not None:
                 remaining_quota_after_charge = max(0, int(used_item.get("quota") or 0))
             billing_payload = build_billing_payload(
                 requested_model=model,
                 unit_cost=unit_cost,
-                charged_quota=request_cost,
+                charged_quota=request_cost if charged_item is not None else 0,
                 remaining_quota=remaining_quota_after_charge,
             )
             result = {
@@ -330,16 +342,10 @@ async def generate_image_payload(
             }
         return result, billing_payload
     except ImageGenerationError as exc:
-        if reserved_user_key:
-            user_key_service.refund_quota(reserved_user_key, request_cost)
         raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
     except HTTPException:
-        if reserved_user_key:
-            user_key_service.refund_quota(reserved_user_key, request_cost)
         raise
     except Exception:
-        if reserved_user_key:
-            user_key_service.refund_quota(reserved_user_key, request_cost)
         raise
 
 
@@ -706,14 +712,24 @@ def require_admin_auth_key(authorization: str | None) -> AuthContext:
     return context
 
 
+def require_user_key_auth_context(authorization: str | None) -> AuthContext:
+    context = require_auth_key(authorization)
+    if context.auth_type != "user_key":
+        raise HTTPException(status_code=403, detail={"error": "user key authorization is required"})
+    return context
+
+
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     def worker() -> None:
         while not stop_event.is_set():
             try:
-                limited_tokens = account_service.list_limited_tokens()
-                if limited_tokens:
-                    print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
-                    account_service.refresh_accounts(limited_tokens)
+                if hasattr(account_service, "list_refreshable_tokens"):
+                    refreshable_tokens = account_service.list_refreshable_tokens()
+                else:
+                    refreshable_tokens = account_service.list_limited_tokens()
+                if refreshable_tokens:
+                    print(f"[account-limited-watcher] checking {len(refreshable_tokens)} recoverable accounts")
+                    account_service.refresh_accounts(refreshable_tokens)
             except Exception as exc:
                 print(f"[account-limited-watcher] fail {exc}")
             stop_event.wait(300)
@@ -792,11 +808,21 @@ def create_app() -> FastAPI:
         context = require_auth_key(authorization)
         return build_auth_session_payload(app_version, context)
 
+    @router.get("/api/image-queue/me")
+    async def get_my_image_queue(
+            authorization: str | None = Header(default=None),
+            request_id: str | None = Query(default=None),
+    ):
+        require_auth_key(authorization)
+        auth_token = extract_bearer_token(authorization)
+        return image_queue_service.snapshot(auth_token, request_id=request_id)
+
     @router.post("/v1/response")
     @router.post("/v1/responses")
     async def create_response(
             body: ResponsesCreateRequest,
             authorization: str | None = Header(default=None),
+            image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
     ):
         context = require_auth_key(authorization)
         if body.previous_response_id:
@@ -820,21 +846,32 @@ def create_app() -> FastAPI:
             for item in input_images
         ]
         prompt = extract_responses_prompt(body.input)
-        await wait_for_image_request_turn(request_auth_token)
+        queue_request_id = resolve_queue_request_id(image_queue_request_id)
+        await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
+        try:
+            await wait_for_image_request_turn(queue_request_id)
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
 
         response_model = str(body.model or "").strip() or DEFAULT_RESPONSES_MODEL
         if response_model in ALL_IMAGE_MODELS:
             response_model = DEFAULT_RESPONSES_MODEL
         requested_model = resolve_requested_response_image_model(body)
-        image_result, billing_payload = await generate_image_payload(
-            service=service,
-            context=context,
-            authorization=authorization,
-            prompt=prompt,
-            model=requested_model,
-            n=body.n,
-            input_images=input_images,
-        )
+        try:
+            image_result, billing_payload = await generate_image_payload(
+                service=service,
+                context=context,
+                authorization=authorization,
+                prompt=prompt,
+                model=requested_model,
+                n=body.n,
+                input_images=input_images,
+                queue_request_id=queue_request_id,
+            )
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
         response_id = f"resp_{uuid4().hex}"
         payload = build_responses_payload(
             response_id=response_id,
@@ -853,8 +890,9 @@ def create_app() -> FastAPI:
                     "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
                 },
+                background=build_queue_background_task(queue_request_id),
             )
-        return payload
+        return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
 
     @router.post("/backend-api/files/process_upload_stream")
     async def process_upload_stream(
@@ -935,6 +973,11 @@ def create_app() -> FastAPI:
         require_admin_auth_key(authorization)
         return {"items": user_key_service.list_public_user_keys()}
 
+    @router.get("/api/redeem-codes")
+    async def get_redeem_codes(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return {"items": redeem_code_service.list_public_codes()}
+
     @router.post("/api/accounts")
     async def create_accounts(
             body: AccountCreateRequest,
@@ -994,20 +1037,32 @@ def create_app() -> FastAPI:
             for item in refresh_result.get("errors", [])
             if str(item.get("access_token") or "").strip()
         }
-        rewarded_accounts = len(added_tokens - failed_tokens)
-        rewarded_quota = rewarded_accounts * DONATION_REWARD_QUOTA
-        remaining_quota = None
-        if context.auth_type == "user_key" and rewarded_quota > 0:
-            rewarded_user_key = user_key_service.grant_quota(extract_bearer_token(authorization), rewarded_quota)
-            remaining_quota = max(0, int(rewarded_user_key.get("quota") or 0)) if rewarded_user_key else None
+        rewarded_accounts = len(
+            {
+                str(item.get("access_token") or "").strip()
+                for item in refresh_result.get("items", [])
+                if str(item.get("access_token") or "").strip() in added_tokens
+                and str(item.get("access_token") or "").strip() not in failed_tokens
+                and str(item.get("type") or "").strip() == "Free"
+            }
+        )
+        rewarded_ldc = rewarded_accounts * FREE_DONATION_REWARD_LDC
+        remaining_quota = context.remaining_quota
+        ldc_balance = context.ldc_balance
+        if context.auth_type == "user_key" and rewarded_ldc > 0:
+            rewarded_user_key = user_key_service.grant_ldc(extract_bearer_token(authorization), rewarded_ldc)
+            if rewarded_user_key is not None:
+                remaining_quota = max(0, int(rewarded_user_key.get("quota") or 0))
+                ldc_balance = max(0, int(rewarded_user_key.get("ldc_balance") or 0))
         return {
             **result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
             "items": refresh_result.get("items", result.get("items", [])),
             "rewarded_accounts": rewarded_accounts,
-            "rewarded_quota": rewarded_quota,
+            "rewarded_ldc": rewarded_ldc,
             "remaining_quota": remaining_quota,
+            "ldc_balance": ldc_balance,
         }
 
     @router.post("/api/user-keys")
@@ -1023,6 +1078,21 @@ def create_app() -> FastAPI:
             label_prefix=body.label_prefix,
             status=body.status,
             pricing=body.pricing.to_pricing_dict() if body.pricing is not None else None,
+        )
+
+    @router.post("/api/redeem-codes")
+    async def create_redeem_codes(
+            body: RedeemCodeCreateRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        if body.target_quota not in {20, 100}:
+            raise HTTPException(status_code=400, detail={"error": "redeem code quota must be 20 or 100"})
+        return redeem_code_service.create_codes(
+            count=body.count,
+            target_quota=body.target_quota,
+            prefix=body.prefix,
+            label=body.label,
         )
 
     @router.delete("/api/accounts")
@@ -1047,6 +1117,17 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail={"error": "keys is required"})
         return user_key_service.delete_user_keys(keys)
 
+    @router.delete("/api/redeem-codes")
+    async def delete_redeem_codes(
+            body: RedeemCodeDeleteRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        codes = [str(code or "").strip() for code in body.codes if str(code or "").strip()]
+        if not codes:
+            raise HTTPException(status_code=400, detail={"error": "codes is required"})
+        return redeem_code_service.delete_codes(codes)
+
     @router.get("/api/quota")
     async def get_quota_summary(authorization: str | None = Header(default=None)):
         context = require_auth_key(authorization)
@@ -1059,6 +1140,57 @@ def create_app() -> FastAPI:
             if account.get("status") != "禁用"
         )
         return build_quota_payload(context, available_quota)
+
+    @router.post("/api/quota/purchase")
+    async def purchase_quota(
+            body: QuotaPurchaseRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        context = require_user_key_auth_context(authorization)
+        auth_token = extract_bearer_token(authorization)
+        package_count = max(1, int(body.package_count or 1))
+        spent_ldc = package_count * PURCHASE_LDC_COST_PER_ORDER
+        purchased_quota = package_count * PURCHASE_QUOTA_PER_ORDER
+        spent_item = user_key_service.spend_ldc(auth_token, spent_ldc)
+        if spent_item is None:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": f"ldc balance is insufficient for this purchase, required={spent_ldc}"},
+            )
+        updated_item = user_key_service.grant_quota(auth_token, purchased_quota)
+        remaining_quota = max(0, int(updated_item.get("quota") or 0)) if updated_item else max(0, int(context.remaining_quota or 0))
+        ldc_balance = max(0, int(updated_item.get("ldc_balance") or 0)) if updated_item else max(0, int(spent_item.get("ldc_balance") or 0))
+        return {
+            "purchased_quota": purchased_quota,
+            "spent_ldc": spent_ldc,
+            "remaining_quota": remaining_quota,
+            "ldc_balance": ldc_balance,
+        }
+
+    @router.post("/api/redeem-codes/redeem")
+    async def redeem_code(
+            body: RedeemCodeRedeemRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        context = require_user_key_auth_context(authorization)
+        auth_token = extract_bearer_token(authorization)
+        code = str(body.code or "").strip()
+        if not code:
+            raise HTTPException(status_code=400, detail={"error": "code is required"})
+        redeemed_item = redeem_code_service.redeem_code(code, auth_token)
+        if redeemed_item is None:
+            raise HTTPException(status_code=404, detail={"error": "redeem code not found or already used"})
+        added_quota = max(0, int(redeemed_item.get("target_quota") or 0))
+        updated_user_key = user_key_service.grant_quota(auth_token, added_quota)
+        if updated_user_key is None:
+            raise HTTPException(status_code=404, detail={"error": "user key not found"})
+        return {
+            "item": redeemed_item,
+            "added_quota": added_quota,
+            "remaining_quota": max(0, int(updated_user_key.get("quota") or 0)),
+            "ldc_balance": max(0, int(updated_user_key.get("ldc_balance") or 0)),
+            "previous_quota": max(0, int(context.remaining_quota or 0)),
+        }
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(
@@ -1116,6 +1248,7 @@ def create_app() -> FastAPI:
             for update_key, value in {
                 "label": body.label,
                 "quota": body.quota,
+                "ldc_balance": body.ldc_balance,
                 "status": body.status,
                 "pricing": body.pricing.to_pricing_dict() if body.pricing is not None else None,
             }.items()
@@ -1133,18 +1266,31 @@ def create_app() -> FastAPI:
     async def generate_images(
             body: ImageGenerationRequest,
             authorization: str | None = Header(default=None),
+            image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
     ):
         context = require_auth_key(authorization)
         requested_model = normalize_requested_image_model(body.model)
-        await wait_for_image_request_turn(extract_bearer_token(authorization))
-        result, billing_payload = await generate_image_payload(
-            service=service,
-            context=context,
-            authorization=authorization,
-            prompt=body.prompt,
-            model=requested_model,
-            n=body.n,
-        )
+        request_auth_token = extract_bearer_token(authorization)
+        queue_request_id = resolve_queue_request_id(image_queue_request_id)
+        await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(body.prompt))
+        try:
+            await wait_for_image_request_turn(queue_request_id)
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
+        try:
+            result, billing_payload = await generate_image_payload(
+                service=service,
+                context=context,
+                authorization=authorization,
+                prompt=body.prompt,
+                model=requested_model,
+                n=body.n,
+                queue_request_id=queue_request_id,
+            )
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
         payload = build_images_response_payload(result, billing_payload)
         if body.stream:
             return StreamingResponse(
@@ -1161,8 +1307,9 @@ def create_app() -> FastAPI:
                     "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
                 },
+                background=build_queue_background_task(queue_request_id),
             )
-        return payload
+        return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
 
     app.include_router(router)
 

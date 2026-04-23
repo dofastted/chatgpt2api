@@ -5,7 +5,7 @@ import base64
 import hashlib
 import json
 from pathlib import Path
-from threading import Lock
+from threading import Condition, Lock
 from typing import Any
 from datetime import datetime, timedelta
 
@@ -18,6 +18,7 @@ class AccountService:
     DEFAULT_CATEGORY = "普通"
     DONATION_CATEGORY = "捐赠"
     FAILURE_COOLDOWN_SECONDS = 180
+    MAX_INFLIGHT_PER_ACCOUNT = 2
 
     ACCOUNT_TYPE_MAP = {
         "free": "Free",
@@ -32,8 +33,10 @@ class AccountService:
     def __init__(self, store_file: Path):
         self.store_file = store_file
         self._lock = Lock()
+        self._slot_condition = Condition(self._lock)
         self._index = 0
         self._accounts = self._load_accounts()
+        self._inflight_counts: dict[str, int] = {}
 
     @staticmethod
     def _clean_token(value: Any) -> str:
@@ -106,6 +109,10 @@ class AccountService:
         if bool(account.get("needs_refresh")):
             return True
         return int(account.get("quota") or 0) > 0
+
+    @classmethod
+    def _has_account_capacity(cls, inflight_count: int) -> bool:
+        return int(inflight_count or 0) < cls.MAX_INFLIGHT_PER_ACCOUNT
 
     @staticmethod
     def _has_known_quota_state(item: dict[str, Any]) -> bool:
@@ -312,21 +319,47 @@ class AccountService:
         with self._lock:
             return [token for item in self._accounts if (token := self._clean_token(item.get("access_token")))]
 
+    def _candidate_tokens_locked(self, excluded_tokens: set[str] | None = None) -> list[str]:
+        excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
+        return [
+            token
+            for item in self._accounts
+            if self._is_image_account_available(item)
+            and (token := self._clean_token(item.get("access_token")))
+            and token not in excluded
+            and self._has_account_capacity(int(self._inflight_counts.get(token) or 0))
+        ]
+
     def next_token(self, excluded_tokens: set[str] | None = None) -> str:
         with self._lock:
-            excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
-            tokens = [
-                token
-                for item in self._accounts
-                if self._is_image_account_available(item)
-                and (token := self._clean_token(item.get("access_token")))
-                and token not in excluded
-            ]
+            tokens = self._candidate_tokens_locked(excluded_tokens=excluded_tokens)
             if not tokens:
                 raise RuntimeError(f"No available tokens found in {self.store_file}")
             access_token = tokens[self._index % len(tokens)]
             self._index += 1
             return access_token
+
+    def try_acquire_token_slot(self, excluded_tokens: set[str] | None = None) -> str | None:
+        with self._lock:
+            tokens = self._candidate_tokens_locked(excluded_tokens=excluded_tokens)
+            if not tokens:
+                return None
+            access_token = tokens[self._index % len(tokens)]
+            self._index += 1
+            self._inflight_counts[access_token] = int(self._inflight_counts.get(access_token) or 0) + 1
+            return access_token
+
+    def release_token_slot(self, access_token: str) -> None:
+        normalized_access_token = self._clean_token(access_token)
+        if not normalized_access_token:
+            return
+        with self._lock:
+            current = max(0, int(self._inflight_counts.get(normalized_access_token) or 0) - 1)
+            if current:
+                self._inflight_counts[normalized_access_token] = current
+            else:
+                self._inflight_counts.pop(normalized_access_token, None)
+            self._slot_condition.notify_all()
 
     def get_account(self, access_token: str) -> dict | None:
         access_token = self._clean_token(access_token)
@@ -350,6 +383,21 @@ class AccountService:
                 if item.get("status") == "限流"
                 and (token := self._clean_token(item.get("access_token")))
             ]
+
+    def list_refreshable_tokens(self) -> list[str]:
+        with self._lock:
+            refreshable: list[str] = []
+            for item in self._accounts:
+                token = self._clean_token(item.get("access_token"))
+                if not token:
+                    continue
+                if item.get("status") == "限流":
+                    refreshable.append(token)
+                    continue
+                cooldown_until = self._parse_time_text(item.get("cooldown_until"))
+                if cooldown_until is not None and cooldown_until <= datetime.now():
+                    refreshable.append(token)
+            return refreshable
 
     def add_accounts(self, tokens: list[str], category: str | None = None) -> dict:
         cleaned_tokens = self._clean_tokens(tokens)
@@ -468,8 +516,11 @@ class AccountService:
                 self._index %= len(self._accounts)
             else:
                 self._index = 0
+            for token in target_set:
+                self._inflight_counts.pop(token, None)
             if removed:
                 self._save_accounts()
+                self._slot_condition.notify_all()
             items = self._public_items(self._accounts)
         return {"removed": removed, "items": items}
 
@@ -489,6 +540,7 @@ class AccountService:
                 return None
             self._accounts[index] = account
             self._save_accounts()
+            self._slot_condition.notify_all()
             return dict(account)
         return None
 
@@ -511,6 +563,7 @@ class AccountService:
                 return None
             self._accounts[index] = account
             self._save_accounts()
+            self._slot_condition.notify_all()
             return dict(account)
         return None
 
@@ -541,6 +594,7 @@ class AccountService:
                 return None
             self._accounts[index] = account
             self._save_accounts()
+            self._slot_condition.notify_all()
             return dict(account)
         return None
 

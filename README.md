@@ -13,6 +13,8 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 - 提供 Web 后台管理账号和生成图片
 - 支持 `user key` 直调图片接口，并按每个 key 自己的模型单价扣减次数
 - 当前公开生图模型只保留 `gpt-image-2`
+- 支持兑换码；管理员可生成 `20` 或 `100` 额度兑换码，用户 key 兑换后会直接增加额度
+- 后台管理页已改成 tab 布局，账号池、用户 key、兑换码分开管理
 - 支持本地参考图上传，上传记录按当前 Bearer Token 隔离保存
 
 生图界面：
@@ -34,6 +36,14 @@ Authorization: Bearer <auth-key>
 - `auth-key`：普通使用
 - `admin-auth-key`：后台管理
 - `user key`：普通调用，但有自己独立的剩余次数和模型单价；当前默认是 `gpt-image-1=0`、`gpt-image-2=2`
+
+前端购买与兑换：
+
+- 画图页顶部保留“兑换中心”入口
+- 购买 20 额度兑换码：`https://ldc.fkcodex.com/buy/4`
+- 购买 100 额度兑换码：`https://ldc.fkcodex.com/buy/5`
+- 兑换码只对 `user key` 开放
+- 每次兑换会在当前 `user key` 剩余额度上继续增加，不会重置成固定值
 
 ### 图片生成
 
@@ -58,7 +68,11 @@ POST /v1/images/generations
 - `user key` 调用时，实际扣费 = 当前 key 的模型单价 × `n`
 - 响应会额外返回 `billing`，包含本次模型、单价、实际扣减次数和剩余次数
 - 如果上游页面返回了可复制文本，响应还会额外带 `copied_text`
-- 同一个 key 在 10 秒间隔内的新请求会进入等待队列，不会立刻返回 429；等待队列超过 100 个时才会拒绝
+- 服务现在有三层限制：全局请求队列、当前 Bearer Token 的等待上限、账号并发槽位
+- 单个账号最多同时跑 2 个生图；10 个健康账号时，最多同时跑 20 个生图
+- 单个 Bearer Token 最多允许 10 个等待中的请求；超过后会返回 `429`
+- 全局等待队列默认一直等，但等待数超过 2000 时会返回 `503`
+- 可选请求头 `X-Image-Queue-Request-Id` 可让前端或调用方查询自己的排队状态，查询接口是 `GET /api/image-queue/me`
 - 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
 - 支持 `stream: true`。流式时会返回 `image_generation.partial_image`，最后返回 `image_generation.completed` 和 `data: [DONE]`
@@ -81,7 +95,8 @@ POST /v1/response
 - 返回 `response.output[]`，其中图片结果项是 `type: "image_generation_call"`，图片 base64 在 `result`
 - 如果上游页面返回了可复制文本，响应顶层还会带 `copied_text`
 - 同样会按 `user key` 自己的模型单价扣费，并在响应里返回 `billing`
-- 同一个 key 在 10 秒间隔内的新请求会进入等待队列，不会立刻返回 429；等待队列超过 100 个时才会拒绝
+- 这条入口也走同一套三层队列；单个账号最多 2 并发，单个 Bearer Token 最多 10 个等待请求，全局等待超过 2000 时返回 `503`
+- 可选请求头 `X-Image-Queue-Request-Id` 可配合 `GET /api/image-queue/me` 查看当前 Bearer Token 的排队状态
 - 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
 - 支持 `stream: true`。流式时会依次返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后返回 `data: [DONE]`
@@ -92,6 +107,24 @@ POST /v1/response
 
 - `previous_response_id`
 - 多张输入图
+
+### 兑换码接口
+
+管理员：
+
+- `GET /api/redeem-codes`
+- `POST /api/redeem-codes`
+- `DELETE /api/redeem-codes`
+
+用户 key：
+
+- `POST /api/redeem-codes/redeem`
+
+说明：
+
+- 管理员现在只能生成 `20` 或 `100` 额度的兑换码
+- 兑换成功后，返回 `added_quota` 和最新 `remaining_quota`
+- 同一个兑换码只能使用一次
 
 ### 本地上传接口
 

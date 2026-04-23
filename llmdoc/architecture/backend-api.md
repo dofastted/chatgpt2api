@@ -25,6 +25,7 @@
 - 登录与会话：`/auth/login`、`/auth/session`，位置在 `services/api.py:283` 与 `services/api.py:288`。
 - 账号池：`/api/accounts`、`/api/accounts/refresh`、`/api/accounts/update`，位置在 `services/api.py:297`、`services/api.py:412`、`services/api.py:425`。
 - 用户 key：`/api/user-keys`、`/api/user-keys/update`，位置在 `services/api.py:302`、`services/api.py:362`、`services/api.py:388`、`services/api.py:453`。
+- 兑换码：`/api/redeem-codes`、`/api/redeem-codes/redeem`，位置在 `services/api.py:302` 之后的管理路由段。
 - 额度接口：`/api/quota`，位置在 `services/api.py:399`。
 - 图片生成：`/v1/images/generations`，位置在 `services/api.py:558`。
 
@@ -36,11 +37,14 @@
 - 本地上传元数据和文件由 `services/uploaded_image_service.py:63` 到 `services/uploaded_image_service.py:228` 管理，上传记录按 Bearer Token 哈希隔离。
 - 上传接口只接收单张图片文件，大小上限 8 MB，返回值里会带 `file_id`、尺寸、大小和 `/backend-api/files/{file_id}/content` 下载地址，逻辑在 `services/api.py:859` 到 `services/api.py:913`。
 - `/v1/images/generations` 和 `/v1/response` 现在都会在顶层额外透传 `copied_text`，前提是上游页面正文里真的返回了这段文本，封装点在 `services/api.py:492` 和 `services/api.py:519`。
+- 兑换码创建只允许 `20` 或 `100` 两档额度。用户 key 兑换成功后会返回 `added_quota`，并把这次额度加到当前剩余值上，不会重置成固定值。
 - `/v1/images/generations` 的流式输出按图片接口风格返回；最终结果一定会给 `image_generation.completed`，然后给 `data: [DONE]`。
 - `/v1/response` 的流式输出按 Responses 接口风格返回；最终结果一定会给 `response.completed`，然后给 `data: [DONE]`。
+- `GET /api/image-queue/me` 是当前 Bearer Token 的队列状态入口，返回等待数、运行数和可选 `request_id` 的排队位置。前端图片页靠它显示“当前用户队列”和当前请求进度。
+- 队列状态放在 `services/image_queue_service.py`，只保存在进程内。请求开始前会先登记 ticket，响应真正发完后才结束 ticket。
 
 后台线程：
 
-- `services/api.py:206` 会每 300 秒刷新一次“限流”账号。
-- 线程只处理 `account_service.list_limited_tokens()` 返回的 token，不会全量刷新所有账号。
+- `services/api.py:206` 会每 300 秒刷新一次可恢复账号。
+- 线程会处理 `account_service.list_refreshable_tokens()` 返回的 token，范围包括“限流”账号和冷静期已结束的账号，不会全量刷新所有账号。
 - 图片请求前如果刷新账号信息时只遇到 TLS、连接重置、超时这类瞬时错误，而本地缓存账号仍可用，会先用缓存状态继续尝试，逻辑在 `services/backend_service.py:20` 到 `services/backend_service.py:59`。

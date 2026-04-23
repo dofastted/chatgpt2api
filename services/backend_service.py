@@ -10,6 +10,7 @@ from services.image_service import (
     is_transient_image_error,
     is_token_invalid_error,
 )
+from services.image_queue_service import image_queue_service
 
 
 class BackendService:
@@ -59,6 +60,10 @@ class BackendService:
         return self.account_service.update_account(access_token, remote_info)
 
     def resolve_request_token(self, excluded_tokens: set[str] | None = None) -> str:
+        if hasattr(self.account_service, "try_acquire_token_slot"):
+            token = self.account_service.try_acquire_token_slot(excluded_tokens=excluded_tokens)
+            if token:
+                return token
         try:
             return self.account_service.next_token(excluded_tokens=excluded_tokens)
         except RuntimeError as exc:
@@ -70,27 +75,32 @@ class BackendService:
         model: str,
         n: int,
         input_images: list[dict[str, str]] | None = None,
+        queue_request_id: str | None = None,
     ):
         attempted_tokens: set[str] = set()
 
         while True:
+            if queue_request_id:
+                image_queue_service.mark_assigning_account(queue_request_id)
             try:
                 request_token = self.resolve_request_token(excluded_tokens=attempted_tokens)
             except HTTPException:
                 raise
 
             attempted_tokens.add(request_token)
-            refreshed_account = self._refresh_request_token(request_token)
-            if not self._is_account_ready_for_image(refreshed_account):
-                print(
-                    f"[image-generate] skip token={request_token[:12]}... "
-                    f"quota={refreshed_account.get('quota') if refreshed_account else 'unknown'} "
-                    f"status={refreshed_account.get('status') if refreshed_account else 'unknown'}"
-                )
-                continue
-
-            print(f"[image-generate] start pooled token={request_token[:12]}... model={model} n={n}")
             try:
+                refreshed_account = self._refresh_request_token(request_token)
+                if not self._is_account_ready_for_image(refreshed_account):
+                    print(
+                        f"[image-generate] skip token={request_token[:12]}... "
+                        f"quota={refreshed_account.get('quota') if refreshed_account else 'unknown'} "
+                        f"status={refreshed_account.get('status') if refreshed_account else 'unknown'}"
+                    )
+                    continue
+
+                if queue_request_id:
+                    image_queue_service.mark_status(queue_request_id, "running")
+                print(f"[image-generate] start pooled token={request_token[:12]}... model={model} n={n}")
                 result = generate_image_result(
                     request_token,
                     prompt,
@@ -121,3 +131,6 @@ class BackendService:
                     print(f"[image-generate] skip transient failure token={request_token[:12]}...")
                     continue
                 raise
+            finally:
+                if hasattr(self.account_service, "release_token_slot"):
+                    self.account_service.release_token_slot(request_token)

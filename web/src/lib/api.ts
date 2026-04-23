@@ -19,6 +19,20 @@ export type ImageBilling = {
   remaining_quota: number;
 };
 
+export type ImageQueueItemStatus = "waiting" | "assigning_account" | "running" | "finished" | "failed";
+
+export type ImageQueueItem = {
+  request_id: string;
+  title?: string | null;
+  status: ImageQueueItemStatus;
+  position?: number | null;
+  ahead?: number | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+};
+
 export type Account = {
   id: string;
   access_token: string;
@@ -51,11 +65,26 @@ export type UserKey = {
   key: string;
   label?: string | null;
   quota: number;
+  ldcBalance: number;
   status: UserKeyStatus;
   pricing: UserKeyPricing;
   createdAt?: string | null;
   updatedAt?: string | null;
   lastUsedAt?: string | null;
+};
+
+export type RedeemCodeStatus = "未使用" | "已使用";
+
+export type RedeemCode = {
+  id: string;
+  code: string;
+  label?: string | null;
+  targetQuota: number;
+  status: RedeemCodeStatus;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  usedAt?: string | null;
+  usedByKey?: string | null;
 };
 
 type AccountListResponse = {
@@ -64,6 +93,10 @@ type AccountListResponse = {
 
 type UserKeyListResponse = {
   items: UserKey[];
+};
+
+type RedeemCodeListResponse = {
+  items: RedeemCode[];
 };
 
 type AccountMutationResponse = {
@@ -75,7 +108,9 @@ type AccountMutationResponse = {
   refreshed?: number;
   rewarded_accounts?: number;
   rewarded_quota?: number;
+  rewarded_ldc?: number;
   remaining_quota?: number | null;
+  ldc_balance?: number | null;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
@@ -84,6 +119,20 @@ type UserKeyMutationResponse = {
   created_items?: UserKey[];
   added?: number;
   removed?: number;
+};
+
+type RedeemCodeMutationResponse = {
+  items: RedeemCode[];
+  created_items?: RedeemCode[];
+  item?: RedeemCode;
+  added?: number;
+  removed?: number;
+  remaining_quota?: number | null;
+  ldc_balance?: number | null;
+  purchased_quota?: number;
+  spent_ldc?: number;
+  previous_quota?: number;
+  added_quota?: number;
 };
 
 type AccountRefreshResponse = {
@@ -108,6 +157,7 @@ type AuthSessionResponse = {
   role: AuthRole;
   auth_type?: AuthType;
   remaining_quota?: number | null;
+  ldc_balance?: number | null;
   pricing?: UserKeyPricing | null;
   user_key_id?: string | null;
   user_key_label?: string | null;
@@ -117,7 +167,25 @@ type QuotaSummaryResponse = {
   available_quota: number;
   auth_type?: AuthType;
   remaining_quota?: number | null;
+  ldc_balance?: number | null;
   pricing?: UserKeyPricing | null;
+};
+
+type ImageQueueStatusResponse = {
+  limits: {
+    per_user_waiting: number;
+    global_waiting: number;
+  };
+  user: {
+    waiting: number;
+    running: number;
+  };
+  global: {
+    waiting: number;
+    running: number;
+  };
+  request?: ImageQueueItem | null;
+  items: ImageQueueItem[];
 };
 
 export type ImageGenerationResponse = {
@@ -197,8 +265,21 @@ export async function fetchUserKeys(options: { redirectOnUnauthorized?: boolean 
   return httpRequest<UserKeyListResponse>("/api/user-keys", options);
 }
 
+export async function fetchRedeemCodes(options: { redirectOnUnauthorized?: boolean } = {}) {
+  return httpRequest<RedeemCodeListResponse>("/api/redeem-codes", options);
+}
+
 export async function fetchQuotaSummary() {
   return httpRequest<QuotaSummaryResponse>("/api/quota");
+}
+
+export async function fetchImageQueueStatus(requestId?: string | null) {
+  const params = new URLSearchParams();
+  if (String(requestId || "").trim()) {
+    params.set("request_id", String(requestId || "").trim());
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return httpRequest<ImageQueueStatusResponse>(`/api/image-queue/me${suffix}`);
 }
 
 export async function createAccounts(options: { tokens?: string[]; accounts?: ImportedAccount[] }) {
@@ -232,6 +313,13 @@ export async function deleteUserKeys(keys: string[]) {
   return httpRequest<UserKeyMutationResponse>("/api/user-keys", {
     method: "DELETE",
     body: { keys },
+  });
+}
+
+export async function deleteRedeemCodes(codes: string[]) {
+  return httpRequest<RedeemCodeMutationResponse>("/api/redeem-codes", {
+    method: "DELETE",
+    body: { codes },
   });
 }
 
@@ -274,11 +362,24 @@ export async function createUserKeys(options: {
   });
 }
 
+export async function createRedeemCodes(options: {
+  count: number;
+  target_quota: number;
+  prefix?: string;
+  label?: string;
+}) {
+  return httpRequest<RedeemCodeMutationResponse>("/api/redeem-codes", {
+    method: "POST",
+    body: options,
+  });
+}
+
 export async function updateUserKey(
   key: string,
   updates: {
     label?: string;
     quota?: number;
+    ldc_balance?: number;
     status?: UserKeyStatus;
     pricing?: UserKeyPricing;
   },
@@ -289,6 +390,20 @@ export async function updateUserKey(
       key,
       ...updates,
     },
+  });
+}
+
+export async function purchaseQuota(packageCount = 1) {
+  return httpRequest<RedeemCodeMutationResponse>("/api/quota/purchase", {
+    method: "POST",
+    body: { package_count: Math.max(1, packageCount) },
+  });
+}
+
+export async function redeemCode(code: string) {
+  return httpRequest<RedeemCodeMutationResponse>("/api/redeem-codes/redeem", {
+    method: "POST",
+    body: { code },
   });
 }
 
@@ -314,10 +429,12 @@ export async function generateImage(
   prompt: string,
   model: ImageModel = "gpt-image-2",
   n = 1,
-  options: { inputImageUrl?: string | null; inputImageFileId?: string | null } = {},
+  options: { inputImageUrl?: string | null; inputImageFileId?: string | null; queueRequestId?: string | null } = {},
 ) {
   const inputImageUrl = String(options.inputImageUrl || "").trim();
   const inputImageFileId = String(options.inputImageFileId || "").trim();
+  const queueRequestId = String(options.queueRequestId || "").trim();
+  const queueHeaders = queueRequestId ? {"X-Image-Queue-Request-Id": queueRequestId} : undefined;
   if (!inputImageUrl && !inputImageFileId) {
     return httpRequest<ImageGenerationResponse>("/v1/images/generations", {
       method: "POST",
@@ -327,6 +444,7 @@ export async function generateImage(
         n,
         response_format: "b64_json",
       },
+      headers: queueHeaders,
     });
   }
 
@@ -343,6 +461,7 @@ export async function generateImage(
       tools: [{ type: "image_generation", model }],
       n,
     },
+    headers: queueHeaders,
   });
   return normalizeResponsesImageGenerationResponse(payload);
 }

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { LoaderCircle, Upload } from "lucide-react";
+import { Gift, LoaderCircle, Ticket, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,16 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import { cleanJsonText, extractAccountsFromJson } from "@/lib/account-import";
-import { createDonationAccounts, fetchAuthSession, type AuthRole } from "@/lib/api";
+import {
+  createDonationAccounts,
+  fetchAuthSession,
+  redeemCode,
+  type AuthRole,
+  type AuthType,
+} from "@/lib/api";
 import { clearStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
@@ -27,13 +34,50 @@ const navItems: Array<{ href: string; label: string; roles?: AuthRole[] }> = [
   { href: "/accounts", label: "号池管理", roles: ["admin"] },
 ];
 
+type SessionState = {
+  role: AuthRole | null;
+  authType: AuthType | null;
+  remainingQuota: number | null;
+};
+
+const redeemCodePurchaseLinks = [
+  {
+    href: "https://ldc.fkcodex.com/buy/4",
+    quota: 20,
+    label: "购买 20 额度兑换码",
+  },
+  {
+    href: "https://ldc.fkcodex.com/buy/5",
+    quota: 100,
+    label: "购买 100 额度兑换码",
+  },
+] as const;
+
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
-  const [authRole, setAuthRole] = useState<AuthRole | null>(null);
-  const [donationOpen, setDonationOpen] = useState(false);
+  const [sessionState, setSessionState] = useState<SessionState>({
+    role: null,
+    authType: null,
+    remainingQuota: null,
+  });
+  const [centerOpen, setCenterOpen] = useState(false);
   const [isUploadingDonation, setIsUploadingDonation] = useState(false);
+  const [isRedeemingCode, setIsRedeemingCode] = useState(false);
+  const [redeemInput, setRedeemInput] = useState("");
+
+  const syncSession = async () => {
+    const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
+    setSessionState({
+      role: session.role,
+      authType: session.auth_type ?? null,
+      remainingQuota:
+        session.remaining_quota === null || session.remaining_quota === undefined
+          ? null
+          : Math.max(0, Number(session.remaining_quota || 0)),
+    });
+  };
 
   useEffect(() => {
     if (pathname === "/login") {
@@ -45,11 +89,22 @@ export function TopNav() {
       try {
         const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
         if (!cancelled) {
-          setAuthRole(session.role);
+          setSessionState({
+            role: session.role,
+            authType: session.auth_type ?? null,
+              remainingQuota:
+                session.remaining_quota === null || session.remaining_quota === undefined
+                  ? null
+                  : Math.max(0, Number(session.remaining_quota || 0)),
+          });
         }
       } catch {
         if (!cancelled) {
-          setAuthRole(null);
+          setSessionState({
+            role: null,
+            authType: null,
+            remainingQuota: null,
+          });
         }
       }
     };
@@ -127,17 +182,16 @@ export function TopNav() {
 
       const data = await createDonationAccounts({ accounts: accountsToImport });
       const errorCount = data.errors?.length ?? 0;
-      const rewardedQuota = Math.max(0, Number(data.rewarded_quota || 0));
+      const rewardedLdc = Math.max(0, Number(data.rewarded_ldc || 0));
       const rewardedAccounts = Math.max(0, Number(data.rewarded_accounts || 0));
-      setDonationOpen(false);
 
       const messages = [`已提交 ${matchedFiles} 个文件，共 ${accountsToImport.length} 个账户`];
       messages.push("这些账户会按捐赠账户入池");
       if ((data.skipped ?? 0) > 0) {
         messages.push(`跳过 ${data.skipped} 个重复项`);
       }
-      if (rewardedQuota > 0) {
-        messages.push(`捐赠成功 ${rewardedAccounts} 个，用户 key 已到账 ${rewardedQuota} 点`);
+      if (rewardedLdc > 0) {
+        messages.push(`有效 Free 账号 ${rewardedAccounts} 个，已到账 ${rewardedLdc} 积分`);
       }
       if (errorCount > 0) {
         messages.push(`刷新失败 ${errorCount} 个`);
@@ -149,13 +203,11 @@ export function TopNav() {
         messages.push(`${emptyFiles.length} 个文件没有可识别的 token 字段`);
       }
 
+      await syncSession();
       if (errorCount > 0) {
         toast.error(messages.join("，"));
       } else {
         toast.success(messages.join("，"));
-      }
-      if (rewardedQuota > 0) {
-        window.dispatchEvent(new Event("chatgpt2api:quota-changed"));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "上传捐赠账户失败";
@@ -168,11 +220,37 @@ export function TopNav() {
     }
   };
 
+  const handleRedeemCode = async () => {
+    const code = redeemInput.trim();
+    if (!code) {
+      toast.error("请先输入兑换码");
+      return;
+    }
+    setIsRedeemingCode(true);
+    try {
+      const data = await redeemCode(code);
+      await syncSession();
+      window.dispatchEvent(new Event("chatgpt2api:quota-changed"));
+      setRedeemInput("");
+      toast.success(
+        `兑换成功，已增加 ${Math.max(0, Number(data.added_quota || 0))} 额度，当前剩余 ${Math.max(0, Number(data.remaining_quota || 0))}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "兑换失败";
+      toast.error(message);
+    } finally {
+      setIsRedeemingCode(false);
+    }
+  };
+
   if (pathname === "/login") {
     return null;
   }
 
-  const visibleNavItems = navItems.filter((item) => !item.roles || (authRole ? item.roles.includes(authRole) : false));
+  const visibleNavItems = navItems.filter(
+    (item) => !item.roles || (sessionState.role ? item.roles.includes(sessionState.role) : false),
+  );
+  const isUserKey = sessionState.authType === "user_key";
 
   return (
     <header>
@@ -184,25 +262,33 @@ export function TopNav() {
           >
             chatgpt2api
           </Link>
-          <Dialog open={donationOpen} onOpenChange={setDonationOpen}>
+          <Dialog open={centerOpen} onOpenChange={setCenterOpen}>
             <DialogTrigger asChild>
               <button
                 type="button"
                 className="inline-flex items-center gap-1.5 py-2 text-sm text-stone-400 transition hover:text-stone-700"
-                aria-label="上传捐赠账户"
+                aria-label="打开兑换中心"
               >
-                <Upload className="size-4" />
-                <span>捐赠上传</span>
+                <Ticket className="size-4" />
+                <span>兑换中心</span>
               </button>
             </DialogTrigger>
             <DialogContent showCloseButton={false} className="rounded-2xl p-6">
               <DialogHeader className="gap-2">
-                <DialogTitle>捐赠账户上传</DialogTitle>
+                <DialogTitle>兑换中心</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
-                  支持标准账号 JSON 和 CPA 格式 JSON。系统会自动识别 `access_token`、`accessToken`、`token` 等字段，并把导入账号标记为捐赠账户。
+                  购买兑换码后，把兑换码粘贴到下方即可给当前用户 key 增加额度。
                 </DialogDescription>
               </DialogHeader>
+
               <div className="space-y-4">
+                <div className="rounded-2xl border border-stone-200 bg-stone-50/70 p-4">
+                  <div className="text-xs text-stone-400">当前额度</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-stone-900">
+                    {sessionState.remainingQuota ?? "—"}
+                  </div>
+                </div>
+
                 <input
                   ref={uploadInputRef}
                   type="file"
@@ -211,12 +297,16 @@ export function TopNav() {
                   className="hidden"
                   onChange={(event) => void handleDonationUpload(Array.from(event.target.files ?? []))}
                 />
+
                 <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50/70 p-4">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="space-y-1">
-                      <div className="text-sm font-medium text-stone-800">上传 JSON</div>
+                      <div className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                        <Gift className="size-4" />
+                        捐赠换积分
+                      </div>
                       <p className="text-xs leading-5 text-stone-500">
-                        支持多选文件，也支持 CPA 格式 JSON。导入成功后，这些账号会被归到捐赠账户，但仍会计入号池。
+                        支持标准账号 JSON 和 CPA 格式 JSON。只有成功入池并识别成 Free 的账号才会给当前用户 key 发放 `20 积分`。
                       </p>
                     </div>
                     <Button
@@ -231,17 +321,75 @@ export function TopNav() {
                       ) : (
                         <Upload className="size-4" />
                       )}
-                      选择文件
+                      上传 JSON
                     </Button>
                   </div>
                 </div>
+
+                <div className="rounded-2xl border border-stone-200 bg-white p-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                      <Ticket className="size-4" />
+                      购买兑换码
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {redeemCodePurchaseLinks.map((item) => (
+                        <a
+                          key={item.href}
+                          href={item.href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm transition hover:border-stone-300 hover:bg-stone-100"
+                        >
+                          <div className="font-semibold text-stone-900">{item.label}</div>
+                          <div className="mt-1 text-xs text-stone-500">直达购买页面，购买后回来输入兑换码。</div>
+                        </a>
+                      ))}
+                    </div>
+                    {!isUserKey ? (
+                      <p className="text-xs leading-5 text-stone-400">只有用户 key 才能在这里兑换额度。</p>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-stone-200 bg-white p-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                      <Ticket className="size-4" />
+                      兑换码
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                      <div className="space-y-2">
+                        <label className="text-xs text-stone-500">输入兑换码</label>
+                        <Input
+                          value={redeemInput}
+                          onChange={(event) => setRedeemInput(event.target.value)}
+                          placeholder="例如 RDM-XXXXXX"
+                          className="h-11 rounded-xl border-stone-200 bg-white"
+                        />
+                      </div>
+                      <Button
+                        className="h-11 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+                        onClick={() => void handleRedeemCode()}
+                        disabled={!isUserKey || isRedeemingCode}
+                      >
+                        {isRedeemingCode ? <LoaderCircle className="size-4 animate-spin" /> : <Ticket className="size-4" />}
+                        兑换
+                      </Button>
+                    </div>
+                    <p className="text-xs leading-5 text-stone-500">
+                      兑换成功后，会在当前用户 key 的剩余额度上增加对应额度。
+                    </p>
+                  </div>
+                </div>
               </div>
+
               <DialogFooter className="pt-2">
                 <Button
                   variant="secondary"
                   className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
-                  onClick={() => setDonationOpen(false)}
-                  disabled={isUploadingDonation}
+                  onClick={() => setCenterOpen(false)}
+                  disabled={isUploadingDonation || isRedeemingCode}
                 >
                   关闭
                 </Button>

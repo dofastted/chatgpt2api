@@ -29,8 +29,9 @@ class FakeBackendService:
         model: str,
         n: int,
         input_images: list[dict[str, str]] | None = None,
+        queue_request_id: str | None = None,
     ) -> dict:
-        del prompt, n, input_images
+        del prompt, n, input_images, queue_request_id
         return {
             "created": 123,
             "data": [{"b64_json": model, "mime_type": "image/png"}],
@@ -41,8 +42,11 @@ class ApiImageModelRuleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="chatgpt2api-api-rules-"))
         self.user_keys_file = self.temp_dir / "user_keys.json"
+        self.redeem_codes_file = self.temp_dir / "redeem_codes.json"
         api.user_key_service.store_file = self.user_keys_file
         api.user_key_service._user_keys = []
+        api.redeem_code_service.store_file = self.redeem_codes_file
+        api.redeem_code_service._items = []
 
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -142,8 +146,8 @@ class ApiImageModelRuleTests(unittest.TestCase):
         self.assertIsNotNone(context)
 
         class FailingBackendService:
-            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None) -> dict:
-                del prompt, model, n, input_images
+            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None, queue_request_id=None) -> dict:
+                del prompt, model, n, input_images, queue_request_id
                 raise ImageGenerationError("conversation failed: 524")
 
         async def fake_run_in_threadpool(func, *args):

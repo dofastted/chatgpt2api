@@ -161,6 +161,56 @@ class AccountServiceImportTests(unittest.TestCase):
         self.assertIsNotNone(updated)
         self.assertEqual(service.next_token(), "token-1")
 
+    def test_single_account_slot_limit_is_two(self) -> None:
+        service = self.make_service(
+            [
+                {
+                    "access_token": "token-1",
+                    "category": "普通",
+                    "type": "Plus",
+                    "status": "正常",
+                    "quota": 5,
+                    "needs_refresh": False,
+                }
+            ]
+        )
+
+        self.assertEqual(service.try_acquire_token_slot(), "token-1")
+        self.assertEqual(service.try_acquire_token_slot(), "token-1")
+        self.assertIsNone(service.try_acquire_token_slot())
+
+        service.release_token_slot("token-1")
+        self.assertEqual(service.try_acquire_token_slot(), "token-1")
+
+    def test_list_refreshable_tokens_includes_limited_and_expired_cooldown(self) -> None:
+        service = self.make_service(
+            [
+                {
+                    "access_token": "limited-token",
+                    "category": "普通",
+                    "type": "Plus",
+                    "status": "限流",
+                    "quota": 0,
+                    "needs_refresh": False,
+                },
+                {
+                    "access_token": "cooldown-token",
+                    "category": "普通",
+                    "type": "Plus",
+                    "status": "正常",
+                    "quota": 3,
+                    "cooldown_until": "2099-01-01 00:00:00",
+                    "needs_refresh": False,
+                },
+            ]
+        )
+        service._accounts[1]["cooldown_until"] = "2000-01-01 00:00:00"
+
+        self.assertEqual(
+            service.list_refreshable_tokens(),
+            ["limited-token", "cooldown-token"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

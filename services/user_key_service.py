@@ -62,6 +62,7 @@ class UserKeyService:
             "key": key,
             "label": self._clean_text(item.get("label")) or None,
             "quota": quota,
+            "ldc_balance": max(0, int(item.get("ldc_balance") or 0)),
             "status": self._normalize_status(item.get("status")),
             "pricing": self._normalize_pricing(item.get("pricing")),
             "created_at": self._clean_text(item.get("created_at")) or None,
@@ -104,6 +105,7 @@ class UserKeyService:
                 "key": self._clean_text(item.get("key")),
                 "label": item.get("label"),
                 "quota": max(0, int(item.get("quota") or 0)),
+                "ldcBalance": max(0, int(item.get("ldc_balance") or 0)),
                 "status": self._normalize_status(item.get("status")),
                 "pricing": self._normalize_pricing(item.get("pricing")),
                 "createdAt": self._clean_text(item.get("created_at")) or None,
@@ -190,6 +192,7 @@ class UserKeyService:
                         "key": generated_key,
                         "label": f"{cleaned_label_prefix}{index + 1}" if cleaned_label_prefix else None,
                         "quota": normalized_quota,
+                        "ldc_balance": 0,
                         "status": normalized_status,
                         "pricing": normalized_pricing,
                         "created_at": now,
@@ -291,6 +294,24 @@ class UserKeyService:
             self._save_user_keys()
             return dict(normalized)
 
+    def set_quota(self, key: str, quota: int) -> dict[str, Any] | None:
+        normalized_key = self._clean_text(key)
+        if not normalized_key:
+            return None
+        with self._lock:
+            index = self._find_user_key_index(normalized_key)
+            if index < 0:
+                return None
+            current = dict(self._user_keys[index])
+            current["quota"] = max(0, int(quota or 0))
+            current["updated_at"] = self._now_text()
+            normalized = self._normalize_user_key(current)
+            if normalized is None:
+                return None
+            self._user_keys[index] = normalized
+            self._save_user_keys()
+            return dict(normalized)
+
     def grant_quota(self, key: str, quota: int) -> dict[str, Any] | None:
         normalized_key = self._clean_text(key)
         normalized_quota = max(0, int(quota or 0))
@@ -302,6 +323,49 @@ class UserKeyService:
                 return None
             current = dict(self._user_keys[index])
             current["quota"] = max(0, int(current.get("quota") or 0)) + normalized_quota
+            current["updated_at"] = self._now_text()
+            normalized = self._normalize_user_key(current)
+            if normalized is None:
+                return None
+            self._user_keys[index] = normalized
+            self._save_user_keys()
+            return dict(normalized)
+
+    def spend_ldc(self, key: str, amount: int) -> dict[str, Any] | None:
+        normalized_key = self._clean_text(key)
+        normalized_amount = max(0, int(amount or 0))
+        if not normalized_key or normalized_amount <= 0:
+            return self.get_user_key(normalized_key)
+        with self._lock:
+            index = self._find_user_key_index(normalized_key)
+            if index < 0:
+                return None
+            current = dict(self._user_keys[index])
+            if current.get("status") != self.ENABLED_STATUS:
+                return None
+            ldc_balance = max(0, int(current.get("ldc_balance") or 0))
+            if ldc_balance < normalized_amount:
+                return None
+            current["ldc_balance"] = ldc_balance - normalized_amount
+            current["updated_at"] = self._now_text()
+            normalized = self._normalize_user_key(current)
+            if normalized is None:
+                return None
+            self._user_keys[index] = normalized
+            self._save_user_keys()
+            return dict(normalized)
+
+    def grant_ldc(self, key: str, amount: int) -> dict[str, Any] | None:
+        normalized_key = self._clean_text(key)
+        normalized_amount = max(0, int(amount or 0))
+        if not normalized_key or normalized_amount <= 0:
+            return self.get_user_key(normalized_key)
+        with self._lock:
+            index = self._find_user_key_index(normalized_key)
+            if index < 0:
+                return None
+            current = dict(self._user_keys[index])
+            current["ldc_balance"] = max(0, int(current.get("ldc_balance") or 0)) + normalized_amount
             current["updated_at"] = self._now_text()
             normalized = self._normalize_user_key(current)
             if normalized is None:
