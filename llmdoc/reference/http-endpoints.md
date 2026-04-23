@@ -39,10 +39,10 @@
 - `GET /api/user-keys`，返回用户 key 列表，列表项现在带 `pricing`，位置在 `services/api.py:302` 和 `services/user_key_service.py:100`。
 - `POST /api/user-keys`，接收 `count`、`quota`、`prefix`、`label_prefix`，也可选传 `pricing`，批量生成用户 key，位置在 `services/api.py:362`。
 - `DELETE /api/user-keys`，接收 `keys: string[]`，位置在 `services/api.py:388`。
-- `POST /api/user-keys/update`，接收 `key` 和部分更新字段，更新字段可包含 `pricing`，位置在 `services/api.py:453`。
+- `POST /api/user-keys/update`，接收 `key` 和部分更新字段，更新字段可包含 `quota`、`ldc_balance`、`status`、`pricing`，位置在 `services/api.py:453`。前端的批量编辑就是对选中的 key 逐条调用这条接口。
 - `GET /api/redeem-codes`，返回兑换码列表。
-- `POST /api/redeem-codes`，接收 `count`、`target_quota`、`prefix`、`label`。`target_quota` 现在只允许 `20` 或 `100`。
-- `DELETE /api/redeem-codes`，接收 `codes: string[]`。
+- `POST /api/redeem-codes`，接收 `count`、`target_quota`、`prefix`、`label`。兼容旧字段名 `targetQuota`。`target_quota` 现在只允许 `20` 或 `100`。
+- `DELETE /api/redeem-codes`，接收 `codes: string[]`。前端会用它处理选中兑换码删除，也会拿它一次删掉全部已使用兑换码。
 
 前端对应封装：
 

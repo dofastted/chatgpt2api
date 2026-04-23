@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Minimal Dark Login Prototype</title>
+    <link rel="stylesheet" href="./theme.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="nav">
+        <div class="brand">chatgpt2api</div>
+        <div class="nav-links">
+          <div class="nav-link active">login</div>
+          <div class="nav-link">single auth key</div>
+        </div>
+      </header>
+
+      <section class="hero">
+        <div>
+          <div class="eyebrow">role based redirect</div>
+          <h1 class="headline">Sign in with one key, then get out of the way.</h1>
+          <p class="subhead">
+            这一版登录页不再追求强烈视觉刺激。重点是安静、清楚、好读。
+            仍然只有一个密钥输入框，普通密钥进入 `/image`，管理员密钥进入 `/accounts`。
+          </p>
+
+          <div class="grid-3" style="margin-top: 28px;">
+            <div class="card">
+              <strong>Single field</strong>
+              <p>只保留一个主输入，减少视觉判断成本。</p>
+            </div>
+            <div class="card">
+              <strong>Warm focus</strong>
+              <p>Amber 只用于当前焦点和主按钮，不抢正文。</p>
+            </div>
+            <div class="card">
+              <strong>Quiet feedback</strong>
+              <p>错误和加载状态仍然直出，但不再堆重色块。</p>
+            </div>
+          </div>
+        </div>
+
+        <section class="terminal">
+          <div class="terminal-top">
+            <div>
+              <div class="eyebrow">secure access</div>
+              <h2 style="margin: 12px 0 0; font-family: 'Space Grotesk', sans-serif; font-size: 34px; letter-spacing: -0.04em;">Welcome Back</h2>
+            </div>
+            <div class="terminal-dots"><span></span><span></span><span></span></div>
+          </div>
+
+          <div class="tag-row" style="margin-bottom: 18px;">
+            <div class="tag">normal key → /image</div>
+            <div class="tag">admin key → /accounts</div>
+          </div>
+
+          <div class="panel" style="background: rgba(255,255,255,0.02);">
+            <div class="mini muted" style="margin-bottom: 10px;">Authorization key</div>
+            <div class="input">••••••••••••••••••••••••••</div>
+            <div class="action-row" style="margin-top: 16px;">
+              <a class="button" href="javascript:void(0)">登录</a>
+              <div class="button-muted">Enter 提交</div>
+            </div>
+          </div>
+
+          <div class="preview-card" style="margin-top: 16px; border-color: rgba(245, 158, 11, 0.16);">
+            <strong>Failed state</strong>
+            <p>授权无效时仍然走 toast，这里只用一块轻提示说明占位。</p>
+          </div>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

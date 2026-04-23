@@ -24,7 +24,13 @@ request.interceptors.request.use(async (config) => {
 
 request.interceptors.response.use(
     (response) => response,
-    async (error: AxiosError<{ detail?: { error?: string }; error?: string; message?: string }>) => {
+    async (
+        error: AxiosError<{
+            detail?: { error?: string } | Array<{ msg?: string }>;
+            error?: string;
+            message?: string;
+        }>,
+    ) => {
         const status = error.response?.status;
         const shouldRedirect = (error.config as RequestConfig | undefined)?.redirectOnUnauthorized !== false;
         if (status === 401 && shouldRedirect && typeof window !== "undefined") {
@@ -33,8 +39,15 @@ request.interceptors.response.use(
         }
 
         const payload = error.response?.data;
+        const validationMessage = Array.isArray(payload?.detail)
+            ? payload.detail
+                  .map((item) => String(item?.msg || "").trim())
+                  .filter(Boolean)
+                  .join("；")
+            : "";
         const message =
-            payload?.detail?.error ||
+            (!Array.isArray(payload?.detail) ? payload?.detail?.error : "") ||
+            validationMessage ||
             payload?.error ||
             payload?.message ||
             error.message ||

@@ -142,10 +142,12 @@ class QuotaPurchaseRequest(BaseModel):
 
 
 class RedeemCodeCreateRequest(BaseModel):
-    count: int = Field(default=1, ge=1, le=100)
-    target_quota: int = Field(default=0, ge=0)
+    count: int = Field(default=1, ge=1, le=500)
+    target_quota: int = Field(default=0, ge=0, alias="targetQuota")
     prefix: str | None = None
     label: str | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 class RedeemCodeDeleteRequest(BaseModel):

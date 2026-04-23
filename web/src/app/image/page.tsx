@@ -721,12 +721,12 @@ export default function ImagePage() {
 
   return (
     <>
-      <section className="mx-auto grid h-[calc(100vh-5rem)] min-h-0 w-full max-w-[1380px] grid-cols-1 gap-3 px-3 pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
+      <section className="max-page-shell max-image-shell mx-auto grid h-[calc(100vh-5rem)] min-h-0 w-full max-w-[1400px] grid-cols-1 gap-5 px-2 pb-6 lg:grid-cols-[280px_minmax(0,1fr)]">
         <aside className="min-h-0 border-r border-stone-200/70 pr-3">
           <div className="flex h-full min-h-0 flex-col gap-3 py-2">
             <div className="flex items-center gap-2">
               <Button
-                className="h-10 flex-1 rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+                className="h-11 flex-1"
                 onClick={handleCreateDraft}
               >
                 <MessageSquarePlus className="size-4" />
@@ -734,7 +734,7 @@ export default function ImagePage() {
               </Button>
               <Button
                 variant="outline"
-                className="h-10 rounded-xl border-stone-200 bg-white/85 px-3 text-stone-600 hover:bg-white"
+                className="h-11 px-3"
                 onClick={() => void handleClearHistory()}
                 disabled={conversations.length === 0}
               >
@@ -742,7 +742,7 @@ export default function ImagePage() {
               </Button>
             </div>
 
-            <div className="rounded-[22px] border border-stone-200/80 bg-white px-4 py-4 shadow-[0_12px_30px_rgba(0,0,0,0.03)]">
+            <div className="max-panel-soft rounded-[22px] px-4 py-4">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-400">生成信息</div>
               <div className="mt-4 space-y-2 text-xs text-stone-500">
                 <div className="flex items-center justify-between gap-3">
@@ -774,7 +774,7 @@ export default function ImagePage() {
               <p className="mt-2 text-[11px] leading-5 text-stone-400">{currentQueueProgressText}</p>
             </div>
 
-            <div className="rounded-[22px] border border-stone-200/80 bg-white px-4 py-4 shadow-[0_12px_30px_rgba(0,0,0,0.03)]">
+            <div className="max-panel-soft rounded-[22px] px-4 py-4">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-400">当前用户队列</div>
               <div className="mt-4 space-y-2">
                 {activeQueueItems.length === 0 ? (
@@ -860,9 +860,10 @@ export default function ImagePage() {
           >
             {!selectedConversation ? (
               <div className="flex h-full min-h-[420px] items-center justify-center text-center">
-                <div className="w-full max-w-4xl">
-                  <h1 className="text-3xl font-semibold tracking-tight text-stone-950 md:text-5xl">生成图片</h1>
-                  <p className="mt-4 text-[15px] text-stone-500">输入提示词即可开始。</p>
+                <div className="max-panel w-full max-w-4xl p-10">
+                  <div className="max-kicker">image workstation</div>
+                  <h1 className="max-heading mt-5 text-4xl md:text-6xl">生成图片</h1>
+                  <p className="mt-5 text-[15px] text-white/72">输入提示词即可开始。</p>
                 </div>
               </div>
             ) : (
@@ -889,7 +890,7 @@ export default function ImagePage() {
 
                 <div className="flex justify-start">
                   <div className="w-full p-1">
-                    <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-stone-500">
                       <span className="rounded-full bg-stone-100 px-3 py-1">{selectedConversation.model}</span>
                       <span className="rounded-full bg-stone-100 px-3 py-1">{selectedConversation.count} 张</span>
                       <span className="rounded-full bg-stone-100 px-3 py-1">
@@ -984,9 +985,7 @@ export default function ImagePage() {
           </div>
 
           <div className="shrink-0 flex justify-center">
-            <div
-              className="w-full max-w-[980px] rounded-[24px] border border-stone-200/80 bg-white shadow-[0_0.25rem_1.25rem_rgba(0,0,0,0.04),0_0_0_0.5px_rgba(214,211,209,0.52)] transition-shadow duration-200 hover:shadow-[0_0.25rem_1.25rem_rgba(0,0,0,0.06),0_0_0_0.5px_rgba(214,211,209,0.72)] focus-within:shadow-[0_0.25rem_1.25rem_rgba(0,0,0,0.08),0_0_0_0.5px_rgba(214,211,209,0.88)]"
-            >
+            <div className="max-panel w-full max-w-[980px] rounded-[24px] transition-shadow duration-200">
               <div
                 className="cursor-text px-4 pt-4 pb-3 sm:px-5"
                 onClick={() => {
@@ -1149,7 +1148,7 @@ export default function ImagePage() {
       </section>
 
       <Dialog open={Boolean(previewImage)} onOpenChange={(open) => (!open ? setPreviewImageId(null) : null)}>
-        <DialogContent className="w-[min(96vw,1120px)] border-stone-800/80 bg-stone-950 p-2 sm:p-4">
+        <DialogContent className="w-[min(96vw,1120px)] border-[#00F5D4]/75 bg-[rgba(15,7,31,0.95)] p-2 sm:p-4">
           {previewImage ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-3 rounded-[18px] bg-white/6 px-3 py-2 text-sm text-stone-200 sm:px-4">

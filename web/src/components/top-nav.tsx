@@ -253,12 +253,12 @@ export function TopNav() {
   const isUserKey = sessionState.authType === "user_key";
 
   return (
-    <header>
-      <div className="flex h-12 items-start justify-between pt-1">
+    <header className="max-topnav">
+      <div className="relative flex min-h-[84px] flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-1 items-center gap-3">
           <Link
             href="/image"
-            className="py-2 text-[15px] font-semibold tracking-tight text-stone-950 transition hover:text-stone-700"
+            className="relative py-2 font-['Outfit'] text-lg font-black uppercase tracking-[0.22em] text-[#FFE600] transition hover:text-white"
           >
             chatgpt2api
           </Link>
@@ -266,7 +266,7 @@ export function TopNav() {
             <DialogTrigger asChild>
               <button
                 type="button"
-                className="inline-flex items-center gap-1.5 py-2 text-sm text-stone-400 transition hover:text-stone-700"
+                className="inline-flex items-center gap-2 rounded-full border-2 border-dashed border-[#FF6B35] bg-[#FF6B35]/12 px-4 py-2 text-sm font-bold uppercase tracking-[0.16em] text-white transition hover:border-[#FFE600] hover:bg-[#FF3AF2]/18"
                 aria-label="打开兑换中心"
               >
                 <Ticket className="size-4" />
@@ -397,7 +397,7 @@ export function TopNav() {
             </DialogContent>
           </Dialog>
         </div>
-        <div className="flex justify-center gap-8">
+        <div className="flex flex-wrap justify-center gap-3 lg:gap-4">
           {visibleNavItems.map((item) => {
             const active = pathname === item.href;
             return (
@@ -405,23 +405,24 @@ export function TopNav() {
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "relative py-2 text-[15px] font-medium transition",
-                  active ? "font-semibold text-stone-950" : "text-stone-500 hover:text-stone-900",
+                  "relative rounded-full border-2 px-4 py-2 text-sm font-black uppercase tracking-[0.16em] transition",
+                  active
+                    ? "border-[#FFE600] bg-[#FF3AF2]/18 text-white"
+                    : "border-[#00F5D4]/55 bg-white/5 text-white/78 hover:border-[#00F5D4] hover:text-white",
                 )}
               >
                 {item.label}
-                {active ? <span className="absolute inset-x-0 -bottom-[3px] h-0.5 bg-stone-950" /> : null}
               </Link>
             );
           })}
         </div>
         <div className="flex flex-1 items-center justify-end gap-3">
-          <span className="rounded-md bg-stone-100 px-2 py-1 text-[11px] font-medium text-stone-500">
+          <span className="rounded-full border-2 border-[#7B2FFF] bg-[#7B2FFF]/18 px-3 py-1 text-[11px] font-black uppercase tracking-[0.14em] text-white/80">
             v{webConfig.appVersion}
           </span>
           <button
             type="button"
-            className="py-2 text-sm text-stone-400 transition hover:text-stone-700"
+            className="rounded-full border-2 border-[#FF3AF2]/65 bg-[#FF3AF2]/12 px-4 py-2 text-sm font-black uppercase tracking-[0.16em] text-white transition hover:border-[#FFE600] hover:bg-[#FF3AF2]/24"
             onClick={() => void handleLogout()}
           >
             退出

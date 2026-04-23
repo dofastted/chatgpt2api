@@ -1,7 +1,18 @@
 import type { Metadata } from "next";
+import { DM_Sans, Outfit } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
+
+const headingFont = Outfit({
+  subsets: ["latin"],
+  variable: "--font-heading",
+});
+
+const bodyFont = DM_Sans({
+  subsets: ["latin"],
+  variable: "--font-body",
+});
 
 export const metadata: Metadata = {
   title: "ChatGPT 号池管理",
@@ -16,15 +27,15 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body
-        className="antialiased"
+        className={`${headingFont.variable} ${bodyFont.variable} app-shell antialiased`}
         style={{
           fontFamily:
-            '"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif',
+            'var(--font-body),"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif',
         }}
       >
         <Toaster position="top-center" richColors />
-        <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.92),_rgba(245,239,231,0.96)_42%,_rgba(240,235,227,0.99)_100%)] px-4 py-2 text-stone-900 sm:px-6 lg:px-8">
-          <div className="mx-auto flex max-w-[1440px] flex-col gap-5">
+        <main className="app-shell__main min-h-screen px-4 py-3 text-stone-900 sm:px-6 lg:px-8">
+          <div className="mx-auto flex max-w-[1480px] flex-col gap-5">
             <TopNav />
             {children}
           </div>

@@ -430,6 +430,28 @@ class UserKeyPricingTests(unittest.TestCase):
 
         self.assertEqual(create_response.status_code, 400)
 
+    def test_redeem_code_create_accepts_legacy_target_quota_alias(self) -> None:
+        with self.make_client() as client:
+            create_response = client.post(
+                "/api/redeem-codes",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json={"count": 1, "targetQuota": 20, "prefix": "RDM", "label": "legacy-body"},
+            )
+
+        self.assertEqual(create_response.status_code, 200)
+        self.assertEqual(create_response.json()["created_items"][0]["targetQuota"], 20)
+
+    def test_redeem_code_create_accepts_count_200(self) -> None:
+        with self.make_client() as client:
+            create_response = client.post(
+                "/api/redeem-codes",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json={"count": 200, "target_quota": 20, "prefix": "RDM", "label": "count-200"},
+            )
+
+        self.assertEqual(create_response.status_code, 200)
+        self.assertEqual(len(create_response.json()["created_items"]), 200)
+
     def test_donation_rewards_ldc_only_for_free_accounts(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,

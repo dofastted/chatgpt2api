@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Vaporwave Admin Prototype</title>
+    <link rel="stylesheet" href="./theme.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="chrome">
+        <div class="mono">admin.console</div>
+        <div class="toolbar">
+          <div class="tag">account pool</div>
+          <div class="tag">user key</div>
+          <div class="tag">redeem code</div>
+        </div>
+        <div class="dots"><span></span><span></span><span></span></div>
+      </div>
+
+      <div class="tabs" style="margin-top: 22px;">
+        <div class="button"><span style="transform: skewX(12deg)">账号池</span></div>
+        <div class="ghost"><span style="transform: skewX(12deg)">用户 Key</span></div>
+        <div class="ghost"><span style="transform: skewX(12deg)">兑换码</span></div>
+      </div>
+
+      <section class="metrics">
+        <div class="box"><strong>TOTAL</strong><p>246</p></div>
+        <div class="box"><strong>HEALTHY</strong><p>198</p></div>
+        <div class="box"><strong>LIMITED</strong><p>18</p></div>
+        <div class="box"><strong>ABNORMAL</strong><p>11</p></div>
+        <div class="box"><strong>DISABLED</strong><p>19</p></div>
+        <div class="box"><strong>QUOTA</strong><p>4.3K</p></div>
+      </section>
+
+      <section class="hero" style="margin-top: 24px; grid-template-columns: 0.92fr 1.08fr;">
+        <div class="panel stack">
+          <div class="mono">&gt; admin controls</div>
+          <h2>Bulk Operations</h2>
+          <div class="input">&gt; search mailbox / key / code</div>
+          <div class="toolbar">
+            <div class="ghost"><span style="transform: skewX(12deg)">refresh</span></div>
+            <div class="ghost"><span style="transform: skewX(12deg)">upload json</span></div>
+            <div class="ghost"><span style="transform: skewX(12deg)">download txt</span></div>
+            <div class="button"><span style="transform: skewX(12deg)">create</span></div>
+          </div>
+          <div class="box">保留 tab 结构、筛选器、批量编辑、批量删除、分页和弹窗。</div>
+        </div>
+
+        <div class="table">
+          <table>
+            <thead>
+              <tr>
+                <th>EMAIL</th>
+                <th>TYPE</th>
+                <th>STATUS</th>
+                <th>QUOTA</th>
+                <th>RESTORE</th>
+                <th>ACTION</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>alpha@example.com</td><td>PLUS</td><td>NORMAL</td><td>42</td><td>2026-04-25</td><td>EDIT</td></tr>
+              <tr><td>beta@example.com</td><td>FREE</td><td>LIMITED</td><td>0</td><td>2026-04-24</td><td>REFRESH</td></tr>
+              <tr><td>gamma@example.com</td><td>PRO</td><td>NORMAL</td><td>88</td><td>2026-04-26</td><td>EDIT</td></tr>
+              <tr><td>delta@example.com</td><td>TEAM</td><td>DISABLED</td><td>12</td><td>--</td><td>ENABLE</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

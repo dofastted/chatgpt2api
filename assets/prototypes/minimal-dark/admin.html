@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Minimal Dark Admin Prototype</title>
+    <link rel="stylesheet" href="./theme.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="nav">
+        <div class="brand">chatgpt2api / admin</div>
+        <div class="nav-links">
+          <div class="nav-link active">账号池</div>
+          <div class="nav-link">用户 key</div>
+          <div class="nav-link">兑换码</div>
+        </div>
+      </header>
+
+      <section style="padding-top: 52px;">
+        <div class="eyebrow">admin system</div>
+        <h1 class="headline" style="max-width: 820px; margin-top: 18px; font-size: clamp(40px,5vw,68px);">A quieter control room for accounts, keys and codes.</h1>
+        <p class="subhead" style="max-width: 760px;">
+          管理页保持原来的 tab、筛选、表格和批量操作，但把视觉压低，避免像营销页一样抢戏。
+        </p>
+      </section>
+
+      <section class="metrics" style="margin-top: 28px;">
+        <div class="card"><strong>账户总数</strong><p>246</p></div>
+        <div class="card"><strong>正常账户</strong><p>198</p></div>
+        <div class="card"><strong>限流账户</strong><p>18</p></div>
+        <div class="card"><strong>异常账户</strong><p>11</p></div>
+        <div class="card"><strong>禁用账户</strong><p>19</p></div>
+        <div class="card"><strong>剩余额度</strong><p>4.3k</p></div>
+      </section>
+
+      <section class="grid-3" style="grid-template-columns: 0.9fr 2.1fr; margin-top: 26px;">
+        <div class="panel">
+          <div class="eyebrow">filters & actions</div>
+          <div class="filter-bar" style="margin-top: 16px;">搜索邮箱 / key / 兑换码</div>
+          <div class="list" style="margin-top: 16px;">
+            <div class="list-item">
+              <div class="title">来源</div>
+              <div class="meta">全部来源</div>
+            </div>
+            <div class="list-item">
+              <div class="title">类型</div>
+              <div class="meta">全部类型</div>
+            </div>
+            <div class="list-item">
+              <div class="title">状态</div>
+              <div class="meta">全部状态</div>
+            </div>
+          </div>
+          <div class="action-row" style="margin-top: 16px;">
+            <a class="button" href="javascript:void(0)">新增</a>
+            <a class="button-muted" href="javascript:void(0)">刷新</a>
+            <a class="button-muted" href="javascript:void(0)">导出 txt</a>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>类型</th>
+                <th>状态</th>
+                <th>额度</th>
+                <th>恢复时间</th>
+                <th>来源</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>alpha@example.com</td>
+                <td>Plus</td>
+                <td><span class="status">正常</span></td>
+                <td>42</td>
+                <td>2026-04-25 12:30</td>
+                <td>普通</td>
+                <td class="muted">编辑 / 刷新</td>
+              </tr>
+              <tr>
+                <td>beta@example.com</td>
+                <td>Free</td>
+                <td><span class="status warn">限流</span></td>
+                <td>0</td>
+                <td>2026-04-24 08:10</td>
+                <td>捐赠</td>
+                <td class="muted">编辑 / 刷新</td>
+              </tr>
+              <tr>
+                <td>gamma@example.com</td>
+                <td>Pro</td>
+                <td><span class="status">正常</span></td>
+                <td>88</td>
+                <td>2026-04-26 09:00</td>
+                <td>普通</td>
+                <td class="muted">编辑 / 删除</td>
+              </tr>
+              <tr>
+                <td>delta@example.com</td>
+                <td>Team</td>
+                <td><span class="status stop">禁用</span></td>
+                <td>12</td>
+                <td>—</td>
+                <td>普通</td>
+                <td class="muted">启用 / 编辑</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

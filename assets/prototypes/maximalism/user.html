@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Maximalism User Prototype</title>
+    <link rel="stylesheet" href="./theme.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="nav">
+        <div class="brand">chatgpt2api / image</div>
+        <div class="nav-links">
+          <div class="pill">quota 34</div>
+          <div class="pill">gpt-image-2</div>
+          <div class="pill">queue 2 waiting</div>
+        </div>
+        <div class="ghost">redeem center</div>
+      </div>
+
+      <div class="layout-2">
+        <aside class="sidebar">
+          <div class="button">new conversation</div>
+          <div class="panel stack">
+            <div class="kicker">generation info</div>
+            <div class="card-grid" style="grid-template-columns: 1fr;">
+              <div class="card"><strong>Current cost</strong><p>2 额度 / 张，支持 1~2 张。</p></div>
+              <div class="card"><strong>Queue state</strong><p>当前请求排到第 2 位，前方 1 个请求。</p></div>
+            </div>
+          </div>
+          <div class="panel stack">
+            <div class="kicker">conversation log</div>
+            <div class="conversation active"><strong>City pop cat</strong><p>04/23 18:12</p></div>
+            <div class="conversation"><strong>poster remix</strong><p>04/23 17:40</p></div>
+            <div class="conversation"><strong>sunset sneaker</strong><p>04/23 16:18</p></div>
+          </div>
+        </aside>
+
+        <main>
+          <div class="panel preview stack">
+            <div class="kicker">selected conversation</div>
+            <h2>Generate Images</h2>
+            <p>
+              这页保留现有工作流：左侧会话、右侧结果、底部输入器。视觉上把每一块都做成夸张边框和叠影。
+            </p>
+            <div class="badge-row">
+              <div class="badge">1 input image</div>
+              <div class="badge">2 result images</div>
+              <div class="badge">copied text slot</div>
+            </div>
+            <div class="image-grid">
+              <div class="image-box"></div>
+              <div class="image-box"></div>
+              <div class="image-box"></div>
+            </div>
+          </div>
+
+          <div class="panel composer stack">
+            <div class="muted-box">uploaded reference: billboard-cat.png · 1.2 MB</div>
+            <div class="textarea">
+              a rainy neon alley, hyper detailed chrome cat, bright reflections, cinematic signboards
+            </div>
+            <div class="toolbar">
+              <div class="ghost">upload image</div>
+              <div class="pill">gpt-image-2</div>
+              <div class="pill">1 张</div>
+              <div class="pill">2 张</div>
+              <div class="button">send</div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

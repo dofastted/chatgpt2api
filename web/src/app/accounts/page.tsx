@@ -195,10 +195,10 @@ function formatUserKeyPricing(pricing?: UserKeyPricing | null) {
   return `gpt-image-2: ${formatQuota(resolved["gpt-image-2"])}`;
 }
 
-function maskToken(token?: string) {
+function maskToken(token?: string, visibleStart = 16, visibleEnd = 8) {
   if (!token) return "—";
-  if (token.length <= 18) return token;
-  return `${token.slice(0, 16)}...${token.slice(-8)}`;
+  if (token.length <= visibleStart + visibleEnd) return token;
+  return `${token.slice(0, visibleStart)}...${token.slice(-visibleEnd)}`;
 }
 
 function downloadTokens(accounts: Account[]) {
@@ -208,6 +208,21 @@ function downloadTokens(accounts: Account[]) {
   const link = document.createElement("a");
   link.href = url;
   link.download = `accounts-${Date.now()}.txt`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadRedeemCodes(codes: RedeemCode[], filenamePrefix = "redeem-codes") {
+  if (codes.length === 0) {
+    toast.error("没有可下载的兑换码");
+    return;
+  }
+  const content = `${codes.map((item) => item.code).join("\n")}\n`;
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${filenamePrefix}-${Date.now()}.txt`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -232,6 +247,8 @@ export default function AccountsPage() {
   const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
   const [activeTab, setActiveTab] = useState<AdminTab>("accounts");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectedUserKeyIds, setSelectedUserKeyIds] = useState<string[]>([]);
+  const [selectedRedeemCodeIds, setSelectedRedeemCodeIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [userKeyQuery, setUserKeyQuery] = useState("");
   const [redeemCodeQuery, setRedeemCodeQuery] = useState("");
@@ -246,6 +263,7 @@ export default function AccountsPage() {
   const [newTokens, setNewTokens] = useState("");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editingUserKey, setEditingUserKey] = useState<UserKey | null>(null);
+  const [bulkEditUserKeysOpen, setBulkEditUserKeysOpen] = useState(false);
   const [editCategory, setEditCategory] = useState<AccountCategory>("普通");
   const [editType, setEditType] = useState<AccountType>("Free");
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
@@ -266,6 +284,10 @@ export default function AccountsPage() {
   const [editUserKeyPriceImage2, setEditUserKeyPriceImage2] = useState(
     String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]),
   );
+  const [batchEditUserKeyQuota, setBatchEditUserKeyQuota] = useState("");
+  const [batchEditUserKeyLdcBalance, setBatchEditUserKeyLdcBalance] = useState("");
+  const [batchEditUserKeyStatus, setBatchEditUserKeyStatus] = useState<"unchanged" | UserKeyStatus>("unchanged");
+  const [batchEditUserKeyPriceImage2, setBatchEditUserKeyPriceImage2] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -284,6 +306,7 @@ export default function AccountsPage() {
   const [newRedeemCodeCount, setNewRedeemCodeCount] = useState("5");
   const [newRedeemCodeTargetQuota, setNewRedeemCodeTargetQuota] = useState<"20" | "100">("20");
   const [newRedeemCodeLabel, setNewRedeemCodeLabel] = useState("");
+  const [lastCreatedRedeemCodes, setLastCreatedRedeemCodes] = useState<RedeemCode[]>([]);
 
   function handleAdminRouteFailure(message: string) {
     const normalizedMessage = String(message || "").toLowerCase();
@@ -326,6 +349,7 @@ export default function AccountsPage() {
     try {
       const data = await fetchUserKeys({ redirectOnUnauthorized: false });
       setUserKeys(data.items);
+      setSelectedUserKeyIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载用户 key 失败";
       if (!handleAdminRouteFailure(message)) {
@@ -345,6 +369,7 @@ export default function AccountsPage() {
     try {
       const data = await fetchRedeemCodes({ redirectOnUnauthorized: false });
       setRedeemCodes(data.items);
+      setSelectedRedeemCodeIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载兑换码失败";
       if (!handleAdminRouteFailure(message)) {
@@ -395,14 +420,6 @@ export default function AccountsPage() {
       cancelled = true;
     };
   }, [router]);
-
-  useEffect(() => {
-    setUserKeyPage(1);
-  }, [userKeyQuery]);
-
-  useEffect(() => {
-    setRedeemCodePage(1);
-  }, [redeemCodeQuery]);
 
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -485,6 +502,16 @@ export default function AccountsPage() {
   const safeUserKeyPage = Math.min(userKeyPage, userKeyPageCount);
   const userKeyStartIndex = (safeUserKeyPage - 1) * ADMIN_SECONDARY_PAGE_SIZE;
   const currentUserKeys = filteredUserKeys.slice(userKeyStartIndex, userKeyStartIndex + ADMIN_SECONDARY_PAGE_SIZE);
+  const selectedUserKeys = useMemo(() => {
+    const selectedSet = new Set(selectedUserKeyIds);
+    return userKeys.filter((item) => selectedSet.has(item.id));
+  }, [selectedUserKeyIds, userKeys]);
+  const allCurrentUserKeysSelected =
+    currentUserKeys.length > 0 && currentUserKeys.every((item) => selectedUserKeyIds.includes(item.id));
+  const selectedRedeemCodes = useMemo(() => {
+    const selectedSet = new Set(selectedRedeemCodeIds);
+    return redeemCodes.filter((item) => selectedSet.has(item.id));
+  }, [selectedRedeemCodeIds, redeemCodes]);
   const redeemCodePageCount = Math.max(1, Math.ceil(filteredRedeemCodes.length / ADMIN_SECONDARY_PAGE_SIZE));
   const safeRedeemCodePage = Math.min(redeemCodePage, redeemCodePageCount);
   const redeemCodeStartIndex = (safeRedeemCodePage - 1) * ADMIN_SECONDARY_PAGE_SIZE;
@@ -492,6 +519,9 @@ export default function AccountsPage() {
     redeemCodeStartIndex,
     redeemCodeStartIndex + ADMIN_SECONDARY_PAGE_SIZE,
   );
+  const allCurrentRedeemCodesSelected =
+    currentRedeemCodes.length > 0 && currentRedeemCodes.every((item) => selectedRedeemCodeIds.includes(item.id));
+  const usedRedeemCodes = useMemo(() => redeemCodes.filter((item) => item.status === "已使用"), [redeemCodes]);
 
   const paginationItems = useMemo(() => {
     const items: (number | "...")[] = [];
@@ -760,11 +790,20 @@ export default function AccountsPage() {
   };
 
   const handleDeleteUserKey = async (key: string) => {
+    await handleDeleteUserKeys([key]);
+  };
+
+  const handleDeleteUserKeys = async (keys: string[]) => {
+    if (keys.length === 0) {
+      toast.error("请先选择要删除的用户 key");
+      return;
+    }
     setIsDeletingUserKeys(true);
     try {
-      const data = await deleteUserKeys([key]);
+      const data = await deleteUserKeys(keys);
       setUserKeys(data.items);
-      setEditingUserKey((prev) => (prev?.key === key ? null : prev));
+      setSelectedUserKeyIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setEditingUserKey((prev) => (prev && keys.includes(prev.key) ? null : prev));
       toast.success(`已删除 ${data.removed ?? 0} 个用户 key`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除用户 key 失败";
@@ -798,6 +837,59 @@ export default function AccountsPage() {
     }
   };
 
+  const resetBatchUserKeyEditor = () => {
+    setBatchEditUserKeyQuota("");
+    setBatchEditUserKeyLdcBalance("");
+    setBatchEditUserKeyStatus("unchanged");
+    setBatchEditUserKeyPriceImage2("");
+  };
+
+  const handleBatchUpdateUserKeys = async () => {
+    if (selectedUserKeys.length === 0) {
+      toast.error("请先选择要批量编辑的用户 key");
+      return;
+    }
+
+    const updates: {
+      quota?: number;
+      ldc_balance?: number;
+      status?: UserKeyStatus;
+      pricing?: UserKeyPricing;
+    } = {};
+
+    if (batchEditUserKeyQuota.trim() !== "") {
+      updates.quota = Math.max(0, Number(batchEditUserKeyQuota || 0));
+    }
+    if (batchEditUserKeyLdcBalance.trim() !== "") {
+      updates.ldc_balance = Math.max(0, Number(batchEditUserKeyLdcBalance || 0));
+    }
+    if (batchEditUserKeyStatus !== "unchanged") {
+      updates.status = batchEditUserKeyStatus;
+    }
+    if (batchEditUserKeyPriceImage2.trim() !== "") {
+      updates.pricing = buildUserKeyPricing("0", batchEditUserKeyPriceImage2);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      toast.error("请至少填写一项批量修改内容");
+      return;
+    }
+
+    setIsUpdatingUserKey(true);
+    try {
+      await Promise.all(selectedUserKeys.map((item) => updateUserKey(item.key, updates)));
+      await loadUserKeys(true);
+      setBulkEditUserKeysOpen(false);
+      resetBatchUserKeyEditor();
+      toast.success(`已批量更新 ${selectedUserKeys.length} 个用户 key`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "批量更新用户 key 失败";
+      toast.error(message);
+    } finally {
+      setIsUpdatingUserKey(false);
+    }
+  };
+
   const handleCreateRedeemCodes = async () => {
     setIsSubmittingRedeemCodes(true);
     try {
@@ -808,7 +900,12 @@ export default function AccountsPage() {
         label: newRedeemCodeLabel.trim() || undefined,
       });
       setRedeemCodes(data.items);
-      toast.success(`已生成 ${data.created_items?.length ?? data.added ?? 0} 个兑换码`);
+      const createdItems = data.created_items ?? [];
+      setLastCreatedRedeemCodes(createdItems);
+      if (createdItems.length > 0) {
+        downloadRedeemCodes(createdItems, `redeem-codes-${newRedeemCodeTargetQuota}`);
+      }
+      toast.success(`已生成 ${createdItems.length || data.added || 0} 个兑换码`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "生成兑换码失败";
       toast.error(message);
@@ -818,10 +915,20 @@ export default function AccountsPage() {
   };
 
   const handleDeleteRedeemCode = async (code: string) => {
+    await handleDeleteRedeemCodes([code]);
+  };
+
+  const handleDeleteRedeemCodes = async (codes: string[]) => {
+    if (codes.length === 0) {
+      toast.error("请先选择要删除的兑换码");
+      return;
+    }
     setIsDeletingRedeemCodes(true);
     try {
-      const data = await deleteRedeemCodes([code]);
+      const data = await deleteRedeemCodes(codes);
       setRedeemCodes(data.items);
+      setSelectedRedeemCodeIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setLastCreatedRedeemCodes((prev) => prev.filter((item) => data.items.some((current) => current.id === item.id)));
       toast.success(`已删除 ${data.removed ?? 0} 个兑换码`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除兑换码失败";
@@ -839,6 +946,22 @@ export default function AccountsPage() {
     setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.id === id)));
   };
 
+  const toggleSelectAllUserKeys = (checked: boolean) => {
+    if (checked) {
+      setSelectedUserKeyIds((prev) => Array.from(new Set([...prev, ...currentUserKeys.map((item) => item.id)])));
+      return;
+    }
+    setSelectedUserKeyIds((prev) => prev.filter((id) => !currentUserKeys.some((item) => item.id === id)));
+  };
+
+  const toggleSelectAllRedeemCodes = (checked: boolean) => {
+    if (checked) {
+      setSelectedRedeemCodeIds((prev) => Array.from(new Set([...prev, ...currentRedeemCodes.map((item) => item.id)])));
+      return;
+    }
+    setSelectedRedeemCodeIds((prev) => prev.filter((id) => !currentRedeemCodes.some((item) => item.id === id)));
+  };
+
   const adminTabs: Array<{ value: AdminTab; label: string }> = [
     { value: "accounts", label: "账号池" },
     { value: "userKeys", label: "用户 Key" },
@@ -846,11 +969,11 @@ export default function AccountsPage() {
   ];
 
   return (
-    <>
+    <div className="max-page-shell max-admin-shell space-y-5">
       <section className="space-y-4">
         <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Admin System</div>
-          <h1 className="text-2xl font-semibold tracking-tight">管理后台</h1>
+          <div className="max-kicker">admin system</div>
+          <h1 className="max-heading mt-3 text-4xl sm:text-5xl">管理后台</h1>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -1111,6 +1234,90 @@ export default function AccountsPage() {
             >
               {isUpdatingUserKey ? <LoaderCircle className="size-4 animate-spin" /> : null}
               保存修改
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={bulkEditUserKeysOpen}
+        onOpenChange={(open) => {
+          setBulkEditUserKeysOpen(open);
+          if (!open) {
+            resetBatchUserKeyEditor();
+          }
+        }}
+      >
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>批量编辑用户 key</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              当前已选择 {selectedUserKeys.length} 个用户 key。留空的字段不会修改。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">状态</label>
+              <Select
+                value={batchEditUserKeyStatus}
+                onValueChange={(value) => setBatchEditUserKeyStatus(value as "unchanged" | UserKeyStatus)}
+              >
+                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="unchanged">不修改</SelectItem>
+                  <SelectItem value="启用">启用</SelectItem>
+                  <SelectItem value="停用">停用</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">剩余次数</label>
+                <Input
+                  value={batchEditUserKeyQuota}
+                  onChange={(event) => setBatchEditUserKeyQuota(event.target.value)}
+                  placeholder="留空不改"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">积分余额</label>
+                <Input
+                  value={batchEditUserKeyLdcBalance}
+                  onChange={(event) => setBatchEditUserKeyLdcBalance(event.target.value)}
+                  placeholder="留空不改"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">gpt-image-2 单价</label>
+                <Input
+                  value={batchEditUserKeyPriceImage2}
+                  onChange={(event) => setBatchEditUserKeyPriceImage2(event.target.value)}
+                  placeholder="留空不改"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter className="pt-2">
+            <Button
+              variant="secondary"
+              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              onClick={() => setBulkEditUserKeysOpen(false)}
+              disabled={isUpdatingUserKey}
+            >
+              取消
+            </Button>
+            <Button
+              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              onClick={() => void handleBatchUpdateUserKeys()}
+              disabled={isUpdatingUserKey || selectedUserKeys.length === 0}
+            >
+              {isUpdatingUserKey ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              保存批量修改
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1681,11 +1888,36 @@ export default function AccountsPage() {
         <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
           <CardContent className="space-y-0 p-0">
             <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex items-center gap-3">
-                <h3 className="text-lg font-semibold tracking-tight">Key 列表</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="mr-1 text-lg font-semibold tracking-tight">Key 列表</h3>
                 <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
                   {filteredUserKeys.length}
                 </Badge>
+                {selectedUserKeyIds.length > 0 ? (
+                  <>
+                    <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                      已选择 {selectedUserKeyIds.length} 项
+                    </span>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
+                      onClick={() => setBulkEditUserKeysOpen(true)}
+                      disabled={isUpdatingUserKey}
+                    >
+                      <Pencil className="size-4" />
+                      批量编辑
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                      onClick={() => void handleDeleteUserKeys(selectedUserKeys.map((item) => item.key))}
+                      disabled={isDeletingUserKeys}
+                    >
+                      {isDeletingUserKeys ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                      批量删除
+                    </Button>
+                  </>
+                ) : null}
               </div>
               <div className="relative min-w-[260px]">
                 <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
@@ -1702,9 +1934,15 @@ export default function AccountsPage() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[880px] text-left">
+              <table className="w-full min-w-[920px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
+                    <th className="w-12 px-4 py-3">
+                      <Checkbox
+                        checked={allCurrentUserKeysSelected}
+                        onCheckedChange={(checked) => toggleSelectAllUserKeys(Boolean(checked))}
+                      />
+                    </th>
                     <th className="w-56 px-4 py-3">key</th>
                     <th className="w-36 px-4 py-3">标签</th>
                     <th className="w-24 px-4 py-3">状态</th>
@@ -1722,8 +1960,20 @@ export default function AccountsPage() {
                       className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
                     >
                       <td className="px-4 py-3">
+                        <Checkbox
+                          checked={selectedUserKeyIds.includes(item.id)}
+                          onCheckedChange={(checked) => {
+                            setSelectedUserKeyIds((prev) =>
+                              checked
+                                ? Array.from(new Set([...prev, item.id]))
+                                : prev.filter((id) => id !== item.id),
+                            );
+                          }}
+                        />
+                      </td>
+                      <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <span className="font-medium tracking-tight text-stone-700">{maskToken(item.key)}</span>
+                          <span className="font-medium tracking-tight text-stone-700">{maskToken(item.key, 3, 3)}</span>
                           <button
                             type="button"
                             className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
@@ -1846,6 +2096,33 @@ export default function AccountsPage() {
             <RefreshCw className={cn("size-4", isLoadingRedeemCodes ? "animate-spin" : "")} />
             刷新兑换码
           </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => downloadRedeemCodes(lastCreatedRedeemCodes, "redeem-codes-latest")}
+            disabled={lastCreatedRedeemCodes.length === 0}
+          >
+            <Download className="size-4" />
+            下载本次 txt
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+            onClick={() => downloadRedeemCodes(selectedRedeemCodes, "redeem-codes-selected")}
+            disabled={selectedRedeemCodes.length === 0}
+          >
+            <Download className="size-4" />
+            下载所选
+          </Button>
+          <Button
+            variant="outline"
+            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+            onClick={() => void handleDeleteRedeemCodes(usedRedeemCodes.map((item) => item.code))}
+            disabled={usedRedeemCodes.length === 0 || isDeletingRedeemCodes}
+          >
+            {isDeletingRedeemCodes ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+            删除已使用
+          </Button>
         </div>
 
         <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
@@ -1864,7 +2141,7 @@ export default function AccountsPage() {
               <Input
                 type="number"
                 min="1"
-                max="100"
+                max="500"
                 value={newRedeemCodeCount}
                 onChange={(event) => setNewRedeemCodeCount(event.target.value)}
                 className="h-11 rounded-xl border-stone-200 bg-white"
@@ -1910,11 +2187,35 @@ export default function AccountsPage() {
         <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
           <CardContent className="space-y-0 p-0">
             <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-lg font-semibold tracking-tight">兑换码列表</h3>
                 <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
                   {filteredRedeemCodes.length}
                 </Badge>
+                {selectedRedeemCodeIds.length > 0 ? (
+                  <>
+                    <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                      已选择 {selectedRedeemCodeIds.length} 项
+                    </span>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
+                      onClick={() => downloadRedeemCodes(selectedRedeemCodes, "redeem-codes-selected")}
+                    >
+                      <Download className="size-4" />
+                      下载所选
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                      onClick={() => void handleDeleteRedeemCodes(selectedRedeemCodes.map((item) => item.code))}
+                      disabled={isDeletingRedeemCodes}
+                    >
+                      {isDeletingRedeemCodes ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                      批量删除
+                    </Button>
+                  </>
+                ) : null}
               </div>
               <div className="relative min-w-[260px]">
                 <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
@@ -1931,9 +2232,15 @@ export default function AccountsPage() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[880px] text-left">
+              <table className="w-full min-w-[920px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
+                    <th className="w-12 px-4 py-3">
+                      <Checkbox
+                        checked={allCurrentRedeemCodesSelected}
+                        onCheckedChange={(checked) => toggleSelectAllRedeemCodes(Boolean(checked))}
+                      />
+                    </th>
                     <th className="w-56 px-4 py-3">兑换码</th>
                     <th className="w-24 px-4 py-3">状态</th>
                     <th className="w-24 px-4 py-3">增加额度</th>
@@ -1950,6 +2257,18 @@ export default function AccountsPage() {
                       key={item.id}
                       className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
                     >
+                      <td className="px-4 py-3">
+                        <Checkbox
+                          checked={selectedRedeemCodeIds.includes(item.id)}
+                          onCheckedChange={(checked) => {
+                            setSelectedRedeemCodeIds((prev) =>
+                              checked
+                                ? Array.from(new Set([...prev, item.id]))
+                                : prev.filter((id) => id !== item.id),
+                            );
+                          }}
+                        />
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <span className="font-medium tracking-tight text-stone-700">{item.code}</span>
@@ -1978,7 +2297,9 @@ export default function AccountsPage() {
                       <td className="px-4 py-3 text-stone-500">{item.label || "—"}</td>
                       <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.createdAt)}</td>
                       <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.usedAt)}</td>
-                      <td className="px-4 py-3 text-xs text-stone-500">{item.usedByKey ? maskToken(item.usedByKey) : "—"}</td>
+                      <td className="px-4 py-3 text-xs text-stone-500">
+                        {item.usedByKey ? maskToken(item.usedByKey, 3, 3) : "—"}
+                      </td>
                       <td className="px-4 py-3">
                         <button
                           type="button"
@@ -2042,6 +2363,6 @@ export default function AccountsPage() {
         </Card>
       </section>
       ) : null}
-    </>
+    </div>
   );
 }
