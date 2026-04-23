@@ -721,8 +721,8 @@ export default function ImagePage() {
 
   return (
     <>
-      <section className="max-page-shell max-image-shell mx-auto grid h-[calc(100vh-5rem)] min-h-0 w-full max-w-[1400px] grid-cols-1 gap-5 px-2 pb-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="min-h-0 border-r border-stone-200/70 pr-3">
+      <section className="minimal-page-shell minimal-image-shell mx-auto grid h-[calc(100vh-5rem)] min-h-0 w-full max-w-[1400px] grid-cols-1 gap-5 px-2 pb-6 lg:grid-cols-[300px_minmax(0,1fr)]">
+        <aside className="min-h-0">
           <div className="flex h-full min-h-0 flex-col gap-3 py-2">
             <div className="flex items-center gap-2">
               <Button
@@ -742,7 +742,7 @@ export default function ImagePage() {
               </Button>
             </div>
 
-            <div className="max-panel-soft rounded-[22px] px-4 py-4">
+            <div className="minimal-panel-soft rounded-[22px] px-4 py-4">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-400">生成信息</div>
               <div className="mt-4 space-y-2 text-xs text-stone-500">
                 <div className="flex items-center justify-between gap-3">
@@ -774,7 +774,7 @@ export default function ImagePage() {
               <p className="mt-2 text-[11px] leading-5 text-stone-400">{currentQueueProgressText}</p>
             </div>
 
-            <div className="max-panel-soft rounded-[22px] px-4 py-4">
+            <div className="minimal-panel-soft rounded-[22px] px-4 py-4">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-stone-400">当前用户队列</div>
               <div className="mt-4 space-y-2">
                 {activeQueueItems.length === 0 ? (
@@ -860,9 +860,9 @@ export default function ImagePage() {
           >
             {!selectedConversation ? (
               <div className="flex h-full min-h-[420px] items-center justify-center text-center">
-                <div className="max-panel w-full max-w-4xl p-10">
-                  <div className="max-kicker">image workstation</div>
-                  <h1 className="max-heading mt-5 text-4xl md:text-6xl">生成图片</h1>
+                <div className="minimal-panel w-full max-w-4xl p-10">
+                  <div className="minimal-kicker">image workstation</div>
+                  <h1 className="minimal-heading mt-5 text-4xl md:text-6xl">生成图片</h1>
                   <p className="mt-5 text-[15px] text-white/72">输入提示词即可开始。</p>
                 </div>
               </div>
@@ -985,7 +985,7 @@ export default function ImagePage() {
           </div>
 
           <div className="shrink-0 flex justify-center">
-            <div className="max-panel w-full max-w-[980px] rounded-[24px] transition-shadow duration-200">
+            <div className="minimal-panel w-full max-w-[980px] rounded-[24px] transition-shadow duration-200">
               <div
                 className="cursor-text px-4 pt-4 pb-3 sm:px-5"
                 onClick={() => {
@@ -1148,7 +1148,7 @@ export default function ImagePage() {
       </section>
 
       <Dialog open={Boolean(previewImage)} onOpenChange={(open) => (!open ? setPreviewImageId(null) : null)}>
-        <DialogContent className="w-[min(96vw,1120px)] border-[#00F5D4]/75 bg-[rgba(15,7,31,0.95)] p-2 sm:p-4">
+        <DialogContent className="w-[min(96vw,1120px)] bg-[rgba(10,10,15,0.96)] p-2 sm:p-4">
           {previewImage ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-3 rounded-[18px] bg-white/6 px-3 py-2 text-sm text-stone-200 sm:px-4">

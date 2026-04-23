@@ -539,7 +539,7 @@ export default function AccountsPage() {
 
   if (isAuthorizing) {
     return (
-      <div className="grid min-h-[calc(100vh-6rem)] place-items-center">
+      <div className="minimal-page-shell grid min-h-[calc(100vh-6rem)] place-items-center">
         <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
           <LoaderCircle className="size-5 animate-spin" />
         </div>
@@ -969,11 +969,11 @@ export default function AccountsPage() {
   ];
 
   return (
-    <div className="max-page-shell max-admin-shell space-y-5">
+    <div className="minimal-page-shell minimal-admin-shell space-y-5">
       <section className="space-y-4">
         <div className="space-y-1">
-          <div className="max-kicker">admin system</div>
-          <h1 className="max-heading mt-3 text-4xl sm:text-5xl">管理后台</h1>
+          <div className="minimal-kicker">admin system</div>
+          <h1 className="minimal-heading mt-3 text-4xl sm:text-5xl">管理后台</h1>
         </div>
 
         <div className="flex flex-wrap gap-2">

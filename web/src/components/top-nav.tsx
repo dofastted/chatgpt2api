@@ -253,12 +253,12 @@ export function TopNav() {
   const isUserKey = sessionState.authType === "user_key";
 
   return (
-    <header className="max-topnav">
+    <header className="minimal-topnav">
       <div className="relative flex min-h-[84px] flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-1 items-center gap-3">
           <Link
             href="/image"
-            className="relative py-2 font-['Outfit'] text-lg font-black uppercase tracking-[0.22em] text-[#FFE600] transition hover:text-white"
+            className="relative py-2 font-[var(--font-heading)] text-lg font-semibold tracking-[-0.03em] text-stone-100 transition hover:text-amber-100"
           >
             chatgpt2api
           </Link>
@@ -266,14 +266,14 @@ export function TopNav() {
             <DialogTrigger asChild>
               <button
                 type="button"
-                className="inline-flex items-center gap-2 rounded-full border-2 border-dashed border-[#FF6B35] bg-[#FF6B35]/12 px-4 py-2 text-sm font-bold uppercase tracking-[0.16em] text-white transition hover:border-[#FFE600] hover:bg-[#FF3AF2]/18"
+                className="inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-amber-300/25 hover:bg-amber-300/10"
                 aria-label="打开兑换中心"
               >
                 <Ticket className="size-4" />
                 <span>兑换中心</span>
               </button>
             </DialogTrigger>
-            <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+            <DialogContent showCloseButton={false} className="rounded-[24px] p-6">
               <DialogHeader className="gap-2">
                 <DialogTitle>兑换中心</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
@@ -282,8 +282,8 @@ export function TopNav() {
               </DialogHeader>
 
               <div className="space-y-4">
-                <div className="rounded-2xl border border-stone-200 bg-stone-50/70 p-4">
-                  <div className="text-xs text-stone-400">当前额度</div>
+                <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                  <div className="text-xs text-stone-500">当前额度</div>
                   <div className="mt-1 text-2xl font-semibold tracking-tight text-stone-900">
                     {sessionState.remainingQuota ?? "—"}
                   </div>
@@ -298,24 +298,18 @@ export function TopNav() {
                   onChange={(event) => void handleDonationUpload(Array.from(event.target.files ?? []))}
                 />
 
-                <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50/70 p-4">
+                <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.04] p-4">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="space-y-1">
-                      <div className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                      <div className="flex items-center gap-2 text-sm font-medium text-stone-200">
                         <Gift className="size-4" />
                         捐赠换积分
                       </div>
-                      <p className="text-xs leading-5 text-stone-500">
+                      <p className="text-xs leading-5 text-stone-400">
                         支持标准账号 JSON 和 CPA 格式 JSON。只有成功入池并识别成 Free 的账号才会给当前用户 key 发放 `20 积分`。
                       </p>
                     </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-100"
-                      onClick={() => uploadInputRef.current?.click()}
-                      disabled={isUploadingDonation}
-                    >
+                    <Button type="button" variant="outline" className="h-10 px-4" onClick={() => uploadInputRef.current?.click()} disabled={isUploadingDonation}>
                       {isUploadingDonation ? (
                         <LoaderCircle className="size-4 animate-spin" />
                       ) : (
@@ -326,9 +320,9 @@ export function TopNav() {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-stone-200 bg-white p-4">
+                <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
                   <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                    <div className="flex items-center gap-2 text-sm font-medium text-stone-200">
                       <Ticket className="size-4" />
                       购买兑换码
                     </div>
@@ -339,45 +333,41 @@ export function TopNav() {
                           href={item.href}
                           target="_blank"
                           rel="noreferrer"
-                          className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm transition hover:border-stone-300 hover:bg-stone-100"
+                          className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm transition hover:border-amber-300/20 hover:bg-white/[0.07]"
                         >
-                          <div className="font-semibold text-stone-900">{item.label}</div>
-                          <div className="mt-1 text-xs text-stone-500">直达购买页面，购买后回来输入兑换码。</div>
+                          <div className="font-semibold text-stone-100">{item.label}</div>
+                          <div className="mt-1 text-xs text-stone-400">直达购买页面，购买后回来输入兑换码。</div>
                         </a>
                       ))}
                     </div>
                     {!isUserKey ? (
-                      <p className="text-xs leading-5 text-stone-400">只有用户 key 才能在这里兑换额度。</p>
+                      <p className="text-xs leading-5 text-stone-500">只有用户 key 才能在这里兑换额度。</p>
                     ) : null}
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-stone-200 bg-white p-4">
+                <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
                   <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-sm font-medium text-stone-800">
+                    <div className="flex items-center gap-2 text-sm font-medium text-stone-200">
                       <Ticket className="size-4" />
                       兑换码
                     </div>
                     <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
                       <div className="space-y-2">
-                        <label className="text-xs text-stone-500">输入兑换码</label>
+                        <label className="text-xs text-stone-400">输入兑换码</label>
                         <Input
                           value={redeemInput}
                           onChange={(event) => setRedeemInput(event.target.value)}
                           placeholder="例如 RDM-XXXXXX"
-                          className="h-11 rounded-xl border-stone-200 bg-white"
+                          className="h-11"
                         />
                       </div>
-                      <Button
-                        className="h-11 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-                        onClick={() => void handleRedeemCode()}
-                        disabled={!isUserKey || isRedeemingCode}
-                      >
+                      <Button className="h-11 px-5" onClick={() => void handleRedeemCode()} disabled={!isUserKey || isRedeemingCode}>
                         {isRedeemingCode ? <LoaderCircle className="size-4 animate-spin" /> : <Ticket className="size-4" />}
                         兑换
                       </Button>
                     </div>
-                    <p className="text-xs leading-5 text-stone-500">
+                    <p className="text-xs leading-5 text-stone-400">
                       兑换成功后，会在当前用户 key 的剩余额度上增加对应额度。
                     </p>
                   </div>
@@ -385,12 +375,7 @@ export function TopNav() {
               </div>
 
               <DialogFooter className="pt-2">
-                <Button
-                  variant="secondary"
-                  className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
-                  onClick={() => setCenterOpen(false)}
-                  disabled={isUploadingDonation || isRedeemingCode}
-                >
+                <Button variant="outline" className="h-10 px-5" onClick={() => setCenterOpen(false)} disabled={isUploadingDonation || isRedeemingCode}>
                   关闭
                 </Button>
               </DialogFooter>
@@ -405,10 +390,10 @@ export function TopNav() {
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "relative rounded-full border-2 px-4 py-2 text-sm font-black uppercase tracking-[0.16em] transition",
+                  "relative rounded-full border px-4 py-2 text-sm transition",
                   active
-                    ? "border-[#FFE600] bg-[#FF3AF2]/18 text-white"
-                    : "border-[#00F5D4]/55 bg-white/5 text-white/78 hover:border-[#00F5D4] hover:text-white",
+                    ? "border-amber-300/25 bg-amber-300/12 text-amber-100"
+                    : "border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/18 hover:text-stone-100",
                 )}
               >
                 {item.label}
@@ -417,12 +402,12 @@ export function TopNav() {
           })}
         </div>
         <div className="flex flex-1 items-center justify-end gap-3">
-          <span className="rounded-full border-2 border-[#7B2FFF] bg-[#7B2FFF]/18 px-3 py-1 text-[11px] font-black uppercase tracking-[0.14em] text-white/80">
+          <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] text-stone-400">
             v{webConfig.appVersion}
           </span>
           <button
             type="button"
-            className="rounded-full border-2 border-[#FF3AF2]/65 bg-[#FF3AF2]/12 px-4 py-2 text-sm font-black uppercase tracking-[0.16em] text-white transition hover:border-[#FFE600] hover:bg-[#FF3AF2]/24"
+            className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-rose-400/20 hover:bg-rose-400/10 hover:text-rose-200"
             onClick={() => void handleLogout()}
           >
             退出

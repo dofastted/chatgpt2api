@@ -1,17 +1,22 @@
 import type { Metadata } from "next";
-import { DM_Sans, Outfit } from "next/font/google";
+import { Inter, JetBrains_Mono, Space_Grotesk } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
 
-const headingFont = Outfit({
+const headingFont = Space_Grotesk({
   subsets: ["latin"],
   variable: "--font-heading",
 });
 
-const bodyFont = DM_Sans({
+const bodyFont = Inter({
   subsets: ["latin"],
   variable: "--font-body",
+});
+
+const monoFont = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
@@ -27,15 +32,15 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body
-        className={`${headingFont.variable} ${bodyFont.variable} app-shell antialiased`}
+        className={`${headingFont.variable} ${bodyFont.variable} ${monoFont.variable} app-shell antialiased`}
         style={{
           fontFamily:
             'var(--font-body),"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif',
         }}
       >
         <Toaster position="top-center" richColors />
-        <main className="app-shell__main min-h-screen px-4 py-3 text-stone-900 sm:px-6 lg:px-8">
-          <div className="mx-auto flex max-w-[1480px] flex-col gap-5">
+        <main className="app-shell__main min-h-screen px-4 py-4 sm:px-6 lg:px-8">
+          <div className="mx-auto flex max-w-[1440px] flex-col gap-5">
             <TopNav />
             {children}
           </div>

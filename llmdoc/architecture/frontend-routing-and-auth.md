@@ -10,6 +10,7 @@
 
 - 首页 `web/src/app/page.tsx:8` 启动后读取会话并按角色分流。
 - 登录页 `web/src/app/login/page.tsx:28` 登录成功后也按角色分流。
+- 当前三页共用一套 minimal-dark 主题入口：`web/src/app/layout.tsx` 负责字体和全局壳子，`web/src/app/globals.css` 提供暗色 token、页面壳子和导航样式，基础控件默认外观在 `web/src/components/ui/`。
 - 顶部导航 `web/src/components/top-nav.tsx` 只在 `admin` 时显示“号池管理”。所有已登录用户都能看到“兑换中心”；里面保留捐赠上传，也给 `user_key` 提供兑换码输入和直达购买链接。
 - 兑换中心的购买链接是 `https://ldc.fkcodex.com/buy/4` 和 `https://ldc.fkcodex.com/buy/5`，分别对应 20 额度和 100 额度兑换码；弹窗里不再显示购买积分。
 - 账号页 `web/src/app/accounts/page.tsx:251` 会再次检查角色，普通用户会被送回 `/image`。如果只是会话探测失败或请求地址不通，不会再直接误跳 `/login`，而是停留当前页报错。

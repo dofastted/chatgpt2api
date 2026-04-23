@@ -5,20 +5,20 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full border-4 text-sm font-black uppercase tracking-[0.18em] transition-all duration-200 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/70 focus-visible:ring-[4px] aria-invalid:ring-destructive/30 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive shadow-[0_0_20px_rgba(255,58,242,0.2),6px_6px_0_rgba(255,230,0,0.9)] hover:-translate-y-0.5",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl border text-sm font-medium tracking-[0.01em] transition-all duration-200 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-amber-400/70 focus-visible:ring-4 focus-visible:ring-amber-400/20 aria-invalid:ring-destructive/30 aria-invalid:border-destructive",
   {
     variants: {
       variant: {
         default:
-          "border-[#FFE600] bg-[linear-gradient(90deg,#FF3AF2_0%,#7B2FFF_45%,#00F5D4_100%)] text-primary-foreground hover:brightness-110",
+          "border-amber-300/35 bg-[linear-gradient(135deg,rgba(245,158,11,0.98),rgba(251,191,36,0.94))] text-stone-950 shadow-[0_0_28px_rgba(245,158,11,0.22)] hover:border-amber-200/45 hover:brightness-105",
         destructive:
-          "border-[#FFE600] bg-[linear-gradient(90deg,#FF6B35_0%,#FF3AF2_100%)] text-white hover:brightness-110 focus-visible:ring-destructive/30 dark:bg-destructive/60",
+          "border-rose-400/25 bg-rose-500/90 text-white hover:bg-rose-500 focus-visible:ring-destructive/30",
         outline:
-          "border-[#00F5D4] bg-[rgba(16,8,33,0.72)] text-white hover:bg-[#00F5D4] hover:text-[#0D0D1A] dark:bg-input/30 dark:border-input dark:hover:bg-input/50",
+          "border-white/12 bg-white/[0.03] text-stone-100 hover:border-white/20 hover:bg-white/[0.08]",
         secondary:
-          "border-[#FF6B35] bg-[rgba(123,47,255,0.34)] text-white hover:bg-[rgba(255,58,242,0.48)]",
+          "border-amber-400/10 bg-amber-400/10 text-amber-100 hover:bg-amber-400/16",
         ghost:
-          "border-transparent bg-transparent text-white shadow-none hover:border-[#FF3AF2] hover:bg-[rgba(255,58,242,0.18)] dark:hover:bg-accent/50",
+          "border-transparent bg-transparent text-stone-300 shadow-none hover:bg-white/[0.06] hover:text-stone-50",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
