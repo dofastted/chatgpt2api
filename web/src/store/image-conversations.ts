@@ -20,12 +20,14 @@ export type StoredInputImage = {
   dataUrl: string;
   mimeType?: string;
   sizeBytes?: number;
+  clientConversationId?: string;
 };
 
-export type ImageConversationStatus = "generating" | "success" | "error";
+export type ImageConversationStatus = "draft" | "queued" | "assigning_account" | "running" | "success" | "error";
 
 export type ImageConversation = {
   id: string;
+  clientConversationId: string;
   title: string;
   prompt: string;
   model: ImageModel;
@@ -36,6 +38,10 @@ export type ImageConversation = {
   createdAt: string;
   status: ImageConversationStatus;
   error?: string;
+  queueRequestId?: string;
+  requestStartedAt?: string;
+  requestFinishedAt?: string;
+  lastError?: string;
 };
 
 const imageConversationStorage = localforage.createInstance({
@@ -101,6 +107,7 @@ function normalizeStoredInputImage(inputImage: StoredInputImage | null | undefin
   return {
     ...inputImage,
     fileId: String(inputImage.fileId || "").trim() || undefined,
+    clientConversationId: String(inputImage.clientConversationId || "").trim() || undefined,
     dataUrl,
     mimeType: String(inputImage.mimeType || "").trim() || mimePrefix || "image/png",
     fileName: String(inputImage.fileName || "").trim() || undefined,
@@ -109,11 +116,30 @@ function normalizeStoredInputImage(inputImage: StoredInputImage | null | undefin
 }
 
 function normalizeConversation(conversation: ImageConversation): ImageConversation {
+  const clientConversationId =
+    String(conversation.clientConversationId || conversation.id || "").trim() ||
+    String(conversation.id || "").trim();
+  const normalizedStatus =
+    conversation.status === "success" ||
+    conversation.status === "error" ||
+    conversation.status === "draft" ||
+    conversation.status === "queued" ||
+    conversation.status === "assigning_account" ||
+    conversation.status === "running"
+      ? conversation.status
+      : "error";
   return {
     ...conversation,
+    clientConversationId,
     copiedText: String(conversation.copiedText || "").trim() || undefined,
     inputImage: normalizeStoredInputImage(conversation.inputImage),
     images: (conversation.images || []).map(normalizeStoredImage),
+    status: normalizedStatus,
+    queueRequestId: String(conversation.queueRequestId || "").trim() || undefined,
+    requestStartedAt: String(conversation.requestStartedAt || "").trim() || undefined,
+    requestFinishedAt: String(conversation.requestFinishedAt || "").trim() || undefined,
+    lastError: String(conversation.lastError || conversation.error || "").trim() || undefined,
+    error: String(conversation.error || "").trim() || undefined,
   };
 }
 

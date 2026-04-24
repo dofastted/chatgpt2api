@@ -204,6 +204,8 @@ export type UploadedInputImage = {
   width?: number | null;
   height?: number | null;
   created_at?: string | null;
+  client_conversation_id?: string;
+  consumed_at?: string | null;
   download_url: string;
 };
 
@@ -429,11 +431,17 @@ export async function generateImage(
   prompt: string,
   model: ImageModel = "gpt-image-2",
   n = 1,
-  options: { inputImageUrl?: string | null; inputImageFileId?: string | null; queueRequestId?: string | null } = {},
+  options: {
+    inputImageUrl?: string | null;
+    inputImageFileId?: string | null;
+    queueRequestId?: string | null;
+    clientConversationId?: string | null;
+  } = {},
 ) {
   const inputImageUrl = String(options.inputImageUrl || "").trim();
   const inputImageFileId = String(options.inputImageFileId || "").trim();
   const queueRequestId = String(options.queueRequestId || "").trim();
+  const clientConversationId = String(options.clientConversationId || "").trim();
   const queueHeaders = queueRequestId ? {"X-Image-Queue-Request-Id": queueRequestId} : undefined;
   if (!inputImageUrl && !inputImageFileId) {
     return httpRequest<ImageGenerationResponse>("/v1/images/generations", {
@@ -460,25 +468,36 @@ export async function generateImage(
       ],
       tools: [{ type: "image_generation", model }],
       n,
+      metadata: clientConversationId
+        ? { client_conversation_id: clientConversationId }
+        : undefined,
     },
     headers: queueHeaders,
   });
   return normalizeResponsesImageGenerationResponse(payload);
 }
 
-export async function uploadInputImage(file: File) {
+export async function uploadInputImage(file: File, clientConversationId: string) {
   const formData = new FormData();
   formData.append("file", file);
+  formData.append("client_conversation_id", String(clientConversationId || "").trim());
   return httpRequest<UploadedInputImage>("/backend-api/files/process_upload_stream", {
     method: "POST",
     body: formData,
   });
 }
 
-export async function listRecentUploadedImages(limit = 25, imagesAppOnly = false) {
+export async function listRecentUploadedImages(
+  limit = 25,
+  imagesAppOnly = false,
+  clientConversationId?: string | null,
+) {
   const params = new URLSearchParams({
     limit: String(limit),
     images_app_only: String(imagesAppOnly),
   });
+  if (String(clientConversationId || "").trim()) {
+    params.set("client_conversation_id", String(clientConversationId || "").trim());
+  }
   return httpRequest<{ items: UploadedInputImage[] }>(`/backend-api/my/recent/uploaded_images?${params.toString()}`);
 }

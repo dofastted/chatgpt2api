@@ -799,8 +799,17 @@ def _load_input_image_bytes(session: Session, input_image: dict[str, str] | str)
     normalized_input_image = _normalize_input_image_ref(input_image)
     file_id = str(normalized_input_image.get("file_id") or "").strip()
     if file_id:
-        stored = uploaded_image_service.read_bytes(file_id, str(normalized_input_image.get("owner_auth_token") or ""))
+        owner_auth_token = str(normalized_input_image.get("owner_auth_token") or "")
+        client_conversation_id = str(normalized_input_image.get("client_conversation_id") or "")
+        stored = uploaded_image_service.read_bytes(
+            file_id,
+            owner_auth_token,
+            client_conversation_id,
+        )
         if stored is None:
+            raise ImageGenerationError("input image file_id was not found")
+        consumed = uploaded_image_service.consume_upload(file_id, owner_auth_token, client_conversation_id)
+        if consumed is None:
             raise ImageGenerationError("input image file_id was not found")
         image_bytes, item = stored
         mime_type = _normalize_input_image_mime_type(image_bytes, str(item.get("mime_type") or ""))

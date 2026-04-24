@@ -9,7 +9,7 @@ from threading import Event, Thread
 from time import time
 from typing import Any
 from uuid import uuid4
-from fastapi import APIRouter, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -450,6 +450,38 @@ def validate_responses_input_images(input_value: Any) -> list[dict[str, str]]:
     return input_images
 
 
+def validate_uploaded_file_inputs(
+        input_images: list[dict[str, str]],
+        *,
+        auth_token: str,
+        client_conversation_id: str,
+) -> list[dict[str, str]]:
+    normalized_conversation_id = str(client_conversation_id or "").strip()
+    validated: list[dict[str, str]] = []
+    for item in input_images:
+        file_id = str(item.get("file_id") or "").strip()
+        if not file_id:
+            validated.append(dict(item))
+            continue
+        if not normalized_conversation_id:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "responses file_id input requires metadata.client_conversation_id"},
+            )
+        stored = uploaded_image_service.get_item(
+            file_id,
+            auth_token,
+            normalized_conversation_id,
+        )
+        if stored is None:
+            raise HTTPException(status_code=404, detail={"error": "input image file_id was not found"})
+        consumed_by = str(stored.get("consumed_by_client_conversation_id") or "").strip()
+        if consumed_by and consumed_by != normalized_conversation_id:
+            raise HTTPException(status_code=409, detail={"error": "input image file_id was already consumed"})
+        validated.append(dict(item))
+    return validated
+
+
 def extract_text_segments_from_responses_input(value: Any) -> list[str]:
     if isinstance(value, str):
         text = value.strip()
@@ -840,10 +872,18 @@ def create_app() -> FastAPI:
         validate_responses_tool_choice(body.tool_choice)
         input_images = validate_responses_input_images(body.input)
         request_auth_token = extract_bearer_token(authorization)
+        metadata = body.metadata if isinstance(body.metadata, dict) else {}
+        client_conversation_id = str(metadata.get("client_conversation_id") or "").strip()
+        input_images = validate_uploaded_file_inputs(
+            input_images,
+            auth_token=request_auth_token,
+            client_conversation_id=client_conversation_id,
+        )
         input_images = [
             {
                 **item,
                 **({"owner_auth_token": request_auth_token} if str(item.get("file_id") or "").strip() else {}),
+                **({"client_conversation_id": client_conversation_id} if str(item.get("file_id") or "").strip() else {}),
             }
             for item in input_images
         ]
@@ -899,6 +939,7 @@ def create_app() -> FastAPI:
     @router.post("/backend-api/files/process_upload_stream")
     async def process_upload_stream(
             file: UploadFile = File(...),
+            client_conversation_id: str = Form(...),
             authorization: str | None = Header(default=None),
     ):
         require_auth_key(authorization)
@@ -911,6 +952,7 @@ def create_app() -> FastAPI:
         try:
             item = uploaded_image_service.save_upload(
                 auth_token=auth_token,
+                client_conversation_id=client_conversation_id,
                 file_name=str(file.filename or "").strip() or "upload.png",
                 content_type=file.content_type,
                 image_bytes=image_bytes,
@@ -924,6 +966,7 @@ def create_app() -> FastAPI:
             authorization: str | None = Header(default=None),
             limit: int = Query(default=25, ge=1, le=100),
             images_app_only: bool = Query(default=False),
+            client_conversation_id: str | None = Query(default=None),
     ):
         require_auth_key(authorization)
         auth_token = extract_bearer_token(authorization)
@@ -932,6 +975,7 @@ def create_app() -> FastAPI:
                 auth_token,
                 limit=limit,
                 images_app_only=images_app_only,
+                client_conversation_id=client_conversation_id,
             )
         }
 

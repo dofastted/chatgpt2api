@@ -87,9 +87,10 @@ class UploadedImageService:
             return None
         file_id = self._clean_text(item.get("file_id") or item.get("id"))
         owner_id = self._clean_text(item.get("owner_id"))
+        client_conversation_id = self._clean_text(item.get("client_conversation_id"))
         stored_name = self._clean_text(item.get("stored_name"))
         mime_type = self._clean_text(item.get("mime_type"))
-        if not file_id or not owner_id or not stored_name or not mime_type:
+        if not file_id or not owner_id or not client_conversation_id or not stored_name or not mime_type:
             return None
         size_bytes = max(0, int(item.get("size_bytes") or 0))
         width = item.get("width")
@@ -98,6 +99,7 @@ class UploadedImageService:
             "id": file_id,
             "file_id": file_id,
             "owner_id": owner_id,
+            "client_conversation_id": client_conversation_id,
             "file_name": self._clean_text(item.get("file_name")) or stored_name,
             "stored_name": stored_name,
             "mime_type": mime_type,
@@ -106,6 +108,8 @@ class UploadedImageService:
             "height": int(height) if height is not None else None,
             "created_at": self._clean_text(item.get("created_at")) or None,
             "images_app_only": bool(item.get("images_app_only")),
+            "consumed_at": self._clean_text(item.get("consumed_at")) or None,
+            "consumed_by_client_conversation_id": self._clean_text(item.get("consumed_by_client_conversation_id")) or None,
         }
 
     def _load_items(self) -> list[dict[str, Any]]:
@@ -137,6 +141,8 @@ class UploadedImageService:
             "height": item.get("height"),
             "created_at": str(item.get("created_at") or "") or None,
             "images_app_only": bool(item.get("images_app_only")),
+            "client_conversation_id": str(item.get("client_conversation_id") or ""),
+            "consumed_at": str(item.get("consumed_at") or "") or None,
             "download_url": f"/backend-api/files/{item.get('file_id')}/content",
         }
 
@@ -144,6 +150,7 @@ class UploadedImageService:
         self,
         *,
         auth_token: str,
+        client_conversation_id: str,
         file_name: str,
         content_type: str | None,
         image_bytes: bytes,
@@ -152,6 +159,9 @@ class UploadedImageService:
         owner_id = self.build_owner_id(auth_token)
         if not owner_id:
             raise ValueError("auth token is required")
+        normalized_conversation_id = self._clean_text(client_conversation_id)
+        if not normalized_conversation_id:
+            raise ValueError("client conversation id is required")
         if not image_bytes:
             raise ValueError("image is empty")
         mime_type = normalize_uploaded_image_mime_type(image_bytes, content_type)
@@ -166,6 +176,7 @@ class UploadedImageService:
             {
                 "file_id": file_id,
                 "owner_id": owner_id,
+                "client_conversation_id": normalized_conversation_id,
                 "file_name": self._clean_text(file_name) or stored_name,
                 "stored_name": stored_name,
                 "mime_type": mime_type,
@@ -174,6 +185,8 @@ class UploadedImageService:
                 "height": height,
                 "created_at": self._now_text(),
                 "images_app_only": images_app_only,
+                "consumed_at": None,
+                "consumed_by_client_conversation_id": None,
             }
         )
         if item is None:
@@ -183,34 +196,59 @@ class UploadedImageService:
             self._save_items()
         return self._build_public_item(item)
 
-    def list_items(self, auth_token: str, *, limit: int = 25, images_app_only: bool = False) -> list[dict[str, Any]]:
+    def list_items(
+        self,
+        auth_token: str,
+        *,
+        limit: int = 25,
+        images_app_only: bool = False,
+        client_conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         owner_id = self.build_owner_id(auth_token)
         if not owner_id:
             return []
         normalized_limit = max(1, min(100, int(limit or 25)))
+        normalized_conversation_id = self._clean_text(client_conversation_id)
         with self._lock:
             filtered = [
                 dict(item)
                 for item in self._items
                 if str(item.get("owner_id") or "") == owner_id
                 and (not images_app_only or bool(item.get("images_app_only")))
+                and (
+                    not normalized_conversation_id
+                    or str(item.get("client_conversation_id") or "") == normalized_conversation_id
+                )
             ]
         return [self._build_public_item(item) for item in filtered[:normalized_limit]]
 
-    def get_item(self, file_id: str, auth_token: str | None = None) -> dict[str, Any] | None:
+    def get_item(
+        self,
+        file_id: str,
+        auth_token: str | None = None,
+        client_conversation_id: str | None = None,
+    ) -> dict[str, Any] | None:
         normalized_file_id = self._clean_text(file_id)
         owner_id = self.build_owner_id(auth_token or "") if auth_token is not None else ""
+        normalized_conversation_id = self._clean_text(client_conversation_id)
         with self._lock:
             for item in self._items:
                 if str(item.get("file_id") or "") != normalized_file_id:
                     continue
                 if auth_token is not None and str(item.get("owner_id") or "") != owner_id:
                     return None
+                if normalized_conversation_id and str(item.get("client_conversation_id") or "") != normalized_conversation_id:
+                    return None
                 return dict(item)
         return None
 
-    def read_bytes(self, file_id: str, auth_token: str | None = None) -> tuple[bytes, dict[str, Any]] | None:
-        item = self.get_item(file_id, auth_token)
+    def read_bytes(
+        self,
+        file_id: str,
+        auth_token: str | None = None,
+        client_conversation_id: str | None = None,
+    ) -> tuple[bytes, dict[str, Any]] | None:
+        item = self.get_item(file_id, auth_token, client_conversation_id)
         if item is None:
             return None
         stored_name = self._clean_text(item.get("stored_name"))
@@ -220,6 +258,32 @@ class UploadedImageService:
         if not path.exists():
             return None
         return path.read_bytes(), item
+
+    def consume_upload(self, file_id: str, auth_token: str, client_conversation_id: str) -> dict[str, Any] | None:
+        normalized_file_id = self._clean_text(file_id)
+        owner_id = self.build_owner_id(auth_token)
+        normalized_conversation_id = self._clean_text(client_conversation_id)
+        if not normalized_file_id or not owner_id or not normalized_conversation_id:
+            return None
+        with self._lock:
+            for index, item in enumerate(self._items):
+                if str(item.get("file_id") or "") != normalized_file_id:
+                    continue
+                if str(item.get("owner_id") or "") != owner_id:
+                    return None
+                if str(item.get("client_conversation_id") or "") != normalized_conversation_id:
+                    return None
+                consumed_by = self._clean_text(item.get("consumed_by_client_conversation_id"))
+                if consumed_by and consumed_by != normalized_conversation_id:
+                    return None
+                next_item = dict(item)
+                if not self._clean_text(next_item.get("consumed_at")):
+                    next_item["consumed_at"] = self._now_text()
+                next_item["consumed_by_client_conversation_id"] = normalized_conversation_id
+                self._items[index] = next_item
+                self._save_items()
+                return dict(next_item)
+        return None
 
 
 uploaded_image_service = UploadedImageService(

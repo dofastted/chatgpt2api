@@ -487,20 +487,23 @@ class UserKeyPricingTests(unittest.TestCase):
         png_bytes = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
         )
+        client_conversation_id = "conv-upload-1"
 
         with self.make_client() as client:
             upload_response = client.post(
                 "/backend-api/files/process_upload_stream",
                 headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": client_conversation_id},
                 files={"file": ("pixel.png", png_bytes, "image/png")},
             )
             self.assertEqual(upload_response.status_code, 200)
             uploaded = upload_response.json()
             self.assertTrue(str(uploaded["file_id"]).startswith("upload_"))
             self.assertEqual(uploaded["mime_type"], "image/png")
+            self.assertEqual(uploaded["client_conversation_id"], client_conversation_id)
 
             list_response = client.get(
-                "/backend-api/my/recent/uploaded_images?limit=25&images_app_only=false",
+                f"/backend-api/my/recent/uploaded_images?limit=25&images_app_only=false&client_conversation_id={client_conversation_id}",
                 headers={"Authorization": f"Bearer {api.config.auth_key}"},
             )
             self.assertEqual(list_response.status_code, 200)
@@ -512,11 +515,13 @@ class UserKeyPricingTests(unittest.TestCase):
         png_bytes = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
         )
+        client_conversation_id = "conv-response-1"
 
         with self.make_client() as client:
             upload_response = client.post(
                 "/backend-api/files/process_upload_stream",
                 headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": client_conversation_id},
                 files={"file": ("pixel.png", png_bytes, "image/png")},
             )
             self.assertEqual(upload_response.status_code, 200)
@@ -533,6 +538,7 @@ class UserKeyPricingTests(unittest.TestCase):
                     ],
                     "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
                     "n": 1,
+                    "metadata": {"client_conversation_id": client_conversation_id},
                 },
             )
 
@@ -541,8 +547,130 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(FakeBackendService.last_call["prompt"], "repeat ABC123")
         self.assertEqual(
             FakeBackendService.last_call["input_images"],
-            [{"type": "input_image", "file_id": file_id, "owner_auth_token": api.config.auth_key}],
+            [{
+                "type": "input_image",
+                "file_id": file_id,
+                "owner_auth_token": api.config.auth_key,
+                "client_conversation_id": client_conversation_id,
+            }],
         )
+
+    def test_responses_rejects_uploaded_image_file_id_from_other_conversation(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": "conv-a"},
+                files={"file": ("pixel.png", png_bytes, "image/png")},
+            )
+            self.assertEqual(upload_response.status_code, 200)
+            file_id = upload_response.json()["file_id"]
+
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "model": "gpt-5",
+                    "input": [
+                        {"type": "input_text", "text": "repeat ABC123"},
+                        {"type": "input_image", "file_id": file_id},
+                    ],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 1,
+                    "metadata": {"client_conversation_id": "conv-b"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("input image file_id was not found", response.text)
+
+    def test_responses_rejects_uploaded_image_file_id_from_other_owner(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+        created = api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
+        user_key = created["created_items"][0]["key"]
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": "conv-a"},
+                files={"file": ("pixel.png", png_bytes, "image/png")},
+            )
+            self.assertEqual(upload_response.status_code, 200)
+            file_id = upload_response.json()["file_id"]
+
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={
+                    "model": "gpt-5",
+                    "input": [
+                        {"type": "input_text", "text": "repeat ABC123"},
+                        {"type": "input_image", "file_id": file_id},
+                    ],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 1,
+                    "metadata": {"client_conversation_id": "conv-a"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("input image file_id was not found", response.text)
+
+    def test_responses_rejects_consumed_uploaded_image_file_id_for_new_conversation(self) -> None:
+        png_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+        )
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": "conv-a"},
+                files={"file": ("pixel.png", png_bytes, "image/png")},
+            )
+            self.assertEqual(upload_response.status_code, 200)
+            file_id = upload_response.json()["file_id"]
+
+            first_response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "model": "gpt-5",
+                    "input": [
+                        {"type": "input_text", "text": "repeat ABC123"},
+                        {"type": "input_image", "file_id": file_id},
+                    ],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 1,
+                    "metadata": {"client_conversation_id": "conv-a"},
+                },
+            )
+            self.assertEqual(first_response.status_code, 200)
+
+            second_response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "model": "gpt-5",
+                    "input": [
+                        {"type": "input_text", "text": "repeat AGAIN"},
+                        {"type": "input_image", "file_id": file_id},
+                    ],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 1,
+                    "metadata": {"client_conversation_id": "conv-b"},
+                },
+            )
+
+        self.assertEqual(second_response.status_code, 404)
+        self.assertIn("input image file_id was not found", second_response.text)
 
     def test_image_generation_rejects_more_than_two_images(self) -> None:
         created = api.user_key_service.create_user_keys(
