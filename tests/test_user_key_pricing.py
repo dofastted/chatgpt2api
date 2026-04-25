@@ -1143,6 +1143,7 @@ class UserKeyPricingTests(unittest.TestCase):
         ).decode("utf-8")
         events = self.collect_sse_events(stream_content)
 
+        self.assertEqual(events[0][0], "image_generation.completed")
         self.assertEqual(events[0][1]["type"], "image_generation.completed")
         self.assertEqual(events[0][1]["b64_json"], "ZmFrZQ==")
         self.assertEqual(events[0][1]["output_format"], "png")

@@ -27,6 +27,17 @@ class FakeSession:
         raise AssertionError("unexpected get call")
 
 
+class FakeSseResponse:
+    def __init__(self, lines: list[str]):
+        self.lines = list(lines)
+        self.read_count = 0
+
+    def iter_lines(self):
+        for line in self.lines:
+            self.read_count += 1
+            yield line
+
+
 class ImageServiceAttachmentTests(unittest.TestCase):
     def test_build_uploaded_input_image_supports_data_url(self) -> None:
         png_bytes = base64.b64decode(
@@ -344,6 +355,22 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertEqual(parse_calls["count"], 2)
         self.assertEqual(len(payload["data"]), 1)
         self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtMw==")
+
+    def test_parse_sse_returns_after_image_file_id_and_conversation_id(self) -> None:
+        response = FakeSseResponse(
+            [
+                'data: {"conversation_id":"conv-fast","message":{"content":{"content_type":"text","parts":["working"]}}}',
+                'data: {"conversation_id":"conv-fast","message":{"metadata":{"attachments":[{"id":"file-service://file-ready"}]}}}',
+                'data: {"conversation_id":"conv-fast","type":"message_stream_complete"}',
+                'data: {"conversation_id":"conv-fast","message":{"content":{"content_type":"text","parts":["late"]}}}',
+            ]
+        )
+
+        parsed = image_service._parse_sse(response)
+
+        self.assertEqual(parsed["conversation_id"], "conv-fast")
+        self.assertEqual(parsed["file_ids"], ["file-ready"])
+        self.assertEqual(response.read_count, 2)
 
     def test_is_transient_image_error_treats_conversation_422_as_retryable(self) -> None:
         self.assertTrue(image_service.is_transient_image_error("conversation failed: 422"))

@@ -563,6 +563,7 @@ def _parse_sse(response) -> dict:
     conversation_id = ""
     text_parts: list[str] = []
     terminal_error = ""
+    stream_complete = False
     for raw_line in response.iter_lines():
         if not raw_line:
             continue
@@ -603,8 +604,11 @@ def _parse_sse(response) -> dict:
         if not terminal_error and str(obj.get("type") or "").strip().lower() in {"error", "conversation_error"}:
             terminal_error = _extract_sse_error_text(obj)
         conversation_id = str(obj.get("conversation_id") or conversation_id)
-        if obj.get("type") in {"resume_conversation_token", "message_marker", "message_stream_complete"}:
+        event_type = str(obj.get("type") or "").strip()
+        if event_type in {"resume_conversation_token", "message_marker", "message_stream_complete"}:
             conversation_id = str(obj.get("conversation_id") or conversation_id)
+        if event_type == "message_stream_complete":
+            stream_complete = True
         data = obj.get("v")
         if isinstance(data, dict):
             conversation_id = str(data.get("conversation_id") or conversation_id)
@@ -614,6 +618,10 @@ def _parse_sse(response) -> dict:
             parts = content.get("parts") or []
             if parts:
                 text_parts.append(str(parts[0]))
+        if file_ids and conversation_id and stream_complete:
+            break
+        if file_ids and conversation_id:
+            break
     return {
         "conversation_id": conversation_id,
         "file_ids": file_ids,

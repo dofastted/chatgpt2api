@@ -707,7 +707,7 @@ def iter_images_stream(
         partial_count = max(0, int(partial_images or 0))
         if partial_count > 0:
             yield format_sse_event(
-                None,
+                "image_generation.partial_image",
                 {
                     "type": "image_generation.partial_image",
                     "b64_json": image_b64,
@@ -730,7 +730,7 @@ def iter_images_stream(
         }
         if payload.get("usage") is not None:
             completed_event["usage"] = payload.get("usage")
-        yield format_sse_event(None, completed_event)
+        yield format_sse_event("image_generation.completed", completed_event)
     yield format_sse_event(None, "[DONE]")
 
 
