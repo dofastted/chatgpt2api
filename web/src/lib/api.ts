@@ -546,6 +546,7 @@ export async function generateImage(
       model: "gpt-5",
       input: inputItems,
       tools: [{ type: "image_generation", model, size }],
+      tool_choice: { type: "image_generation" },
       ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
       n,
       metadata: clientConversationId
