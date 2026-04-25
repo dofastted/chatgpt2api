@@ -268,6 +268,9 @@ async function normalizeConversationHistory(
         (turn.status === "queued" || turn.status === "assigning_account" || turn.status === "running") &&
         !activeGenerationKeys.has(`${scope}:${item.id}:${turn.id}`)
       ) {
+        if (String(turn.queueRequestId || "").trim()) {
+          return turn;
+        }
         return {
           ...turn,
           status: "error" as const,

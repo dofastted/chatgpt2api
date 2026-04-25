@@ -51,6 +51,11 @@ class FakeBackendService:
         }
 
 
+class FakeThread:
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+
+
 class ApiImageModelRuleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="chatgpt2api-api-rules-"))
@@ -104,6 +109,26 @@ class ApiImageModelRuleTests(unittest.TestCase):
         )
 
         self.assertEqual(api.resolve_requested_response_image_model(request), "gpt-image-2")
+
+    def test_responses_health_endpoint_returns_json_without_generation(self) -> None:
+        with patch.object(api, "start_limited_account_watcher", side_effect=lambda stop_event: FakeThread()):
+            with TestClient(api.create_app()) as client:
+                response = client.get(
+                    "/v1/responses",
+                    headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                )
+                head_response = client.head(
+                    "/v1/responses",
+                    headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"].split(";", 1)[0], "application/json")
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["endpoint"], "/v1/responses")
+        self.assertEqual(payload["data"], [])
+        self.assertEqual(head_response.status_code, 200)
 
     def test_generate_image_payload_uses_image_2_billing_by_default(self) -> None:
         created = api.user_key_service.create_user_keys(

@@ -971,6 +971,22 @@ def create_app() -> FastAPI:
         auth_token = extract_bearer_token(authorization)
         return image_queue_service.snapshot(auth_token, request_id=request_id)
 
+    @router.api_route("/v1/responses", methods=["GET", "HEAD"])
+    async def check_responses_endpoint(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        auth_token = extract_bearer_token(authorization)
+        queue_snapshot = image_queue_service.snapshot(auth_token)
+        return {
+            "object": "list",
+            "data": [],
+            "status": "ok",
+            "endpoint": "/v1/responses",
+            "queue": {
+                "user": queue_snapshot.get("user", {}),
+                "global": queue_snapshot.get("global", {}),
+            },
+        }
+
     @router.post("/v1/responses")
     async def create_response(
             body: ResponsesCreateRequest,
