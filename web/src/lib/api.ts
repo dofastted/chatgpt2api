@@ -6,6 +6,7 @@ export type AccountCategory = "普通" | "捐赠";
 export type ImageModel = "gpt-image-1" | "gpt-image-2";
 export type AuthRole = "user" | "admin";
 export type AuthType = "auth_key" | "admin_auth_key" | "user_key";
+export type ProxyProtocol = "http" | "socks5";
 export type UserKeyStatus = "启用" | "停用";
 export type UserKeyPricing = {
   "gpt-image-1": number;
@@ -55,6 +56,18 @@ export type Account = {
   needsRefresh?: boolean;
 };
 
+export type ProxyItem = {
+  id: string;
+  name: string;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  enabled: boolean;
+  url?: string | null;
+};
+
 export type ImportedAccount = {
   access_token: string;
   [key: string]: unknown;
@@ -97,6 +110,11 @@ type UserKeyListResponse = {
 
 type RedeemCodeListResponse = {
   items: RedeemCode[];
+};
+
+type ProxyListResponse = {
+  items: ProxyItem[];
+  active_proxy_url?: string | null;
 };
 
 type AccountMutationResponse = {
@@ -146,6 +164,12 @@ type AccountUpdateResponse = {
   items: Account[];
 };
 
+type ProxyUpsertResponse = {
+  item: ProxyItem;
+  items: ProxyItem[];
+  active_proxy_url?: string | null;
+};
+
 type UserKeyUpdateResponse = {
   item: UserKey;
   items: UserKey[];
@@ -193,6 +217,13 @@ export type ImageGenerationResponse = {
   data: Array<{ b64_json: string; revised_prompt?: string; mime_type?: string }>;
   billing?: ImageBilling;
   copied_text?: string;
+  text_content?: string;
+  conversation_id?: string;
+  retry?: {
+    retryable?: boolean;
+    failed_request_id?: string;
+    reason?: string;
+  };
 };
 
 export type UploadedInputImage = {
@@ -218,6 +249,13 @@ type ResponsesImageGenerationResponse = {
   }>;
   billing?: ImageBilling;
   copied_text?: string;
+  text_content?: string;
+  conversation_id?: string;
+  retry?: {
+    retryable?: boolean;
+    failed_request_id?: string;
+    reason?: string;
+  };
 };
 
 export async function login(authKey: string) {
@@ -265,6 +303,10 @@ export async function fetchAccounts(options: { redirectOnUnauthorized?: boolean 
 
 export async function fetchUserKeys(options: { redirectOnUnauthorized?: boolean } = {}) {
   return httpRequest<UserKeyListResponse>("/api/user-keys", options);
+}
+
+export async function fetchProxies(options: { redirectOnUnauthorized?: boolean } = {}) {
+  return httpRequest<ProxyListResponse>("/api/proxies", options);
 }
 
 export async function fetchRedeemCodes(options: { redirectOnUnauthorized?: boolean } = {}) {
@@ -350,6 +392,29 @@ export async function updateAccount(
   });
 }
 
+export async function upsertProxy(payload: {
+  id?: string;
+  name?: string;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  enabled?: boolean;
+}) {
+  return httpRequest<ProxyUpsertResponse>("/api/proxies", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function deleteProxy(id: string) {
+  return httpRequest<ProxyListResponse>("/api/proxies", {
+    method: "DELETE",
+    body: { id },
+  });
+}
+
 export async function createUserKeys(options: {
   count: number;
   quota: number;
@@ -424,6 +489,15 @@ function normalizeResponsesImageGenerationResponse(
     data,
     billing: payload.billing,
     copied_text: String(payload.copied_text || "").trim() || undefined,
+    text_content: String(payload.text_content || "").trim() || undefined,
+    conversation_id: String(payload.conversation_id || "").trim() || undefined,
+    retry: payload.retry
+      ? {
+          retryable: Boolean(payload.retry.retryable),
+          failed_request_id: String(payload.retry.failed_request_id || "").trim() || undefined,
+          reason: String(payload.retry.reason || "").trim() || undefined,
+        }
+      : undefined,
   };
 }
 

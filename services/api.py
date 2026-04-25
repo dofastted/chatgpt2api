@@ -23,6 +23,7 @@ from services.backend_service import BackendService
 from services.chat_image.account_import import normalize_account_carrier
 from services.image_service import ImageGenerationError
 from services.image_queue_service import image_queue_service
+from services.proxy_service import proxy_service
 from services.redeem_code_service import redeem_code_service
 from services.uploaded_image_service import uploaded_image_service
 from services.user_key_service import user_key_service
@@ -115,6 +116,21 @@ class AccountUpdateRequest(BaseModel):
     type: str | None = None
     status: str | None = None
     quota: int | None = None
+
+
+class ProxyUpsertRequest(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    protocol: str
+    host: str
+    port: int = Field(..., ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    enabled: bool = True
+
+
+class ProxyDeleteRequest(BaseModel):
+    id: str = Field(default="")
 
 
 class UserKeyCreateRequest(BaseModel):
@@ -1023,6 +1039,14 @@ def create_app() -> FastAPI:
         require_admin_auth_key(authorization)
         return {"items": account_service.list_accounts()}
 
+    @router.get("/api/proxies")
+    async def get_proxies(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return {
+            "items": proxy_service.list_public_items(),
+            "active_proxy_url": proxy_service.get_enabled_proxy_url(),
+        }
+
     @router.get("/api/user-keys")
     async def get_user_keys(authorization: str | None = Header(default=None)):
         require_admin_auth_key(authorization)
@@ -1059,6 +1083,22 @@ def create_app() -> FastAPI:
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
             "items": refresh_result.get("items", result.get("items", [])),
+        }
+
+    @router.post("/api/proxies")
+    async def upsert_proxy(
+            body: ProxyUpsertRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        try:
+            item = proxy_service.upsert_proxy(body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {
+            "item": item,
+            "items": proxy_service.list_public_items(),
+            "active_proxy_url": proxy_service.get_enabled_proxy_url(),
         }
 
     @router.post("/api/donations/accounts")
@@ -1160,6 +1200,21 @@ def create_app() -> FastAPI:
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         return account_service.delete_accounts(tokens)
+
+    @router.delete("/api/proxies")
+    async def delete_proxy(
+            body: ProxyDeleteRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        proxy_id = str(body.id or "").strip()
+        if not proxy_id:
+            raise HTTPException(status_code=400, detail={"error": "id is required"})
+        result = proxy_service.delete_proxy(proxy_id)
+        return {
+            **result,
+            "active_proxy_url": proxy_service.get_enabled_proxy_url(),
+        }
 
     @router.delete("/api/user-keys")
     async def delete_user_keys(

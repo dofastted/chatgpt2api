@@ -16,6 +16,8 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 - 支持兑换码；管理员可生成 `20` 或 `100` 额度兑换码，用户 key 兑换后会直接增加额度
 - 后台管理页已改成 tab 布局，账号池、用户 key、兑换码分开管理
 - 支持本地参考图上传，上传记录按当前 Bearer Token 隔离保存
+- 提供独立画廊页 `/gallery`，可搜索图片和 prompt，并把 prompt 带回画图页
+- 管理员可在号池管理页维护出站代理；账号刷新和生图请求会使用当前启用代理
 
 生图界面：
 ![image](assets/image.png)
@@ -156,6 +158,21 @@ GET /backend-api/files/{file_id}/content
 - 上传列表会按当前 Bearer Token 隔离，只返回自己的记录
 - 上传成功后会返回 `file_id`、尺寸、大小和下载地址；这个 `file_id` 可以直接放进 `/v1/responses` 的 `input_image`
 - 前端图片页选图时默认先走这组接口，不再把大图直接塞进请求体
+
+### 代理管理接口
+
+管理员：
+
+- `GET /api/proxies`
+- `POST /api/proxies`
+- `DELETE /api/proxies`
+
+说明：
+
+- 代理记录保存在 `data/proxies.json`，可用 `CHATGPT2API_PROXIES_FILE` 或 `proxies-file` 覆盖
+- 支持 `http` 和 `socks5`
+- 同一时间只有一个代理处于启用状态
+- 没有启用代理时，账号刷新和生图请求直连上游
 
 ### 上传验收
 

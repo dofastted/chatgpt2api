@@ -3,7 +3,7 @@
 配置来源：
 
 - 主配置类是 `services/config.py:15` 的 `AppSettings`。
-- `auth_key`、`admin_auth_key`、`accounts_file`、`user_keys_file`、`tls_verify` 和图片迁移开关都在这里定义，见 `services/config.py`。
+- `auth_key`、`admin_auth_key`、`accounts_file`、`user_keys_file`、`proxies_file`、`tls_verify` 和图片迁移开关都在这里定义，见 `services/config.py`。
 
 配置加载规则：
 
@@ -12,6 +12,7 @@
 - `tls-verify` 走布尔解析，见 `services/config.py:62`。
 - 账号文件默认写到 `data/accounts.json`，也可用 `CHATGPT2API_DATA_DIR` 改整组数据目录。
 - 用户 key 文件默认写到 `data/user_keys.json`，也可用 `CHATGPT2API_USER_KEYS_FILE` 或 `user-keys-file` 覆盖，见 `services/config.py:75`。
+- 代理文件默认写到 `data/proxies.json`，也可用 `CHATGPT2API_PROXIES_FILE` 或 `proxies-file` 覆盖。
 - `IMAGE_ENGINE` 只允许 `legacy` 或 `chat_image`，当前默认 `legacy`。
 - `IMAGE_ROUTE_POLICY` 只允许 `plan_type`、`force_responses`、`force_images` 或 `legacy`，当前默认 `legacy`。
 - `IMAGE_DEV_PORT` 默认 `18201`，用于隔离迁移环境记录。
@@ -30,4 +31,5 @@
 
 `tls_verify` 说明：
 
-- 它同时影响账号刷新和图片生成请求，因为 `services/account_service.py:364` 和 `services/image_service.py:92` 都把它传给了 `curl_cffi.requests.Session`。
+- 它同时影响账号刷新和图片生成请求，因为 `services/account_service.py` 和 `services/image_service.py` 都把它传给了 `curl_cffi.requests.Session`。
+- 当前启用代理也在这两个位置传入 `curl_cffi.requests.Session`。没有启用代理时传入值为空，运行时直连上游。

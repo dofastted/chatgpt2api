@@ -20,6 +20,7 @@ class AppSettings:
     accounts_file: Path
     user_keys_file: Path
     redeem_codes_file: Path
+    proxies_file: Path
     tls_verify: bool
     image_engine: str
     image_route_policy: str
@@ -119,6 +120,13 @@ def _load_settings() -> AppSettings:
                 os.getenv("CHATGPT2API_REDEEM_CODES_FILE")
                 or raw_config.get("redeem-codes-file")
                 or DATA_DIR / "redeem_codes.json"
+            )
+        ),
+        proxies_file=Path(
+            str(
+                os.getenv("CHATGPT2API_PROXIES_FILE")
+                or raw_config.get("proxies-file")
+                or DATA_DIR / "proxies.json"
             )
         ),
         tls_verify=tls_verify,

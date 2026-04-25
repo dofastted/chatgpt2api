@@ -1,5 +1,6 @@
 {
   "auth-key": "replace-with-your-auth-key",
   "admin-auth-key": "replace-with-your-admin-auth-key",
+  "proxies-file": "data/proxies.json",
   "tls-verify": true
 }

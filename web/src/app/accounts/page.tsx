@@ -46,25 +46,34 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { cleanJsonText, extractAccountsFromJson, normalizeTokenList } from "@/lib/account-import";
+import {
+  cleanJsonText,
+  extractAccountsFromJson,
+  normalizeTokenList,
+} from "@/lib/account-import";
 import {
   createAccounts,
   createRedeemCodes,
   createUserKeys,
+  deleteProxy,
   deleteAccounts,
   deleteRedeemCodes,
   deleteUserKeys,
   fetchAuthSession,
   fetchAccounts,
+  fetchProxies,
   fetchRedeemCodes,
   fetchUserKeys,
   refreshAccounts,
+  upsertProxy,
   updateAccount,
   updateUserKey,
   type Account,
   type AccountCategory,
   type AccountStatus,
   type AccountType,
+  type ProxyItem,
+  type ProxyProtocol,
   type RedeemCode,
   type UserKey,
   type UserKeyPricing,
@@ -80,15 +89,19 @@ const accountTypeOptions: { label: string; value: AccountType | "all" }[] = [
   { label: "Pro", value: "Pro" },
 ];
 
-const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = [
-  { label: "全部状态", value: "all" },
-  { label: "正常", value: "正常" },
-  { label: "限流", value: "限流" },
-  { label: "异常", value: "异常" },
-  { label: "禁用", value: "禁用" },
-];
+const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] =
+  [
+    { label: "全部状态", value: "all" },
+    { label: "正常", value: "正常" },
+    { label: "限流", value: "限流" },
+    { label: "异常", value: "异常" },
+    { label: "禁用", value: "禁用" },
+  ];
 
-const accountCategoryOptions: { label: string; value: AccountCategory | "all" }[] = [
+const accountCategoryOptions: {
+  label: string;
+  value: AccountCategory | "all";
+}[] = [
   { label: "全部来源", value: "all" },
   { label: "普通", value: "普通" },
   { label: "捐赠", value: "捐赠" },
@@ -109,9 +122,24 @@ const statusMeta: Record<
 
 const metricCards = [
   { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
-  { key: "active", label: "正常账户", color: "text-emerald-600", icon: CheckCircle2 },
-  { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
-  { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
+  {
+    key: "active",
+    label: "正常账户",
+    color: "text-emerald-600",
+    icon: CheckCircle2,
+  },
+  {
+    key: "limited",
+    label: "限流账户",
+    color: "text-orange-500",
+    icon: CircleAlert,
+  },
+  {
+    key: "abnormal",
+    label: "异常账户",
+    color: "text-rose-500",
+    icon: CircleOff,
+  },
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
 ] as const;
@@ -124,6 +152,17 @@ const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
 const ADMIN_SECONDARY_PAGE_SIZE = 10;
 
 type AdminTab = "accounts" | "userKeys" | "redeemCodes";
+type UserKeyExportState = {
+  open: boolean;
+  title: string;
+  keys: string[];
+  filenamePrefix: string;
+};
+
+const proxyProtocolOptions: Array<{ label: string; value: ProxyProtocol }> = [
+  { label: "HTTP", value: "http" },
+  { label: "SOCKS5", value: "socks5" },
+];
 
 function formatCompact(value: number) {
   if (value >= 1000) {
@@ -161,11 +200,15 @@ function formatRestoreAt(value?: string | null) {
 }
 
 function formatQuotaSummary(accounts: Account[]) {
-  return formatCompact(accounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+  return formatCompact(
+    accounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0),
+  );
 }
 
 function formatUserKeyQuotaSummary(userKeys: UserKey[]) {
-  return formatCompact(userKeys.reduce((sum, item) => sum + Math.max(0, item.quota), 0));
+  return formatCompact(
+    userKeys.reduce((sum, item) => sum + Math.max(0, item.quota), 0),
+  );
 }
 
 function formatDateTime(value?: string | null) {
@@ -182,7 +225,10 @@ function formatDateTime(value?: string | null) {
   )}:${pad(date.getSeconds())}`;
 }
 
-function buildUserKeyPricing(gptImage1: string, gptImage2: string): UserKeyPricing {
+function buildUserKeyPricing(
+  gptImage1: string,
+  gptImage2: string,
+): UserKeyPricing {
   void gptImage1;
   return {
     "gpt-image-1": 0,
@@ -201,30 +247,49 @@ function maskToken(token?: string, visibleStart = 16, visibleEnd = 8) {
   return `${token.slice(0, visibleStart)}...${token.slice(-visibleEnd)}`;
 }
 
-function downloadTokens(accounts: Account[]) {
-  const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
+function downloadTextFile(content: string, filename: string) {
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `accounts-${Date.now()}.txt`;
+  link.download = filename;
+  link.rel = "noopener";
+  link.style.display = "none";
+  document.body.appendChild(link);
   link.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+    link.remove();
+  }, 0);
 }
 
-function downloadRedeemCodes(codes: RedeemCode[], filenamePrefix = "redeem-codes") {
+function downloadTokens(accounts: Account[]) {
+  const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
+  downloadTextFile(content, `accounts-${Date.now()}.txt`);
+}
+
+function downloadRedeemCodes(
+  codes: RedeemCode[],
+  filenamePrefix = "redeem-codes",
+) {
   if (codes.length === 0) {
     toast.error("没有可下载的兑换码");
     return;
   }
   const content = `${codes.map((item) => item.code).join("\n")}\n`;
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${filenamePrefix}-${Date.now()}.txt`;
-  link.click();
-  URL.revokeObjectURL(url);
+  downloadTextFile(content, `${filenamePrefix}-${Date.now()}.txt`);
+}
+
+function downloadUserKeys(
+  userKeys: UserKey[],
+  filenamePrefix = "user-keys",
+) {
+  if (userKeys.length === 0) {
+    toast.error("没有可下载的用户 key");
+    return;
+  }
+  const content = `${userKeys.map((item) => item.key).join("\n")}\n`;
+  downloadTextFile(content, `${filenamePrefix}-${Date.now()}.txt`);
 }
 
 function normalizeAccounts(items: Account[]): Account[] {
@@ -232,7 +297,10 @@ function normalizeAccounts(items: Account[]): Account[] {
     ...item,
     category: item.category === "捐赠" ? "捐赠" : "普通",
     type:
-      item.type === "Plus" || item.type === "Team" || item.type === "Pro" || item.type === "Free"
+      item.type === "Plus" ||
+      item.type === "Team" ||
+      item.type === "Pro" ||
+      item.type === "Free"
         ? item.type
         : "Free",
   }));
@@ -245,16 +313,24 @@ export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [userKeys, setUserKeys] = useState<UserKey[]>([]);
   const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
+  const [proxies, setProxies] = useState<ProxyItem[]>([]);
+  const [activeProxyUrl, setActiveProxyUrl] = useState<string>("");
   const [activeTab, setActiveTab] = useState<AdminTab>("accounts");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedUserKeyIds, setSelectedUserKeyIds] = useState<string[]>([]);
-  const [selectedRedeemCodeIds, setSelectedRedeemCodeIds] = useState<string[]>([]);
+  const [selectedRedeemCodeIds, setSelectedRedeemCodeIds] = useState<string[]>(
+    [],
+  );
   const [query, setQuery] = useState("");
   const [userKeyQuery, setUserKeyQuery] = useState("");
   const [redeemCodeQuery, setRedeemCodeQuery] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<AccountCategory | "all">("all");
+  const [categoryFilter, setCategoryFilter] = useState<AccountCategory | "all">(
+    "all",
+  );
   const [typeFilter, setTypeFilter] = useState<AccountType | "all">("all");
-  const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
+  const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">(
+    "all",
+  );
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
   const [userKeyPage, setUserKeyPage] = useState(1);
@@ -272,12 +348,17 @@ export default function AccountsPage() {
   const [newUserKeyLabelPrefix, setNewUserKeyLabelPrefix] = useState("");
   const [newUserKeyCount, setNewUserKeyCount] = useState("5");
   const [newUserKeyQuota, setNewUserKeyQuota] = useState("20");
-  const [newUserKeyPriceImage1, setNewUserKeyPriceImage1] = useState(String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]));
-  const [newUserKeyPriceImage2, setNewUserKeyPriceImage2] = useState(String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]));
+  const [newUserKeyPriceImage1, setNewUserKeyPriceImage1] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]),
+  );
+  const [newUserKeyPriceImage2, setNewUserKeyPriceImage2] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]),
+  );
   const [editUserKeyLabel, setEditUserKeyLabel] = useState("");
   const [editUserKeyQuota, setEditUserKeyQuota] = useState("0");
   const [editUserKeyLdcBalance, setEditUserKeyLdcBalance] = useState("0");
-  const [editUserKeyStatus, setEditUserKeyStatus] = useState<UserKeyStatus>("启用");
+  const [editUserKeyStatus, setEditUserKeyStatus] =
+    useState<UserKeyStatus>("启用");
   const [editUserKeyPriceImage1, setEditUserKeyPriceImage1] = useState(
     String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]),
   );
@@ -285,9 +366,13 @@ export default function AccountsPage() {
     String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]),
   );
   const [batchEditUserKeyQuota, setBatchEditUserKeyQuota] = useState("");
-  const [batchEditUserKeyLdcBalance, setBatchEditUserKeyLdcBalance] = useState("");
-  const [batchEditUserKeyStatus, setBatchEditUserKeyStatus] = useState<"unchanged" | UserKeyStatus>("unchanged");
-  const [batchEditUserKeyPriceImage2, setBatchEditUserKeyPriceImage2] = useState("");
+  const [batchEditUserKeyLdcBalance, setBatchEditUserKeyLdcBalance] =
+    useState("");
+  const [batchEditUserKeyStatus, setBatchEditUserKeyStatus] = useState<
+    "unchanged" | UserKeyStatus
+  >("unchanged");
+  const [batchEditUserKeyPriceImage2, setBatchEditUserKeyPriceImage2] =
+    useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -304,9 +389,29 @@ export default function AccountsPage() {
   const [isAuthorizing, setIsAuthorizing] = useState(true);
   const [newRedeemCodePrefix, setNewRedeemCodePrefix] = useState("RDM");
   const [newRedeemCodeCount, setNewRedeemCodeCount] = useState("5");
-  const [newRedeemCodeTargetQuota, setNewRedeemCodeTargetQuota] = useState<"20" | "100">("20");
+  const [newRedeemCodeTargetQuota, setNewRedeemCodeTargetQuota] = useState<
+    "20" | "100"
+  >("20");
   const [newRedeemCodeLabel, setNewRedeemCodeLabel] = useState("");
-  const [lastCreatedRedeemCodes, setLastCreatedRedeemCodes] = useState<RedeemCode[]>([]);
+  const [lastCreatedUserKeys, setLastCreatedUserKeys] = useState<UserKey[]>(
+    [],
+  );
+  const [userKeyExport, setUserKeyExport] = useState<UserKeyExportState>({
+    open: false,
+    title: "用户 key 下载",
+    keys: [],
+    filenamePrefix: "user-keys",
+  });
+  const [lastCreatedRedeemCodes, setLastCreatedRedeemCodes] = useState<
+    RedeemCode[]
+  >([]);
+  const [proxyName, setProxyName] = useState("");
+  const [proxyProtocol, setProxyProtocol] = useState<ProxyProtocol>("socks5");
+  const [proxyHost, setProxyHost] = useState("");
+  const [proxyPort, setProxyPort] = useState("");
+  const [proxyUsername, setProxyUsername] = useState("");
+  const [proxyPassword, setProxyPassword] = useState("");
+  const [editingProxyId, setEditingProxyId] = useState<string | null>(null);
 
   function handleAdminRouteFailure(message: string) {
     const normalizedMessage = String(message || "").toLowerCase();
@@ -329,7 +434,9 @@ export default function AccountsPage() {
     try {
       const data = await fetchAccounts({ redirectOnUnauthorized: false });
       setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setSelectedIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
       if (!handleAdminRouteFailure(message)) {
@@ -349,9 +456,12 @@ export default function AccountsPage() {
     try {
       const data = await fetchUserKeys({ redirectOnUnauthorized: false });
       setUserKeys(data.items);
-      setSelectedUserKeyIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setSelectedUserKeyIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "加载用户 key 失败";
+      const message =
+        error instanceof Error ? error.message : "加载用户 key 失败";
       if (!handleAdminRouteFailure(message)) {
         toast.error(message);
       }
@@ -369,7 +479,9 @@ export default function AccountsPage() {
     try {
       const data = await fetchRedeemCodes({ redirectOnUnauthorized: false });
       setRedeemCodes(data.items);
-      setSelectedRedeemCodeIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setSelectedRedeemCodeIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载兑换码失败";
       if (!handleAdminRouteFailure(message)) {
@@ -378,6 +490,19 @@ export default function AccountsPage() {
     } finally {
       if (!silent) {
         setIsLoadingRedeemCodes(false);
+      }
+    }
+  }
+
+  async function loadProxies(silent = false) {
+    try {
+      const data = await fetchProxies({ redirectOnUnauthorized: false });
+      setProxies(data.items);
+      setActiveProxyUrl(String(data.active_proxy_url || ""));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "加载代理失败";
+      if (!handleAdminRouteFailure(message)) {
+        toast.error(message);
       }
     }
   }
@@ -391,7 +516,10 @@ export default function AccountsPage() {
     let cancelled = false;
     const bootstrap = async () => {
       try {
-        const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
+        const session = await fetchAuthSession({
+          redirectOnUnauthorized: false,
+          retries: 1,
+        });
         if (cancelled) {
           return;
         }
@@ -401,12 +529,18 @@ export default function AccountsPage() {
           return;
         }
         setIsAuthorizing(false);
-        await Promise.all([loadAccounts(), loadUserKeys(), loadRedeemCodes()]);
+        await Promise.all([
+          loadAccounts(),
+          loadUserKeys(),
+          loadRedeemCodes(),
+          loadProxies(),
+        ]);
       } catch (error) {
         if (cancelled) {
           return;
         }
-        const message = error instanceof Error ? error.message : "加载管理员会话失败";
+        const message =
+          error instanceof Error ? error.message : "加载管理员会话失败";
         if (handleAdminRouteFailure(message)) {
           return;
         }
@@ -425,20 +559,30 @@ export default function AccountsPage() {
     const normalizedQuery = query.trim().toLowerCase();
     return accounts.filter((account) => {
       const searchMatched =
-        normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
-      const categoryMatched = categoryFilter === "all" || account.category === categoryFilter;
+        normalizedQuery.length === 0 ||
+        (account.email ?? "").toLowerCase().includes(normalizedQuery);
+      const categoryMatched =
+        categoryFilter === "all" || account.category === categoryFilter;
       const typeMatched = typeFilter === "all" || account.type === typeFilter;
-      const statusMatched = statusFilter === "all" || account.status === statusFilter;
+      const statusMatched =
+        statusFilter === "all" || account.status === statusFilter;
       return searchMatched && categoryMatched && typeMatched && statusMatched;
     });
   }, [accounts, categoryFilter, query, statusFilter, typeFilter]);
 
-  const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
+  const pageCount = Math.max(
+    1,
+    Math.ceil(filteredAccounts.length / Number(pageSize)),
+  );
   const safePage = Math.min(page, pageCount);
   const startIndex = (safePage - 1) * Number(pageSize);
-  const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
+  const currentRows = filteredAccounts.slice(
+    startIndex,
+    startIndex + Number(pageSize),
+  );
   const allCurrentSelected =
-    currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.id));
+    currentRows.length > 0 &&
+    currentRows.every((row) => selectedIds.includes(row.id));
 
   const summary = useMemo(() => {
     const total = accounts.length;
@@ -453,11 +597,15 @@ export default function AccountsPage() {
 
   const selectedTokens = useMemo(() => {
     const selectedSet = new Set(selectedIds);
-    return accounts.filter((item) => selectedSet.has(item.id)).map((item) => item.access_token);
+    return accounts
+      .filter((item) => selectedSet.has(item.id))
+      .map((item) => item.access_token);
   }, [accounts, selectedIds]);
 
   const abnormalTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
+    return accounts
+      .filter((item) => item.status === "异常")
+      .map((item) => item.access_token);
   }, [accounts]);
 
   const filteredUserKeys = useMemo(() => {
@@ -498,30 +646,45 @@ export default function AccountsPage() {
     });
   }, [redeemCodeQuery, redeemCodes]);
 
-  const userKeyPageCount = Math.max(1, Math.ceil(filteredUserKeys.length / ADMIN_SECONDARY_PAGE_SIZE));
+  const userKeyPageCount = Math.max(
+    1,
+    Math.ceil(filteredUserKeys.length / ADMIN_SECONDARY_PAGE_SIZE),
+  );
   const safeUserKeyPage = Math.min(userKeyPage, userKeyPageCount);
   const userKeyStartIndex = (safeUserKeyPage - 1) * ADMIN_SECONDARY_PAGE_SIZE;
-  const currentUserKeys = filteredUserKeys.slice(userKeyStartIndex, userKeyStartIndex + ADMIN_SECONDARY_PAGE_SIZE);
+  const currentUserKeys = filteredUserKeys.slice(
+    userKeyStartIndex,
+    userKeyStartIndex + ADMIN_SECONDARY_PAGE_SIZE,
+  );
   const selectedUserKeys = useMemo(() => {
     const selectedSet = new Set(selectedUserKeyIds);
     return userKeys.filter((item) => selectedSet.has(item.id));
   }, [selectedUserKeyIds, userKeys]);
   const allCurrentUserKeysSelected =
-    currentUserKeys.length > 0 && currentUserKeys.every((item) => selectedUserKeyIds.includes(item.id));
+    currentUserKeys.length > 0 &&
+    currentUserKeys.every((item) => selectedUserKeyIds.includes(item.id));
   const selectedRedeemCodes = useMemo(() => {
     const selectedSet = new Set(selectedRedeemCodeIds);
     return redeemCodes.filter((item) => selectedSet.has(item.id));
   }, [selectedRedeemCodeIds, redeemCodes]);
-  const redeemCodePageCount = Math.max(1, Math.ceil(filteredRedeemCodes.length / ADMIN_SECONDARY_PAGE_SIZE));
+  const redeemCodePageCount = Math.max(
+    1,
+    Math.ceil(filteredRedeemCodes.length / ADMIN_SECONDARY_PAGE_SIZE),
+  );
   const safeRedeemCodePage = Math.min(redeemCodePage, redeemCodePageCount);
-  const redeemCodeStartIndex = (safeRedeemCodePage - 1) * ADMIN_SECONDARY_PAGE_SIZE;
+  const redeemCodeStartIndex =
+    (safeRedeemCodePage - 1) * ADMIN_SECONDARY_PAGE_SIZE;
   const currentRedeemCodes = filteredRedeemCodes.slice(
     redeemCodeStartIndex,
     redeemCodeStartIndex + ADMIN_SECONDARY_PAGE_SIZE,
   );
   const allCurrentRedeemCodesSelected =
-    currentRedeemCodes.length > 0 && currentRedeemCodes.every((item) => selectedRedeemCodeIds.includes(item.id));
-  const usedRedeemCodes = useMemo(() => redeemCodes.filter((item) => item.status === "已使用"), [redeemCodes]);
+    currentRedeemCodes.length > 0 &&
+    currentRedeemCodes.every((item) => selectedRedeemCodeIds.includes(item.id));
+  const usedRedeemCodes = useMemo(
+    () => redeemCodes.filter((item) => item.status === "已使用"),
+    [redeemCodes],
+  );
 
   const paginationItems = useMemo(() => {
     const items: (number | "...")[] = [];
@@ -569,10 +732,103 @@ export default function AccountsPage() {
           `新增 ${data.added ?? 0} 个账户，已刷新 ${data.refreshed ?? 0} 个，失败 ${data.errors?.length ?? 0} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(`新增 ${data.added ?? 0} 个账户，跳过 ${data.skipped ?? 0} 个重复项，已自动刷新账号信息`);
+        toast.success(
+          `新增 ${data.added ?? 0} 个账户，跳过 ${data.skipped ?? 0} 个重复项，已自动刷新账号信息`,
+        );
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "新增账户失败";
+      toast.error(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const resetProxyEditor = () => {
+    setEditingProxyId(null);
+    setProxyName("");
+    setProxyProtocol("socks5");
+    setProxyHost("");
+    setProxyPort("");
+    setProxyUsername("");
+    setProxyPassword("");
+  };
+
+  const handleSaveProxy = async () => {
+    if (!proxyHost.trim() || !proxyPort.trim()) {
+      toast.error("请先填写代理地址和端口");
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const data = await upsertProxy({
+        id: editingProxyId || undefined,
+        name: proxyName.trim() || undefined,
+        protocol: proxyProtocol,
+        host: proxyHost.trim(),
+        port: Math.max(1, Number(proxyPort || 0)),
+        username: proxyUsername.trim() || undefined,
+        password: proxyPassword.trim() || undefined,
+        enabled: true,
+      });
+      setProxies(data.items);
+      setActiveProxyUrl(String(data.active_proxy_url || ""));
+      resetProxyEditor();
+      toast.success(editingProxyId ? "代理已更新" : "代理已保存并启用");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "保存代理失败";
+      toast.error(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleEditProxy = (item: ProxyItem) => {
+    setEditingProxyId(item.id);
+    setProxyName(String(item.name || ""));
+    setProxyProtocol(item.protocol);
+    setProxyHost(String(item.host || ""));
+    setProxyPort(String(item.port || ""));
+    setProxyUsername(String(item.username || ""));
+    setProxyPassword(String(item.password || ""));
+  };
+
+  const handleEnableProxy = async (item: ProxyItem) => {
+    setIsSubmitting(true);
+    try {
+      const data = await upsertProxy({
+        id: item.id,
+        name: item.name,
+        protocol: item.protocol,
+        host: item.host,
+        port: item.port,
+        username: String(item.username || "") || undefined,
+        password: String(item.password || "") || undefined,
+        enabled: true,
+      });
+      setProxies(data.items);
+      setActiveProxyUrl(String(data.active_proxy_url || ""));
+      toast.success("已切换代理出口");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "切换代理失败";
+      toast.error(message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteProxy = async (id: string) => {
+    setIsSubmitting(true);
+    try {
+      const data = await deleteProxy(id);
+      setProxies(data.items);
+      setActiveProxyUrl(String(data.active_proxy_url || ""));
+      if (editingProxyId === id) {
+        resetProxyEditor();
+      }
+      toast.success("代理已删除");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除代理失败";
       toast.error(message);
     } finally {
       setIsSubmitting(false);
@@ -587,7 +843,10 @@ export default function AccountsPage() {
     setIsUploadingJson(true);
 
     try {
-      const importedAccounts: Array<{ access_token: string; [key: string]: unknown }> = [];
+      const importedAccounts: Array<{
+        access_token: string;
+        [key: string]: unknown;
+      }> = [];
       const invalidFiles: string[] = [];
       const emptyFiles: string[] = [];
       let matchedFiles = 0;
@@ -614,7 +873,10 @@ export default function AccountsPage() {
         }
       }
 
-      const indexedAccounts = new Map<string, { access_token: string; [key: string]: unknown }>();
+      const indexedAccounts = new Map<
+        string,
+        { access_token: string; [key: string]: unknown }
+      >();
       importedAccounts.forEach((item) => {
         const accessToken = String(item.access_token || "").trim();
         if (!accessToken) {
@@ -635,7 +897,11 @@ export default function AccountsPage() {
         if (emptyFiles.length > 0) {
           errors.push(`${emptyFiles.length} 个文件没有可识别的 token 字段`);
         }
-        toast.error(errors.length > 0 ? `未提取到可用 Token，${errors.join("，")}` : "未提取到可用 Token");
+        toast.error(
+          errors.length > 0
+            ? `未提取到可用 Token，${errors.join("，")}`
+            : "未提取到可用 Token",
+        );
         return;
       }
 
@@ -646,7 +912,9 @@ export default function AccountsPage() {
       setPage(1);
       setOpen(false);
 
-      const messages = [`已从 ${matchedFiles} 个文件导入 ${accountsToImport.length} 个账户`];
+      const messages = [
+        `已从 ${matchedFiles} 个文件导入 ${accountsToImport.length} 个账户`,
+      ];
       if ((data.updated ?? 0) > 0) {
         messages.push(`覆盖 ${data.updated} 个已有账户`);
       }
@@ -689,7 +957,9 @@ export default function AccountsPage() {
     try {
       const data = await deleteAccounts(tokens);
       setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setSelectedIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
       toast.success(`删除 ${data.removed ?? 0} 个账户`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除账户失败";
@@ -709,7 +979,9 @@ export default function AccountsPage() {
     try {
       const data = await refreshAccounts(accessTokens);
       setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setSelectedIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
         toast.error(
@@ -748,7 +1020,9 @@ export default function AccountsPage() {
         quota: Number(editQuota || 0),
       });
       setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
+      setSelectedIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
       setEditingAccount(null);
       toast.success("账号信息已更新");
     } catch (error) {
@@ -769,6 +1043,28 @@ export default function AccountsPage() {
     setEditUserKeyPriceImage2(String(userKey.pricing["gpt-image-2"]));
   };
 
+  const openUserKeyExportDialog = (
+    items: UserKey[],
+    title: string,
+    filenamePrefix: string,
+    downloadNow = false,
+  ) => {
+    const keys = items.map((item) => String(item.key || "").trim()).filter(Boolean);
+    if (keys.length === 0) {
+      toast.error("没有可下载的用户 key");
+      return;
+    }
+    setUserKeyExport({
+      open: true,
+      title,
+      keys,
+      filenamePrefix,
+    });
+    if (downloadNow) {
+      downloadUserKeys(items, filenamePrefix);
+    }
+  };
+
   const handleCreateUserKeys = async () => {
     setIsSubmittingUserKeys(true);
     try {
@@ -777,12 +1073,28 @@ export default function AccountsPage() {
         quota: Math.max(0, Number(newUserKeyQuota || 0)),
         prefix: newUserKeyPrefix.trim() || undefined,
         label_prefix: newUserKeyLabelPrefix.trim() || undefined,
-        pricing: buildUserKeyPricing(newUserKeyPriceImage1, newUserKeyPriceImage2),
+        pricing: buildUserKeyPricing(
+          newUserKeyPriceImage1,
+          newUserKeyPriceImage2,
+        ),
       });
       setUserKeys(data.items);
-      toast.success(`已生成 ${data.created_items?.length ?? data.added ?? 0} 个用户 key`);
+      const createdItems = data.created_items ?? [];
+      setLastCreatedUserKeys(createdItems);
+      if (createdItems.length > 0) {
+        openUserKeyExportDialog(
+          createdItems,
+          "本次生成的用户 key",
+          "user-keys-latest",
+          true,
+        );
+      }
+      toast.success(
+        `已生成 ${createdItems.length || data.added || 0} 个用户 key`,
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "生成用户 key 失败";
+      const message =
+        error instanceof Error ? error.message : "生成用户 key 失败";
       toast.error(message);
     } finally {
       setIsSubmittingUserKeys(false);
@@ -802,11 +1114,16 @@ export default function AccountsPage() {
     try {
       const data = await deleteUserKeys(keys);
       setUserKeys(data.items);
-      setSelectedUserKeyIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
-      setEditingUserKey((prev) => (prev && keys.includes(prev.key) ? null : prev));
+      setSelectedUserKeyIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
+      setEditingUserKey((prev) =>
+        prev && keys.includes(prev.key) ? null : prev,
+      );
       toast.success(`已删除 ${data.removed ?? 0} 个用户 key`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "删除用户 key 失败";
+      const message =
+        error instanceof Error ? error.message : "删除用户 key 失败";
       toast.error(message);
     } finally {
       setIsDeletingUserKeys(false);
@@ -824,13 +1141,17 @@ export default function AccountsPage() {
         quota: Math.max(0, Number(editUserKeyQuota || 0)),
         ldc_balance: Math.max(0, Number(editUserKeyLdcBalance || 0)),
         status: editUserKeyStatus,
-        pricing: buildUserKeyPricing(editUserKeyPriceImage1, editUserKeyPriceImage2),
+        pricing: buildUserKeyPricing(
+          editUserKeyPriceImage1,
+          editUserKeyPriceImage2,
+        ),
       });
       setUserKeys(data.items);
       setEditingUserKey(null);
       toast.success("用户 key 已更新");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "更新用户 key 失败";
+      const message =
+        error instanceof Error ? error.message : "更新用户 key 失败";
       toast.error(message);
     } finally {
       setIsUpdatingUserKey(false);
@@ -861,7 +1182,10 @@ export default function AccountsPage() {
       updates.quota = Math.max(0, Number(batchEditUserKeyQuota || 0));
     }
     if (batchEditUserKeyLdcBalance.trim() !== "") {
-      updates.ldc_balance = Math.max(0, Number(batchEditUserKeyLdcBalance || 0));
+      updates.ldc_balance = Math.max(
+        0,
+        Number(batchEditUserKeyLdcBalance || 0),
+      );
     }
     if (batchEditUserKeyStatus !== "unchanged") {
       updates.status = batchEditUserKeyStatus;
@@ -877,13 +1201,16 @@ export default function AccountsPage() {
 
     setIsUpdatingUserKey(true);
     try {
-      await Promise.all(selectedUserKeys.map((item) => updateUserKey(item.key, updates)));
+      await Promise.all(
+        selectedUserKeys.map((item) => updateUserKey(item.key, updates)),
+      );
       await loadUserKeys(true);
       setBulkEditUserKeysOpen(false);
       resetBatchUserKeyEditor();
       toast.success(`已批量更新 ${selectedUserKeys.length} 个用户 key`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "批量更新用户 key 失败";
+      const message =
+        error instanceof Error ? error.message : "批量更新用户 key 失败";
       toast.error(message);
     } finally {
       setIsUpdatingUserKey(false);
@@ -903,9 +1230,14 @@ export default function AccountsPage() {
       const createdItems = data.created_items ?? [];
       setLastCreatedRedeemCodes(createdItems);
       if (createdItems.length > 0) {
-        downloadRedeemCodes(createdItems, `redeem-codes-${newRedeemCodeTargetQuota}`);
+        downloadRedeemCodes(
+          createdItems,
+          `redeem-codes-${newRedeemCodeTargetQuota}`,
+        );
       }
-      toast.success(`已生成 ${createdItems.length || data.added || 0} 个兑换码`);
+      toast.success(
+        `已生成 ${createdItems.length || data.added || 0} 个兑换码`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "生成兑换码失败";
       toast.error(message);
@@ -927,8 +1259,14 @@ export default function AccountsPage() {
     try {
       const data = await deleteRedeemCodes(codes);
       setRedeemCodes(data.items);
-      setSelectedRedeemCodeIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
-      setLastCreatedRedeemCodes((prev) => prev.filter((item) => data.items.some((current) => current.id === item.id)));
+      setSelectedRedeemCodeIds((prev) =>
+        prev.filter((id) => data.items.some((item) => item.id === id)),
+      );
+      setLastCreatedRedeemCodes((prev) =>
+        prev.filter((item) =>
+          data.items.some((current) => current.id === item.id),
+        ),
+      );
       toast.success(`已删除 ${data.removed ?? 0} 个兑换码`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除兑换码失败";
@@ -940,26 +1278,42 @@ export default function AccountsPage() {
 
   const toggleSelectAll = (checked: boolean) => {
     if (checked) {
-      setSelectedIds((prev) => Array.from(new Set([...prev, ...currentRows.map((item) => item.id)])));
+      setSelectedIds((prev) =>
+        Array.from(new Set([...prev, ...currentRows.map((item) => item.id)])),
+      );
       return;
     }
-    setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.id === id)));
+    setSelectedIds((prev) =>
+      prev.filter((id) => !currentRows.some((row) => row.id === id)),
+    );
   };
 
   const toggleSelectAllUserKeys = (checked: boolean) => {
     if (checked) {
-      setSelectedUserKeyIds((prev) => Array.from(new Set([...prev, ...currentUserKeys.map((item) => item.id)])));
+      setSelectedUserKeyIds((prev) =>
+        Array.from(
+          new Set([...prev, ...currentUserKeys.map((item) => item.id)]),
+        ),
+      );
       return;
     }
-    setSelectedUserKeyIds((prev) => prev.filter((id) => !currentUserKeys.some((item) => item.id === id)));
+    setSelectedUserKeyIds((prev) =>
+      prev.filter((id) => !currentUserKeys.some((item) => item.id === id)),
+    );
   };
 
   const toggleSelectAllRedeemCodes = (checked: boolean) => {
     if (checked) {
-      setSelectedRedeemCodeIds((prev) => Array.from(new Set([...prev, ...currentRedeemCodes.map((item) => item.id)])));
+      setSelectedRedeemCodeIds((prev) =>
+        Array.from(
+          new Set([...prev, ...currentRedeemCodes.map((item) => item.id)]),
+        ),
+      );
       return;
     }
-    setSelectedRedeemCodeIds((prev) => prev.filter((id) => !currentRedeemCodes.some((item) => item.id === id)));
+    setSelectedRedeemCodeIds((prev) =>
+      prev.filter((id) => !currentRedeemCodes.some((item) => item.id === id)),
+    );
   };
 
   const adminTabs: Array<{ value: AdminTab; label: string }> = [
@@ -969,11 +1323,13 @@ export default function AccountsPage() {
   ];
 
   return (
-    <div className="minimal-page-shell minimal-admin-shell space-y-5">
-      <section className="space-y-4">
+    <div className="minimal-page-shell minimal-admin-shell minimal-fade-soft space-y-5">
+      <section className="minimal-fade-up space-y-4">
         <div className="space-y-1">
           <div className="minimal-kicker">admin system</div>
-          <h1 className="minimal-heading mt-3 text-4xl sm:text-5xl">管理后台</h1>
+          <h1 className="minimal-heading mt-3 text-4xl sm:text-5xl">
+            管理后台
+          </h1>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -982,7 +1338,7 @@ export default function AccountsPage() {
               key={tab.value}
               variant={activeTab === tab.value ? "default" : "outline"}
               className={cn(
-                "h-10 rounded-xl px-4",
+                "minimal-surface-hover h-10 rounded-xl px-4",
                 activeTab === tab.value
                   ? "bg-stone-950 text-white hover:bg-stone-800"
                   : "border-stone-200 bg-white/80 text-stone-700 hover:bg-white",
@@ -1000,7 +1356,8 @@ export default function AccountsPage() {
           <DialogHeader className="gap-2">
             <DialogTitle>新增账户</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              支持批量上传标准 JSON 或 CPA 格式 JSON，也支持手动粘贴 Access Token。
+              支持批量上传标准 JSON 或 CPA 格式 JSON，也支持手动粘贴 Access
+              Token。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -1010,14 +1367,22 @@ export default function AccountsPage() {
               accept=".json,application/json"
               multiple
               className="hidden"
-              onChange={(event) => void handleUploadJsonAccounts(Array.from(event.target.files ?? []))}
+              onChange={(event) =>
+                void handleUploadJsonAccounts(
+                  Array.from(event.target.files ?? []),
+                )
+              }
             />
             <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50/70 p-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="space-y-1">
-                  <div className="text-sm font-medium text-stone-800">批量上传 JSON</div>
+                  <div className="text-sm font-medium text-stone-800">
+                    批量上传 JSON
+                  </div>
                   <p className="text-xs leading-5 text-stone-500">
-                    可多选文件。系统会自动识别 `access_token`、`accessToken`、`token` 等字段，然后直接调用新增接口。
+                    可多选文件。系统会自动识别
+                    `access_token`、`accessToken`、`token`
+                    等字段，然后直接调用新增接口。
                   </p>
                 </div>
                 <Button
@@ -1027,13 +1392,19 @@ export default function AccountsPage() {
                   onClick={() => uploadInputRef.current?.click()}
                   disabled={isSubmitting || isUploadingJson}
                 >
-                  {isUploadingJson ? <LoaderCircle className="size-4 animate-spin" /> : <Upload className="size-4" />}
+                  {isUploadingJson ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Upload className="size-4" />
+                  )}
                   上传 JSON
                 </Button>
               </div>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">Token 列表</label>
+              <label className="text-sm font-medium text-stone-700">
+                Token 列表
+              </label>
               <Textarea
                 placeholder="粘贴 Token，每行一个..."
                 value={newTokens}
@@ -1056,14 +1427,19 @@ export default function AccountsPage() {
               onClick={() => void handleAddAccounts()}
               disabled={isSubmitting}
             >
-              {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isSubmitting ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
               新增账户
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
+      <Dialog
+        open={Boolean(editingAccount)}
+        onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}
+      >
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>编辑账户</DialogTitle>
@@ -1074,7 +1450,12 @@ export default function AccountsPage() {
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">来源</label>
-              <Select value={editCategory} onValueChange={(value) => setEditCategory(value as AccountCategory)}>
+              <Select
+                value={editCategory}
+                onValueChange={(value) =>
+                  setEditCategory(value as AccountCategory)
+                }
+              >
                 <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
@@ -1091,7 +1472,10 @@ export default function AccountsPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">状态</label>
-              <Select value={editStatus} onValueChange={(value) => setEditStatus(value as AccountStatus)}>
+              <Select
+                value={editStatus}
+                onValueChange={(value) => setEditStatus(value as AccountStatus)}
+              >
                 <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
@@ -1108,7 +1492,10 @@ export default function AccountsPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">类型</label>
-              <Select value={editType} onValueChange={(value) => setEditType(value as AccountType)}>
+              <Select
+                value={editType}
+                onValueChange={(value) => setEditType(value as AccountType)}
+              >
                 <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
@@ -1146,18 +1533,25 @@ export default function AccountsPage() {
               onClick={() => void handleUpdateAccount()}
               disabled={isUpdating}
             >
-              {isUpdating ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isUpdating ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
               保存修改
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(editingUserKey)} onOpenChange={(open) => (!open ? setEditingUserKey(null) : null)}>
+      <Dialog
+        open={Boolean(editingUserKey)}
+        onOpenChange={(open) => (!open ? setEditingUserKey(null) : null)}
+      >
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>编辑用户 key</DialogTitle>
-            <DialogDescription className="text-sm leading-6">手动修改标签、状态、剩余次数和模型单价。</DialogDescription>
+            <DialogDescription className="text-sm leading-6">
+              手动修改标签、状态、剩余次数和模型单价。
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
@@ -1171,7 +1565,12 @@ export default function AccountsPage() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">状态</label>
-              <Select value={editUserKeyStatus} onValueChange={(value) => setEditUserKeyStatus(value as UserKeyStatus)}>
+              <Select
+                value={editUserKeyStatus}
+                onValueChange={(value) =>
+                  setEditUserKeyStatus(value as UserKeyStatus)
+                }
+              >
                 <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
                   <SelectValue />
                 </SelectTrigger>
@@ -1182,7 +1581,9 @@ export default function AccountsPage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">剩余次数</label>
+              <label className="text-sm font-medium text-stone-700">
+                剩余次数
+              </label>
               <Input
                 value={editUserKeyQuota}
                 onChange={(event) => setEditUserKeyQuota(event.target.value)}
@@ -1190,29 +1591,41 @@ export default function AccountsPage() {
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">积分余额</label>
+              <label className="text-sm font-medium text-stone-700">
+                积分余额
+              </label>
               <Input
                 value={editUserKeyLdcBalance}
-                onChange={(event) => setEditUserKeyLdcBalance(event.target.value)}
+                onChange={(event) =>
+                  setEditUserKeyLdcBalance(event.target.value)
+                }
                 className="h-11 rounded-xl border-stone-200 bg-white"
               />
             </div>
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">gpt-image-1</label>
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-1
+                </label>
                 <Input
                   value={editUserKeyPriceImage1}
-                  onChange={(event) => setEditUserKeyPriceImage1(event.target.value)}
+                  onChange={(event) =>
+                    setEditUserKeyPriceImage1(event.target.value)
+                  }
                   disabled
                   className="h-11 rounded-xl border-stone-200 bg-white"
                 />
                 <p className="text-xs text-stone-400">已下架，固定为 0。</p>
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">gpt-image-2 单价</label>
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2 单价
+                </label>
                 <Input
                   value={editUserKeyPriceImage2}
-                  onChange={(event) => setEditUserKeyPriceImage2(event.target.value)}
+                  onChange={(event) =>
+                    setEditUserKeyPriceImage2(event.target.value)
+                  }
                   className="h-11 rounded-xl border-stone-200 bg-white"
                 />
               </div>
@@ -1232,8 +1645,75 @@ export default function AccountsPage() {
               onClick={() => void handleUpdateUserKey()}
               disabled={isUpdatingUserKey}
             >
-              {isUpdatingUserKey ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isUpdatingUserKey ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
               保存修改
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={userKeyExport.open}
+        onOpenChange={(open) =>
+          setUserKeyExport((prev) => ({
+            ...prev,
+            open,
+          }))
+        }
+      >
+        <DialogContent showCloseButton={false} className="max-w-2xl rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>{userKeyExport.title}</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              共 {userKeyExport.keys.length} 个用户 key，一行一个。可直接下载 txt，也可复制全部。
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            readOnly
+            value={`${userKeyExport.keys.join("\n")}\n`}
+            className="min-h-72 resize-none rounded-xl border-stone-200 bg-stone-50 font-mono text-xs leading-5 text-stone-700"
+          />
+          <DialogFooter className="pt-2">
+            <Button
+              variant="secondary"
+              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              onClick={() => {
+                void navigator.clipboard.writeText(
+                  `${userKeyExport.keys.join("\n")}\n`,
+                );
+                toast.success("用户 key 已复制");
+              }}
+              disabled={userKeyExport.keys.length === 0}
+            >
+              <Copy className="size-4" />
+              复制全部
+            </Button>
+            <Button
+              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              onClick={() =>
+                downloadTextFile(
+                  `${userKeyExport.keys.join("\n")}\n`,
+                  `${userKeyExport.filenamePrefix}-${Date.now()}.txt`,
+                )
+              }
+              disabled={userKeyExport.keys.length === 0}
+            >
+              <Download className="size-4" />
+              下载 txt
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white px-5 text-stone-700 hover:bg-stone-100"
+              onClick={() =>
+                setUserKeyExport((prev) => ({
+                  ...prev,
+                  open: false,
+                }))
+              }
+            >
+              关闭
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1252,7 +1732,8 @@ export default function AccountsPage() {
           <DialogHeader className="gap-2">
             <DialogTitle>批量编辑用户 key</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              当前已选择 {selectedUserKeys.length} 个用户 key。留空的字段不会修改。
+              当前已选择 {selectedUserKeys.length} 个用户
+              key。留空的字段不会修改。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -1260,7 +1741,11 @@ export default function AccountsPage() {
               <label className="text-sm font-medium text-stone-700">状态</label>
               <Select
                 value={batchEditUserKeyStatus}
-                onValueChange={(value) => setBatchEditUserKeyStatus(value as "unchanged" | UserKeyStatus)}
+                onValueChange={(value) =>
+                  setBatchEditUserKeyStatus(
+                    value as "unchanged" | UserKeyStatus,
+                  )
+                }
               >
                 <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
                   <SelectValue />
@@ -1274,28 +1759,40 @@ export default function AccountsPage() {
             </div>
             <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">剩余次数</label>
+                <label className="text-sm font-medium text-stone-700">
+                  剩余次数
+                </label>
                 <Input
                   value={batchEditUserKeyQuota}
-                  onChange={(event) => setBatchEditUserKeyQuota(event.target.value)}
+                  onChange={(event) =>
+                    setBatchEditUserKeyQuota(event.target.value)
+                  }
                   placeholder="留空不改"
                   className="h-11 rounded-xl border-stone-200 bg-white"
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">积分余额</label>
+                <label className="text-sm font-medium text-stone-700">
+                  积分余额
+                </label>
                 <Input
                   value={batchEditUserKeyLdcBalance}
-                  onChange={(event) => setBatchEditUserKeyLdcBalance(event.target.value)}
+                  onChange={(event) =>
+                    setBatchEditUserKeyLdcBalance(event.target.value)
+                  }
                   placeholder="留空不改"
                   className="h-11 rounded-xl border-stone-200 bg-white"
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">gpt-image-2 单价</label>
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2 单价
+                </label>
                 <Input
                   value={batchEditUserKeyPriceImage2}
-                  onChange={(event) => setBatchEditUserKeyPriceImage2(event.target.value)}
+                  onChange={(event) =>
+                    setBatchEditUserKeyPriceImage2(event.target.value)
+                  }
                   placeholder="留空不改"
                   className="h-11 rounded-xl border-stone-200 bg-white"
                 />
@@ -1316,7 +1813,9 @@ export default function AccountsPage() {
               onClick={() => void handleBatchUpdateUserKeys()}
               disabled={isUpdatingUserKey || selectedUserKeys.length === 0}
             >
-              {isUpdatingUserKey ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isUpdatingUserKey ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
               保存批量修改
             </Button>
           </DialogFooter>
@@ -1325,253 +1824,1100 @@ export default function AccountsPage() {
 
       {activeTab === "accounts" ? (
         <>
-      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-            Account Pool
-          </div>
-          <h2 className="text-2xl font-semibold tracking-tight">号池管理</h2>
-        </div>
+          <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-1">
+              <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+                Account Pool
+              </div>
+              <h2 className="text-2xl font-semibold tracking-tight">
+                号池管理
+              </h2>
+            </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadAccounts()}
-            disabled={isLoading || isRefreshing || isSubmitting || isDeleting}
-          >
-            <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-            刷新
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
-            disabled={isLoading || isRefreshing || isSubmitting || isDeleting || accounts.length === 0}
-          >
-            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            一键刷新所有账号信息和额度
-          </Button>
-          <Button
-            className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
-            onClick={() => setOpen(true)}
-          >
-            <Plus className="size-4" />
-            新增
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => downloadTokens(accounts)}
-            disabled={accounts.length === 0}
-          >
-            <Download className="size-4" />
-            导出全部 Token
-          </Button>
-        </div>
-      </section>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+                onClick={() => void loadAccounts()}
+                disabled={
+                  isLoading || isRefreshing || isSubmitting || isDeleting
+                }
+              >
+                <RefreshCw
+                  className={cn("size-4", isLoading ? "animate-spin" : "")}
+                />
+                刷新
+              </Button>
+              <Button
+                variant="outline"
+                className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+                onClick={() =>
+                  void handleRefreshAccounts(
+                    accounts.map((item) => item.access_token),
+                  )
+                }
+                disabled={
+                  isLoading ||
+                  isRefreshing ||
+                  isSubmitting ||
+                  isDeleting ||
+                  accounts.length === 0
+                }
+              >
+                <RefreshCw
+                  className={cn("size-4", isRefreshing ? "animate-spin" : "")}
+                />
+                一键刷新所有账号信息和额度
+              </Button>
+              <Button
+                className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+                onClick={() => setOpen(true)}
+              >
+                <Plus className="size-4" />
+                新增
+              </Button>
+              <Button
+                variant="outline"
+                className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+                onClick={() => downloadTokens(accounts)}
+                disabled={accounts.length === 0}
+              >
+                <Download className="size-4" />
+                导出全部 Token
+              </Button>
+            </div>
+          </section>
 
-      <section className="space-y-3">
-        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-          {metricCards.map((item) => {
-            const Icon = item.icon;
-            const value = summary[item.key];
-            return (
-              <Card key={item.key} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-                <CardContent className="p-4">
-                  <div className="mb-4 flex items-start justify-between">
-                    <span className="text-xs font-medium text-stone-400">{item.label}</span>
-                    <Icon className="size-4 text-stone-400" />
+          <section className="minimal-fade-soft space-y-3 [animation-delay:120ms]">
+            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+              {metricCards.map((item, index) => {
+                const Icon = item.icon;
+                const value = summary[item.key];
+                return (
+                  <Card
+                    key={item.key}
+                    className={cn(
+                      "minimal-fade-soft minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm",
+                      index === 0
+                        ? "[animation-delay:80ms]"
+                        : index === 1
+                          ? "[animation-delay:120ms]"
+                          : index === 2
+                            ? "[animation-delay:160ms]"
+                            : index === 3
+                              ? "[animation-delay:200ms]"
+                              : index === 4
+                                ? "[animation-delay:240ms]"
+                                : "[animation-delay:280ms]",
+                    )}
+                  >
+                    <CardContent className="p-4">
+                      <div className="mb-4 flex items-start justify-between">
+                        <span className="text-xs font-medium text-stone-400">
+                          {item.label}
+                        </span>
+                        <Icon className="size-4 text-stone-400" />
+                      </div>
+                      <div
+                        className={cn(
+                          "text-[1.75rem] font-semibold tracking-tight",
+                          item.color,
+                        )}
+                      >
+                        <span
+                          className={
+                            typeof value === "number" ? "" : "text-[1.1rem]"
+                          }
+                        >
+                          {typeof value === "number"
+                            ? formatCompact(value)
+                            : value}
+                        </span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="minimal-fade-soft grid gap-4 xl:grid-cols-[minmax(0,1.8fr)_380px] [animation-delay:180ms]">
+            <div className="space-y-4">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-center gap-3">
+                <h2 className="text-lg font-semibold tracking-tight">
+                  账户列表
+                </h2>
+                <Badge
+                  variant="secondary"
+                  className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700"
+                >
+                  {filteredAccounts.length}
+                </Badge>
+              </div>
+
+              <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+                <div className="relative min-w-[260px]">
+                  <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+                  <Input
+                    value={query}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      setPage(1);
+                    }}
+                    placeholder="搜索邮箱"
+                    className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                  />
+                </div>
+                <Select
+                  value={categoryFilter}
+                  onValueChange={(value) => {
+                    setCategoryFilter(value as AccountCategory | "all");
+                    setPage(1);
+                  }}
+                >
+                  <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {accountCategoryOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={typeFilter}
+                  onValueChange={(value) => {
+                    setTypeFilter(value as AccountType | "all");
+                    setPage(1);
+                  }}
+                >
+                  <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {accountTypeOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={statusFilter}
+                  onValueChange={(value) => {
+                    setStatusFilter(value as AccountStatus | "all");
+                    setPage(1);
+                  }}
+                >
+                  <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {accountStatusOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {isLoading && accounts.length === 0 ? (
+              <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+                <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                    <LoaderCircle className="size-5 animate-spin" />
                   </div>
-                  <div className={cn("text-[1.75rem] font-semibold tracking-tight", item.color)}>
-                    <span className={typeof value === "number" ? "" : "text-[1.1rem]"}>
-                      {typeof value === "number" ? formatCompact(value) : value}
-                    </span>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-stone-700">
+                      正在加载账户
+                    </p>
+                    <p className="text-sm text-stone-500">
+                      从后端同步账号列表和状态。
+                    </p>
                   </div>
                 </CardContent>
               </Card>
-            );
-          })}
-        </div>
-      </section>
+            ) : null}
 
-      <section className="space-y-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
-            <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
-              {filteredAccounts.length}
-            </Badge>
-          </div>
+            <Card
+              className={cn(
+                "minimal-surface-hover overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
+                isLoading && accounts.length === 0 ? "hidden" : "",
+              )}
+            >
+              <CardContent className="space-y-0 p-0">
+                <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                      onClick={() => void handleRefreshAccounts(selectedTokens)}
+                      disabled={selectedTokens.length === 0 || isRefreshing}
+                    >
+                      {isRefreshing ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="size-4" />
+                      )}
+                      刷新选中账号信息和额度
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                      onClick={() => void handleDeleteTokens(abnormalTokens)}
+                      disabled={abnormalTokens.length === 0 || isDeleting}
+                    >
+                      {isDeleting ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-4" />
+                      )}
+                      移除异常账号
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                      onClick={() => void handleDeleteTokens(selectedTokens)}
+                      disabled={selectedTokens.length === 0 || isDeleting}
+                    >
+                      {isDeleting ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-4" />
+                      )}
+                      删除所选
+                    </Button>
+                    {selectedIds.length > 0 ? (
+                      <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                        已选择 {selectedIds.length} 项
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
 
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-            <div className="relative min-w-[260px]">
-              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
-              <Input
-                value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setPage(1);
-                }}
-                placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
-              />
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[920px] text-left">
+                    <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+                      <tr>
+                        <th className="w-12 px-4 py-3">
+                          <Checkbox
+                            checked={allCurrentSelected}
+                            onCheckedChange={(checked) =>
+                              toggleSelectAll(Boolean(checked))
+                            }
+                          />
+                        </th>
+                        <th className="w-56 px-4 py-3">token</th>
+                        <th className="w-24 px-4 py-3">来源</th>
+                        <th className="w-28 px-4 py-3">类型</th>
+                        <th className="w-24 px-4 py-3">状态</th>
+                        <th className="w-56 px-4 py-3">账号信息</th>
+                        <th className="w-24 px-4 py-3">额度</th>
+                        <th className="w-40 px-4 py-3">恢复时间</th>
+                        <th className="w-18 px-4 py-3">成功</th>
+                        <th className="w-18 px-4 py-3">失败</th>
+                        <th className="w-24 px-4 py-3">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentRows.map((account) => {
+                        const status = statusMeta[account.status];
+                        const StatusIcon = status.icon;
+
+                        return (
+                          <tr
+                            key={account.id}
+                            className="minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                          >
+                            <td className="px-4 py-3">
+                              <Checkbox
+                                checked={selectedIds.includes(account.id)}
+                                onCheckedChange={(checked) => {
+                                  setSelectedIds((prev) =>
+                                    checked
+                                      ? Array.from(
+                                          new Set([...prev, account.id]),
+                                        )
+                                      : prev.filter(
+                                          (item) => item !== account.id,
+                                        ),
+                                  );
+                                }}
+                              />
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-2">
+                                <span className="font-medium tracking-tight text-stone-700">
+                                  {maskToken(account.access_token)}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                                  onClick={() => {
+                                    void navigator.clipboard.writeText(
+                                      account.access_token,
+                                    );
+                                    toast.success("token 已复制");
+                                  }}
+                                >
+                                  <Copy className="size-4" />
+                                </button>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <Badge
+                                variant={
+                                  account.category === "捐赠"
+                                    ? "info"
+                                    : "secondary"
+                                }
+                                className="rounded-md"
+                              >
+                                {account.category}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3">
+                              <Badge
+                                variant="secondary"
+                                className="rounded-md bg-stone-100 text-stone-700"
+                              >
+                                {account.type}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3">
+                              <Badge
+                                variant={status.badge}
+                                className="inline-flex items-center gap-1 rounded-md px-2 py-1"
+                              >
+                                <StatusIcon className="size-3.5" />
+                                {account.status}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="text-xs leading-5 text-stone-500">
+                                {account.email ?? "—"}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <Badge variant="info" className="rounded-md">
+                                {formatQuota(account.quota)}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-3 text-xs leading-5 text-stone-500">
+                              {(() => {
+                                const restore = formatRestoreAt(
+                                  account.restoreAt,
+                                );
+                                return (
+                                  <div className="space-y-0.5">
+                                    {restore.relative ? (
+                                      <div className="font-medium text-stone-700">
+                                        {restore.relative}
+                                      </div>
+                                    ) : null}
+                                    <div>{restore.absolute}</div>
+                                  </div>
+                                );
+                              })()}
+                            </td>
+                            <td className="px-4 py-3 text-stone-500">
+                              {account.success}
+                            </td>
+                            <td className="px-4 py-3 text-stone-500">
+                              {account.fail}
+                            </td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-1 text-stone-400">
+                                <button
+                                  type="button"
+                                  className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                                  onClick={() => openEditDialog(account)}
+                                  disabled={isUpdating}
+                                >
+                                  <Pencil className="size-4" />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                                  onClick={() =>
+                                    void handleRefreshAccounts([
+                                      account.access_token,
+                                    ])
+                                  }
+                                  disabled={isRefreshing}
+                                >
+                                  <RefreshCw
+                                    className={cn(
+                                      "size-4",
+                                      isRefreshing ? "animate-spin" : "",
+                                    )}
+                                  />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
+                                  onClick={() =>
+                                    void handleDeleteTokens([
+                                      account.access_token,
+                                    ])
+                                  }
+                                  disabled={isDeleting}
+                                >
+                                  <Trash2 className="size-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+
+                  {!isLoading && currentRows.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                      <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                        <Search className="size-5" />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-sm font-medium text-stone-700">
+                          没有匹配的账户
+                        </p>
+                        <p className="text-sm text-stone-500">
+                          调整筛选条件或搜索关键字后重试。
+                        </p>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="border-t border-stone-100 px-4 py-4">
+                  <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
+                    <div className="shrink-0 text-sm text-stone-500">
+                      显示第{" "}
+                      {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
+                      {Math.min(
+                        startIndex + Number(pageSize),
+                        filteredAccounts.length,
+                      )}{" "}
+                      条，共 {filteredAccounts.length} 条
+                    </div>
+
+                    <span className="shrink-0 text-sm leading-none text-stone-500">
+                      {safePage} / {pageCount} 页
+                    </span>
+                    <Select
+                      value={pageSize}
+                      onValueChange={(value) => {
+                        setPageSize(value);
+                        setPage(1);
+                      }}
+                    >
+                      <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="10">10 / 页</SelectItem>
+                        <SelectItem value="20">20 / 页</SelectItem>
+                        <SelectItem value="50">50 / 页</SelectItem>
+                        <SelectItem value="100">100 / 页</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
+                      disabled={safePage <= 1}
+                      onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                    >
+                      <ChevronLeft className="size-4" />
+                    </Button>
+                    {paginationItems.map((item, index) =>
+                      item === "..." ? (
+                        <span
+                          key={`ellipsis-${index}`}
+                          className="px-1 text-sm text-stone-400"
+                        >
+                          ...
+                        </span>
+                      ) : (
+                        <Button
+                          key={item}
+                          variant={item === safePage ? "default" : "outline"}
+                          className={cn(
+                            "h-10 min-w-10 shrink-0 rounded-lg px-3",
+                            item === safePage
+                              ? "bg-stone-950 text-white hover:bg-stone-800"
+                              : "border-stone-200 bg-white text-stone-700",
+                          )}
+                          onClick={() => setPage(item)}
+                        >
+                          {item}
+                        </Button>
+                      ),
+                    )}
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
+                      disabled={safePage >= pageCount}
+                      onClick={() =>
+                        setPage((prev) => Math.min(pageCount, prev + 1))
+                      }
+                    >
+                      <ChevronRight className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
             </div>
-            <Select
-              value={categoryFilter}
-              onValueChange={(value) => {
-                setCategoryFilter(value as AccountCategory | "all");
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountCategoryOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={typeFilter}
-              onValueChange={(value) => {
-                setTypeFilter(value as AccountType | "all");
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountTypeOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={statusFilter}
-              onValueChange={(value) => {
-                setStatusFilter(value as AccountStatus | "all");
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountStatusOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
 
-        {isLoading && accounts.length === 0 ? (
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-            <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-              <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                <LoaderCircle className="size-5 animate-spin" />
+            <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <CardContent className="space-y-5 p-5">
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+                    Proxy
+                  </div>
+                  <h3 className="text-xl font-semibold tracking-tight">
+                    代理管理
+                  </h3>
+                  <p className="text-sm leading-6 text-stone-500">
+                    所有账号刷新和生图请求都会优先走当前启用代理。没有启用代理时自动直连。
+                  </p>
+                </div>
+
+                <div className="rounded-2xl border border-stone-200 bg-stone-50/80 p-4">
+                  <div className="text-xs font-medium tracking-[0.18em] text-stone-400 uppercase">
+                    当前出口
+                  </div>
+                  <div className="mt-2 break-all text-sm font-medium text-stone-700">
+                    {activeProxyUrl || "直连"}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-stone-700">
+                      名称
+                    </label>
+                    <Input
+                      value={proxyName}
+                      onChange={(event) => setProxyName(event.target.value)}
+                      placeholder="例如：美国 01"
+                      className="h-11 rounded-xl border-stone-200 bg-white"
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700">
+                        协议
+                      </label>
+                      <Select
+                        value={proxyProtocol}
+                        onValueChange={(value) =>
+                          setProxyProtocol(value as ProxyProtocol)
+                        }
+                      >
+                        <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {proxyProtocolOptions.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700">
+                        端口
+                      </label>
+                      <Input
+                        value={proxyPort}
+                        onChange={(event) => setProxyPort(event.target.value)}
+                        placeholder="1080"
+                        className="h-11 rounded-xl border-stone-200 bg-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-stone-700">
+                      地址
+                    </label>
+                    <Input
+                      value={proxyHost}
+                      onChange={(event) => setProxyHost(event.target.value)}
+                      placeholder="127.0.0.1"
+                      className="h-11 rounded-xl border-stone-200 bg-white"
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700">
+                        用户名
+                      </label>
+                      <Input
+                        value={proxyUsername}
+                        onChange={(event) => setProxyUsername(event.target.value)}
+                        placeholder="可留空"
+                        className="h-11 rounded-xl border-stone-200 bg-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-stone-700">
+                        密码
+                      </label>
+                      <Input
+                        value={proxyPassword}
+                        onChange={(event) => setProxyPassword(event.target.value)}
+                        placeholder="可留空"
+                        className="h-11 rounded-xl border-stone-200 bg-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+                      onClick={() => void handleSaveProxy()}
+                      disabled={isSubmitting}
+                    >
+                      {isSubmitting ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : null}
+                      {editingProxyId ? "保存并启用" : "新增并启用"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-100"
+                      onClick={resetProxyEditor}
+                      disabled={isSubmitting}
+                    >
+                      清空
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium text-stone-700">
+                      已保存节点
+                    </div>
+                    <Badge
+                      variant="secondary"
+                      className="rounded-lg bg-stone-100 text-stone-700"
+                    >
+                      {proxies.length}
+                    </Badge>
+                  </div>
+                  <div className="space-y-3">
+                    {proxies.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed border-stone-200 px-4 py-6 text-sm text-stone-500">
+                        当前没有保存的代理，服务会走直连。
+                      </div>
+                    ) : (
+                      proxies.map((item) => (
+                        <div
+                          key={item.id}
+                          className="rounded-2xl border border-stone-200 bg-white p-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <div className="text-sm font-medium text-stone-800">
+                                  {item.name}
+                                </div>
+                                {item.enabled ? (
+                                  <Badge variant="success" className="rounded-md">
+                                    已启用
+                                  </Badge>
+                                ) : null}
+                              </div>
+                              <div className="text-xs text-stone-500">
+                                {item.protocol.toUpperCase()} · {item.host}:{item.port}
+                              </div>
+                              <div className="text-xs break-all text-stone-400">
+                                {item.url || "—"}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {!item.enabled ? (
+                                <button
+                                  type="button"
+                                  className="rounded-lg p-2 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                                  onClick={() => void handleEnableProxy(item)}
+                                  disabled={isSubmitting}
+                                >
+                                  <CheckCircle2 className="size-4" />
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                className="rounded-lg p-2 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                                onClick={() => handleEditProxy(item)}
+                                disabled={isSubmitting}
+                              >
+                                <Pencil className="size-4" />
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500"
+                                onClick={() => void handleDeleteProxy(item.id)}
+                                disabled={isSubmitting}
+                              >
+                                <Trash2 className="size-4" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+        </>
+      ) : null}
+
+      {activeTab === "userKeys" ? (
+        <section className="minimal-fade-soft space-y-4 [animation-delay:180ms]">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
+                <KeyRound className="size-4" />
               </div>
-              <div className="space-y-1">
-                <p className="text-sm font-medium text-stone-700">正在加载账户</p>
-                <p className="text-sm text-stone-500">从后端同步账号列表和状态。</p>
+              <div>
+                <h2 className="text-lg font-semibold tracking-tight">
+                  用户 Key
+                </h2>
+                <p className="text-sm text-stone-500">
+                  给普通使用方单独分配次数，并限制管理权限。
+                </p>
+              </div>
+            </div>
+
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+              onClick={() => void loadUserKeys()}
+              disabled={
+                isLoadingUserKeys ||
+                isSubmittingUserKeys ||
+                isDeletingUserKeys ||
+                isUpdatingUserKey
+              }
+            >
+              <RefreshCw
+                className={cn(
+                  "size-4",
+                  isLoadingUserKeys ? "animate-spin" : "",
+                )}
+              />
+              刷新用户 key
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+              onClick={() =>
+                openUserKeyExportDialog(
+                  lastCreatedUserKeys,
+                  "本次生成的用户 key",
+                  "user-keys-latest",
+                )
+              }
+              disabled={lastCreatedUserKeys.length === 0}
+            >
+              <Download className="size-4" />
+              下载本次 txt
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+              onClick={() =>
+                openUserKeyExportDialog(
+                  selectedUserKeys,
+                  "所选用户 key",
+                  "user-keys-selected",
+                  true,
+                )
+              }
+              disabled={selectedUserKeys.length === 0}
+            >
+              <Download className="size-4" />
+              下载所选
+            </Button>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <Card className="minimal-fade-soft minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <CardContent className="space-y-1 p-4">
+                <div className="text-xs text-stone-400">用户 key 总数</div>
+                <div className="text-2xl font-semibold tracking-tight text-stone-900">
+                  {userKeySummary.total}
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="minimal-fade-soft minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <CardContent className="space-y-1 p-4">
+                <div className="text-xs text-stone-400">启用中</div>
+                <div className="text-2xl font-semibold tracking-tight text-emerald-600">
+                  {userKeySummary.enabled}
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="minimal-fade-soft minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <CardContent className="space-y-1 p-4">
+                <div className="text-xs text-stone-400">停用中</div>
+                <div className="text-2xl font-semibold tracking-tight text-stone-500">
+                  {userKeySummary.disabled}
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="minimal-fade-soft minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <CardContent className="space-y-1 p-4">
+                <div className="text-xs text-stone-400">总剩余次数</div>
+                <div className="text-2xl font-semibold tracking-tight text-blue-500">
+                  {userKeySummary.quota}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className="minimal-fade-soft minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_140px_140px] xl:grid-cols-[minmax(0,1fr)_140px_140px_140px_160px_200px]">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  前缀
+                </label>
+                <Input
+                  value={newUserKeyPrefix}
+                  onChange={(event) => setNewUserKeyPrefix(event.target.value)}
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                  placeholder="uk"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  数量
+                </label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={newUserKeyCount}
+                  onChange={(event) => setNewUserKeyCount(event.target.value)}
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  初始次数
+                </label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={newUserKeyQuota}
+                  onChange={(event) => setNewUserKeyQuota(event.target.value)}
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-1
+                </label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={newUserKeyPriceImage1}
+                  onChange={(event) =>
+                    setNewUserKeyPriceImage1(event.target.value)
+                  }
+                  disabled
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+                <p className="text-xs text-stone-400">已下架，固定为 0。</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2 单价
+                </label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={newUserKeyPriceImage2}
+                  onChange={(event) =>
+                    setNewUserKeyPriceImage2(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  标签前缀
+                </label>
+                <Input
+                  value={newUserKeyLabelPrefix}
+                  onChange={(event) =>
+                    setNewUserKeyLabelPrefix(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                  placeholder="例如 渠道A-"
+                />
+              </div>
+              <div className="flex items-end">
+                <Button
+                  className="h-11 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+                  onClick={() => void handleCreateUserKeys()}
+                  disabled={isSubmittingUserKeys}
+                >
+                  {isSubmittingUserKeys ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Plus className="size-4" />
+                  )}
+                  批量生成
+                </Button>
               </div>
             </CardContent>
           </Card>
-        ) : null}
 
-        <Card
-          className={cn(
-            "overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
-            isLoading && accounts.length === 0 ? "hidden" : "",
-          )}
-        >
-          <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                  onClick={() => void handleRefreshAccounts(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isRefreshing}
-                >
-                  {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-                  刷新选中账号信息和额度
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                  onClick={() => void handleDeleteTokens(abnormalTokens)}
-                  disabled={abnormalTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  移除异常账号
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                  onClick={() => void handleDeleteTokens(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isDeleting}
-                >
-                  {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  删除所选
-                </Button>
-                {selectedIds.length > 0 ? (
-                  <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
-                    已选择 {selectedIds.length} 项
-                  </span>
-                ) : null}
+          <Card className="minimal-surface-hover overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-0 p-0">
+              <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="mr-1 text-lg font-semibold tracking-tight">
+                    Key 列表
+                  </h3>
+                  <Badge
+                    variant="secondary"
+                    className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700"
+                  >
+                    {filteredUserKeys.length}
+                  </Badge>
+                  {selectedUserKeyIds.length > 0 ? (
+                    <>
+                      <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                        已选择 {selectedUserKeyIds.length} 项
+                      </span>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
+                        onClick={() =>
+                          openUserKeyExportDialog(
+                            selectedUserKeys,
+                            "所选用户 key",
+                            "user-keys-selected",
+                            true,
+                          )
+                        }
+                      >
+                        <Download className="size-4" />
+                        下载所选
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
+                        onClick={() => setBulkEditUserKeysOpen(true)}
+                        disabled={isUpdatingUserKey}
+                      >
+                        <Pencil className="size-4" />
+                        批量编辑
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                        onClick={() =>
+                          void handleDeleteUserKeys(
+                            selectedUserKeys.map((item) => item.key),
+                          )
+                        }
+                        disabled={isDeletingUserKeys}
+                      >
+                        {isDeletingUserKeys ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-4" />
+                        )}
+                        批量删除
+                      </Button>
+                    </>
+                  ) : null}
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <Button
+                    variant="outline"
+                    className="h-10 rounded-xl border-stone-200 bg-white/85 px-4 text-stone-700 hover:bg-white"
+                    onClick={() =>
+                      openUserKeyExportDialog(
+                        selectedUserKeys,
+                        "所选用户 key",
+                        "user-keys-selected",
+                        true,
+                      )
+                    }
+                    disabled={selectedUserKeys.length === 0}
+                  >
+                    <Download className="size-4" />
+                    下载所选
+                  </Button>
+                  <div className="relative min-w-[260px]">
+                    <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+                    <Input
+                      value={userKeyQuery}
+                      onChange={(event) => {
+                        setUserKeyQuery(event.target.value);
+                        setUserKeyPage(1);
+                      }}
+                      placeholder="搜索 key 或标签"
+                      className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                    />
+                  </div>
+                </div>
               </div>
-            </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
-                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
-                  <tr>
-                    <th className="w-12 px-4 py-3">
-                      <Checkbox
-                        checked={allCurrentSelected}
-                        onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))}
-                      />
-                    </th>
-                    <th className="w-56 px-4 py-3">token</th>
-                    <th className="w-24 px-4 py-3">来源</th>
-                    <th className="w-28 px-4 py-3">类型</th>
-                    <th className="w-24 px-4 py-3">状态</th>
-                    <th className="w-56 px-4 py-3">账号信息</th>
-                    <th className="w-24 px-4 py-3">额度</th>
-                    <th className="w-40 px-4 py-3">恢复时间</th>
-                    <th className="w-18 px-4 py-3">成功</th>
-                    <th className="w-18 px-4 py-3">失败</th>
-                    <th className="w-24 px-4 py-3">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentRows.map((account) => {
-                    const status = statusMeta[account.status];
-                    const StatusIcon = status.icon;
-
-                    return (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[920px] text-left">
+                  <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+                    <tr>
+                      <th className="w-12 px-4 py-3">
+                        <Checkbox
+                          checked={allCurrentUserKeysSelected}
+                          onCheckedChange={(checked) =>
+                            toggleSelectAllUserKeys(Boolean(checked))
+                          }
+                        />
+                      </th>
+                      <th className="w-56 px-4 py-3">key</th>
+                      <th className="w-36 px-4 py-3">标签</th>
+                      <th className="w-24 px-4 py-3">状态</th>
+                      <th className="w-24 px-4 py-3">次数</th>
+                      <th className="w-52 px-4 py-3">单价</th>
+                      <th className="w-40 px-4 py-3">创建时间</th>
+                      <th className="w-40 px-4 py-3">最近使用</th>
+                      <th className="w-28 px-4 py-3">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentUserKeys.map((item) => (
                       <tr
-                        key={account.id}
-                        className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                        key={item.id}
+                        className="minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
                       >
                         <td className="px-4 py-3">
                           <Checkbox
-                            checked={selectedIds.includes(account.id)}
+                            checked={selectedUserKeyIds.includes(item.id)}
                             onCheckedChange={(checked) => {
-                              setSelectedIds((prev) =>
+                              setSelectedUserKeyIds((prev) =>
                                 checked
-                                  ? Array.from(new Set([...prev, account.id]))
-                                  : prev.filter((item) => item !== account.id),
+                                  ? Array.from(new Set([...prev, item.id]))
+                                  : prev.filter((id) => id !== item.id),
                               );
                             }}
                           />
@@ -1579,14 +2925,412 @@ export default function AccountsPage() {
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <span className="font-medium tracking-tight text-stone-700">
-                              {maskToken(account.access_token)}
+                              {maskToken(item.key, 3, 3)}
                             </span>
                             <button
                               type="button"
                               className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
                               onClick={() => {
-                                void navigator.clipboard.writeText(account.access_token);
-                                toast.success("token 已复制");
+                                void navigator.clipboard.writeText(item.key);
+                                toast.success("用户 key 已复制");
+                              }}
+                            >
+                              <Copy className="size-4" />
+                            </button>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-stone-500">
+                          {item.label || "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge
+                            variant={
+                              item.status === "启用" ? "success" : "secondary"
+                            }
+                            className="rounded-md"
+                          >
+                            {item.status}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge variant="info" className="rounded-md">
+                            {formatQuota(item.quota)}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
+                          {formatUserKeyPricing(item.pricing)}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-stone-500">
+                          {formatDateTime(item.createdAt)}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-stone-500">
+                          {formatDateTime(item.lastUsedAt)}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1 text-stone-400">
+                            <button
+                              type="button"
+                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                              onClick={() => openUserKeyDialog(item)}
+                              disabled={isUpdatingUserKey}
+                            >
+                              <Pencil className="size-4" />
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
+                              onClick={() => void handleDeleteUserKey(item.key)}
+                              disabled={isDeletingUserKeys}
+                            >
+                              <Trash2 className="size-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                {!isLoadingUserKeys && filteredUserKeys.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                    <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                      <KeyRound className="size-5" />
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium text-stone-700">
+                        还没有用户 key
+                      </p>
+                      <p className="text-sm text-stone-500">
+                        先设好前缀、数量和初始次数，再批量生成。
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              <div className="border-t border-stone-100 px-4 py-4">
+                <div className="flex items-center justify-between gap-3 text-sm text-stone-500">
+                  <div>
+                    显示第{" "}
+                    {filteredUserKeys.length === 0 ? 0 : userKeyStartIndex + 1}{" "}
+                    -{" "}
+                    {Math.min(
+                      userKeyStartIndex + ADMIN_SECONDARY_PAGE_SIZE,
+                      filteredUserKeys.length,
+                    )}{" "}
+                    条，共 {filteredUserKeys.length} 条，每页{" "}
+                    {ADMIN_SECONDARY_PAGE_SIZE} 条
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span>
+                      {safeUserKeyPage} / {userKeyPageCount} 页
+                    </span>
+                    <Button
+                      variant="outline"
+                      className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                      disabled={safeUserKeyPage <= 1}
+                      onClick={() =>
+                        setUserKeyPage((prev) => Math.max(1, prev - 1))
+                      }
+                    >
+                      <ChevronLeft className="size-4" />
+                      上一页
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                      disabled={safeUserKeyPage >= userKeyPageCount}
+                      onClick={() =>
+                        setUserKeyPage((prev) =>
+                          Math.min(userKeyPageCount, prev + 1),
+                        )
+                      }
+                    >
+                      下一页
+                      <ChevronRight className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+      ) : null}
+
+      {activeTab === "redeemCodes" ? (
+        <section className="minimal-fade-soft space-y-4 [animation-delay:180ms]">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
+                <Ticket className="size-4" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold tracking-tight">兑换码</h2>
+                <p className="text-sm text-stone-500">
+                  兑换后会给当前用户 key 增加指定额度。
+                </p>
+              </div>
+            </div>
+
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+              onClick={() => void loadRedeemCodes()}
+              disabled={
+                isLoadingRedeemCodes ||
+                isSubmittingRedeemCodes ||
+                isDeletingRedeemCodes
+              }
+            >
+              <RefreshCw
+                className={cn(
+                  "size-4",
+                  isLoadingRedeemCodes ? "animate-spin" : "",
+                )}
+              />
+              刷新兑换码
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+              onClick={() =>
+                downloadRedeemCodes(
+                  lastCreatedRedeemCodes,
+                  "redeem-codes-latest",
+                )
+              }
+              disabled={lastCreatedRedeemCodes.length === 0}
+            >
+              <Download className="size-4" />
+              下载本次 txt
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+              onClick={() =>
+                downloadRedeemCodes(
+                  selectedRedeemCodes,
+                  "redeem-codes-selected",
+                )
+              }
+              disabled={selectedRedeemCodes.length === 0}
+            >
+              <Download className="size-4" />
+              下载所选
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+              onClick={() =>
+                void handleDeleteRedeemCodes(
+                  usedRedeemCodes.map((item) => item.code),
+                )
+              }
+              disabled={usedRedeemCodes.length === 0 || isDeletingRedeemCodes}
+            >
+              {isDeletingRedeemCodes ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Trash2 className="size-4" />
+              )}
+              删除已使用
+            </Button>
+          </div>
+
+          <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="grid gap-4 p-4 lg:grid-cols-[140px_140px_180px_minmax(0,1fr)_auto]">
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  前缀
+                </label>
+                <Input
+                  value={newRedeemCodePrefix}
+                  onChange={(event) =>
+                    setNewRedeemCodePrefix(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                  placeholder="RDM"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  数量
+                </label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="500"
+                  value={newRedeemCodeCount}
+                  onChange={(event) =>
+                    setNewRedeemCodeCount(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  兑换额度
+                </label>
+                <Select
+                  value={newRedeemCodeTargetQuota}
+                  onValueChange={(value) =>
+                    setNewRedeemCodeTargetQuota(value as "20" | "100")
+                  }
+                >
+                  <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="20">20 额度</SelectItem>
+                    <SelectItem value="100">100 额度</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  备注
+                </label>
+                <Input
+                  value={newRedeemCodeLabel}
+                  onChange={(event) =>
+                    setNewRedeemCodeLabel(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                  placeholder="可留空"
+                />
+              </div>
+              <div className="flex items-end">
+                <Button
+                  className="h-11 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+                  onClick={() => void handleCreateRedeemCodes()}
+                  disabled={isSubmittingRedeemCodes}
+                >
+                  {isSubmittingRedeemCodes ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Plus className="size-4" />
+                  )}
+                  生成兑换码
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="minimal-surface-hover overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <CardContent className="space-y-0 p-0">
+              <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-lg font-semibold tracking-tight">
+                    兑换码列表
+                  </h3>
+                  <Badge
+                    variant="secondary"
+                    className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700"
+                  >
+                    {filteredRedeemCodes.length}
+                  </Badge>
+                  {selectedRedeemCodeIds.length > 0 ? (
+                    <>
+                      <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                        已选择 {selectedRedeemCodeIds.length} 项
+                      </span>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
+                        onClick={() =>
+                          downloadRedeemCodes(
+                            selectedRedeemCodes,
+                            "redeem-codes-selected",
+                          )
+                        }
+                      >
+                        <Download className="size-4" />
+                        下载所选
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                        onClick={() =>
+                          void handleDeleteRedeemCodes(
+                            selectedRedeemCodes.map((item) => item.code),
+                          )
+                        }
+                        disabled={isDeletingRedeemCodes}
+                      >
+                        {isDeletingRedeemCodes ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-4" />
+                        )}
+                        批量删除
+                      </Button>
+                    </>
+                  ) : null}
+                </div>
+                <div className="relative min-w-[260px]">
+                  <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+                  <Input
+                    value={redeemCodeQuery}
+                    onChange={(event) => {
+                      setRedeemCodeQuery(event.target.value);
+                      setRedeemCodePage(1);
+                    }}
+                    placeholder="搜索兑换码或备注"
+                    className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                  />
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[920px] text-left">
+                  <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+                    <tr>
+                      <th className="w-12 px-4 py-3">
+                        <Checkbox
+                          checked={allCurrentRedeemCodesSelected}
+                          onCheckedChange={(checked) =>
+                            toggleSelectAllRedeemCodes(Boolean(checked))
+                          }
+                        />
+                      </th>
+                      <th className="w-56 px-4 py-3">兑换码</th>
+                      <th className="w-24 px-4 py-3">状态</th>
+                      <th className="w-24 px-4 py-3">增加额度</th>
+                      <th className="w-40 px-4 py-3">备注</th>
+                      <th className="w-40 px-4 py-3">创建时间</th>
+                      <th className="w-40 px-4 py-3">使用时间</th>
+                      <th className="w-40 px-4 py-3">使用 key</th>
+                      <th className="w-20 px-4 py-3">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {currentRedeemCodes.map((item) => (
+                      <tr
+                        key={item.id}
+                        className="minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                      >
+                        <td className="px-4 py-3">
+                          <Checkbox
+                            checked={selectedRedeemCodeIds.includes(item.id)}
+                            onCheckedChange={(checked) => {
+                              setSelectedRedeemCodeIds((prev) =>
+                                checked
+                                  ? Array.from(new Set([...prev, item.id]))
+                                  : prev.filter((id) => id !== item.id),
+                              );
+                            }}
+                          />
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium tracking-tight text-stone-700">
+                              {item.code}
+                            </span>
+                            <button
+                              type="button"
+                              className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                              onClick={() => {
+                                void navigator.clipboard.writeText(item.code);
+                                toast.success("兑换码已复制");
                               }}
                             >
                               <Copy className="size-4" />
@@ -1595,773 +3339,115 @@ export default function AccountsPage() {
                         </td>
                         <td className="px-4 py-3">
                           <Badge
-                            variant={account.category === "捐赠" ? "info" : "secondary"}
+                            variant={
+                              item.status === "未使用" ? "success" : "secondary"
+                            }
                             className="rounded-md"
                           >
-                            {account.category}
+                            {item.status}
                           </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
-                            {account.type}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Badge
-                            variant={status.badge}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1"
-                          >
-                            <StatusIcon className="size-3.5" />
-                            {account.status}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="info" className="rounded-md">
-                            {formatQuota(account.quota)}
+                            {formatQuota(item.targetQuota)}
                           </Badge>
                         </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                          {(() => {
-                            const restore = formatRestoreAt(account.restoreAt);
-                            return (
-                              <div className="space-y-0.5">
-                                {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}
-                                <div>{restore.absolute}</div>
-                              </div>
-                            );
-                          })()}
+                        <td className="px-4 py-3 text-stone-500">
+                          {item.label || "—"}
                         </td>
-                        <td className="px-4 py-3 text-stone-500">{account.success}</td>
-                        <td className="px-4 py-3 text-stone-500">{account.fail}</td>
+                        <td className="px-4 py-3 text-xs text-stone-500">
+                          {formatDateTime(item.createdAt)}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-stone-500">
+                          {formatDateTime(item.usedAt)}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-stone-500">
+                          {item.usedByKey
+                            ? maskToken(item.usedByKey, 3, 3)
+                            : "—"}
+                        </td>
                         <td className="px-4 py-3">
-                          <div className="flex items-center gap-1 text-stone-400">
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => openEditDialog(account)}
-                              disabled={isUpdating}
-                            >
-                              <Pencil className="size-4" />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => void handleRefreshAccounts([account.access_token])}
-                              disabled={isRefreshing}
-                            >
-                              <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                              onClick={() => void handleDeleteTokens([account.access_token])}
-                              disabled={isDeleting}
-                            >
-                              <Trash2 className="size-4" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-
-              {!isLoading && currentRows.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                    <Search className="size-5" />
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-stone-700">没有匹配的账户</p>
-                    <p className="text-sm text-stone-500">调整筛选条件或搜索关键字后重试。</p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="border-t border-stone-100 px-4 py-4">
-              <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
-                <div className="shrink-0 text-sm text-stone-500">
-                显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                {Math.min(startIndex + Number(pageSize), filteredAccounts.length)} 条，共{" "}
-                {filteredAccounts.length} 条
-                </div>
-
-                <span className="shrink-0 text-sm leading-none text-stone-500">
-                  {safePage} / {pageCount} 页
-                </span>
-                <Select
-                  value={pageSize}
-                  onValueChange={(value) => {
-                    setPageSize(value);
-                    setPage(1);
-                  }}
-                >
-                  <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="10">10 / 页</SelectItem>
-                    <SelectItem value="20">20 / 页</SelectItem>
-                    <SelectItem value="50">50 / 页</SelectItem>
-                    <SelectItem value="100">100 / 页</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                  disabled={safePage <= 1}
-                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                {paginationItems.map((item, index) =>
-                  item === "..." ? (
-                    <span key={`ellipsis-${index}`} className="px-1 text-sm text-stone-400">
-                      ...
-                    </span>
-                  ) : (
-                    <Button
-                      key={item}
-                      variant={item === safePage ? "default" : "outline"}
-                      className={cn(
-                        "h-10 min-w-10 shrink-0 rounded-lg px-3",
-                        item === safePage
-                          ? "bg-stone-950 text-white hover:bg-stone-800"
-                          : "border-stone-200 bg-white text-stone-700",
-                      )}
-                      onClick={() => setPage(item)}
-                    >
-                      {item}
-                    </Button>
-                  ),
-                )}
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                  disabled={safePage >= pageCount}
-                  onClick={() => setPage((prev) => Math.min(pageCount, prev + 1))}
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-        </>
-      ) : null}
-
-      {activeTab === "userKeys" ? (
-      <section className="space-y-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
-              <KeyRound className="size-4" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold tracking-tight">用户 Key</h2>
-              <p className="text-sm text-stone-500">给普通使用方单独分配次数，并限制管理权限。</p>
-            </div>
-          </div>
-
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadUserKeys()}
-            disabled={isLoadingUserKeys || isSubmittingUserKeys || isDeletingUserKeys || isUpdatingUserKey}
-          >
-            <RefreshCw className={cn("size-4", isLoadingUserKeys ? "animate-spin" : "")} />
-            刷新用户 key
-          </Button>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-            <CardContent className="space-y-1 p-4">
-              <div className="text-xs text-stone-400">用户 key 总数</div>
-              <div className="text-2xl font-semibold tracking-tight text-stone-900">{userKeySummary.total}</div>
-            </CardContent>
-          </Card>
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-            <CardContent className="space-y-1 p-4">
-              <div className="text-xs text-stone-400">启用中</div>
-              <div className="text-2xl font-semibold tracking-tight text-emerald-600">{userKeySummary.enabled}</div>
-            </CardContent>
-          </Card>
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-            <CardContent className="space-y-1 p-4">
-              <div className="text-xs text-stone-400">停用中</div>
-              <div className="text-2xl font-semibold tracking-tight text-stone-500">{userKeySummary.disabled}</div>
-            </CardContent>
-          </Card>
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-            <CardContent className="space-y-1 p-4">
-              <div className="text-xs text-stone-400">总剩余次数</div>
-              <div className="text-2xl font-semibold tracking-tight text-blue-500">{userKeySummary.quota}</div>
-            </CardContent>
-          </Card>
-        </div>
-
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_140px_140px] xl:grid-cols-[minmax(0,1fr)_140px_140px_140px_160px_200px]">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">前缀</label>
-              <Input
-                value={newUserKeyPrefix}
-                onChange={(event) => setNewUserKeyPrefix(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-                placeholder="uk"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">数量</label>
-              <Input
-                type="number"
-                min="1"
-                max="100"
-                value={newUserKeyCount}
-                onChange={(event) => setNewUserKeyCount(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">初始次数</label>
-              <Input
-                type="number"
-                min="0"
-                value={newUserKeyQuota}
-                onChange={(event) => setNewUserKeyQuota(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">gpt-image-1</label>
-              <Input
-                type="number"
-                min="0"
-                value={newUserKeyPriceImage1}
-                onChange={(event) => setNewUserKeyPriceImage1(event.target.value)}
-                disabled
-                className="h-11 rounded-xl border-stone-200 bg-white"
-              />
-              <p className="text-xs text-stone-400">已下架，固定为 0。</p>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">gpt-image-2 单价</label>
-              <Input
-                type="number"
-                min="0"
-                value={newUserKeyPriceImage2}
-                onChange={(event) => setNewUserKeyPriceImage2(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">标签前缀</label>
-              <Input
-                value={newUserKeyLabelPrefix}
-                onChange={(event) => setNewUserKeyLabelPrefix(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-                placeholder="例如 渠道A-"
-              />
-            </div>
-            <div className="flex items-end">
-              <Button
-                className="h-11 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
-                onClick={() => void handleCreateUserKeys()}
-                disabled={isSubmittingUserKeys}
-              >
-                {isSubmittingUserKeys ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                批量生成
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="mr-1 text-lg font-semibold tracking-tight">Key 列表</h3>
-                <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
-                  {filteredUserKeys.length}
-                </Badge>
-                {selectedUserKeyIds.length > 0 ? (
-                  <>
-                    <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
-                      已选择 {selectedUserKeyIds.length} 项
-                    </span>
-                    <Button
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
-                      onClick={() => setBulkEditUserKeysOpen(true)}
-                      disabled={isUpdatingUserKey}
-                    >
-                      <Pencil className="size-4" />
-                      批量编辑
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                      onClick={() => void handleDeleteUserKeys(selectedUserKeys.map((item) => item.key))}
-                      disabled={isDeletingUserKeys}
-                    >
-                      {isDeletingUserKeys ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                      批量删除
-                    </Button>
-                  </>
-                ) : null}
-              </div>
-              <div className="relative min-w-[260px]">
-                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
-                <Input
-                  value={userKeyQuery}
-                  onChange={(event) => {
-                    setUserKeyQuery(event.target.value);
-                    setUserKeyPage(1);
-                  }}
-                  placeholder="搜索 key 或标签"
-                  className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
-                />
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
-                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
-                  <tr>
-                    <th className="w-12 px-4 py-3">
-                      <Checkbox
-                        checked={allCurrentUserKeysSelected}
-                        onCheckedChange={(checked) => toggleSelectAllUserKeys(Boolean(checked))}
-                      />
-                    </th>
-                    <th className="w-56 px-4 py-3">key</th>
-                    <th className="w-36 px-4 py-3">标签</th>
-                    <th className="w-24 px-4 py-3">状态</th>
-                    <th className="w-24 px-4 py-3">次数</th>
-                    <th className="w-52 px-4 py-3">单价</th>
-                    <th className="w-40 px-4 py-3">创建时间</th>
-                    <th className="w-40 px-4 py-3">最近使用</th>
-                    <th className="w-28 px-4 py-3">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentUserKeys.map((item) => (
-                    <tr
-                      key={item.id}
-                      className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
-                    >
-                      <td className="px-4 py-3">
-                        <Checkbox
-                          checked={selectedUserKeyIds.includes(item.id)}
-                          onCheckedChange={(checked) => {
-                            setSelectedUserKeyIds((prev) =>
-                              checked
-                                ? Array.from(new Set([...prev, item.id]))
-                                : prev.filter((id) => id !== item.id),
-                            );
-                          }}
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium tracking-tight text-stone-700">{maskToken(item.key, 3, 3)}</span>
                           <button
                             type="button"
-                            className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                            onClick={() => {
-                              void navigator.clipboard.writeText(item.key);
-                              toast.success("用户 key 已复制");
-                            }}
-                          >
-                            <Copy className="size-4" />
-                          </button>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-stone-500">{item.label || "—"}</td>
-                      <td className="px-4 py-3">
-                        <Badge variant={item.status === "启用" ? "success" : "secondary"} className="rounded-md">
-                          {item.status}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Badge variant="info" className="rounded-md">
-                          {formatQuota(item.quota)}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-3 text-xs leading-5 text-stone-500">{formatUserKeyPricing(item.pricing)}</td>
-                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.createdAt)}</td>
-                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.lastUsedAt)}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1 text-stone-400">
-                          <button
-                            type="button"
-                            className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                            onClick={() => openUserKeyDialog(item)}
-                            disabled={isUpdatingUserKey}
-                          >
-                            <Pencil className="size-4" />
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                            onClick={() => void handleDeleteUserKey(item.key)}
-                            disabled={isDeletingUserKeys}
+                            className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500"
+                            onClick={() =>
+                              void handleDeleteRedeemCode(item.code)
+                            }
+                            disabled={isDeletingRedeemCodes}
                           >
                             <Trash2 className="size-4" />
                           </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
 
-              {!isLoadingUserKeys && filteredUserKeys.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                    <KeyRound className="size-5" />
+                {!isLoadingRedeemCodes && filteredRedeemCodes.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                    <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                      <Ticket className="size-5" />
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium text-stone-700">
+                        还没有兑换码
+                      </p>
+                      <p className="text-sm text-stone-500">
+                        先选额度和数量，再生成一批。
+                      </p>
+                    </div>
                   </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-stone-700">还没有用户 key</p>
-                    <p className="text-sm text-stone-500">先设好前缀、数量和初始次数，再批量生成。</p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-            <div className="border-t border-stone-100 px-4 py-4">
-              <div className="flex items-center justify-between gap-3 text-sm text-stone-500">
-                <div>
-                  显示第 {filteredUserKeys.length === 0 ? 0 : userKeyStartIndex + 1} -{" "}
-                  {Math.min(userKeyStartIndex + ADMIN_SECONDARY_PAGE_SIZE, filteredUserKeys.length)} 条，共{" "}
-                  {filteredUserKeys.length} 条，每页 {ADMIN_SECONDARY_PAGE_SIZE} 条
-                </div>
-                <div className="flex items-center gap-2">
-                  <span>
-                    {safeUserKeyPage} / {userKeyPageCount} 页
-                  </span>
-                  <Button
-                    variant="outline"
-                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
-                    disabled={safeUserKeyPage <= 1}
-                    onClick={() => setUserKeyPage((prev) => Math.max(1, prev - 1))}
-                  >
-                    <ChevronLeft className="size-4" />
-                    上一页
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
-                    disabled={safeUserKeyPage >= userKeyPageCount}
-                    onClick={() => setUserKeyPage((prev) => Math.min(userKeyPageCount, prev + 1))}
-                  >
-                    下一页
-                    <ChevronRight className="size-4" />
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
-      ) : null}
-
-      {activeTab === "redeemCodes" ? (
-      <section className="space-y-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
-              <Ticket className="size-4" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold tracking-tight">兑换码</h2>
-              <p className="text-sm text-stone-500">兑换后会给当前用户 key 增加指定额度。</p>
-            </div>
-          </div>
-
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadRedeemCodes()}
-            disabled={isLoadingRedeemCodes || isSubmittingRedeemCodes || isDeletingRedeemCodes}
-          >
-            <RefreshCw className={cn("size-4", isLoadingRedeemCodes ? "animate-spin" : "")} />
-            刷新兑换码
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => downloadRedeemCodes(lastCreatedRedeemCodes, "redeem-codes-latest")}
-            disabled={lastCreatedRedeemCodes.length === 0}
-          >
-            <Download className="size-4" />
-            下载本次 txt
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => downloadRedeemCodes(selectedRedeemCodes, "redeem-codes-selected")}
-            disabled={selectedRedeemCodes.length === 0}
-          >
-            <Download className="size-4" />
-            下载所选
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-            onClick={() => void handleDeleteRedeemCodes(usedRedeemCodes.map((item) => item.code))}
-            disabled={usedRedeemCodes.length === 0 || isDeletingRedeemCodes}
-          >
-            {isDeletingRedeemCodes ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-            删除已使用
-          </Button>
-        </div>
-
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="grid gap-4 p-4 lg:grid-cols-[140px_140px_180px_minmax(0,1fr)_auto]">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">前缀</label>
-              <Input
-                value={newRedeemCodePrefix}
-                onChange={(event) => setNewRedeemCodePrefix(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-                placeholder="RDM"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">数量</label>
-              <Input
-                type="number"
-                min="1"
-                max="500"
-                value={newRedeemCodeCount}
-                onChange={(event) => setNewRedeemCodeCount(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">兑换额度</label>
-              <Select
-                value={newRedeemCodeTargetQuota}
-                onValueChange={(value) => setNewRedeemCodeTargetQuota(value as "20" | "100")}
-              >
-                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="20">20 额度</SelectItem>
-                  <SelectItem value="100">100 额度</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">备注</label>
-              <Input
-                value={newRedeemCodeLabel}
-                onChange={(event) => setNewRedeemCodeLabel(event.target.value)}
-                className="h-11 rounded-xl border-stone-200 bg-white"
-                placeholder="可留空"
-              />
-            </div>
-            <div className="flex items-end">
-              <Button
-                className="h-11 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
-                onClick={() => void handleCreateRedeemCodes()}
-                disabled={isSubmittingRedeemCodes}
-              >
-                {isSubmittingRedeemCodes ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                生成兑换码
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-lg font-semibold tracking-tight">兑换码列表</h3>
-                <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
-                  {filteredRedeemCodes.length}
-                </Badge>
-                {selectedRedeemCodeIds.length > 0 ? (
-                  <>
-                    <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
-                      已选择 {selectedRedeemCodeIds.length} 项
-                    </span>
-                    <Button
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-stone-600 hover:bg-stone-100"
-                      onClick={() => downloadRedeemCodes(selectedRedeemCodes, "redeem-codes-selected")}
-                    >
-                      <Download className="size-4" />
-                      下载所选
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                      onClick={() => void handleDeleteRedeemCodes(selectedRedeemCodes.map((item) => item.code))}
-                      disabled={isDeletingRedeemCodes}
-                    >
-                      {isDeletingRedeemCodes ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                      批量删除
-                    </Button>
-                  </>
                 ) : null}
               </div>
-              <div className="relative min-w-[260px]">
-                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
-                <Input
-                  value={redeemCodeQuery}
-                  onChange={(event) => {
-                    setRedeemCodeQuery(event.target.value);
-                    setRedeemCodePage(1);
-                  }}
-                  placeholder="搜索兑换码或备注"
-                  className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
-                />
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
-                <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
-                  <tr>
-                    <th className="w-12 px-4 py-3">
-                      <Checkbox
-                        checked={allCurrentRedeemCodesSelected}
-                        onCheckedChange={(checked) => toggleSelectAllRedeemCodes(Boolean(checked))}
-                      />
-                    </th>
-                    <th className="w-56 px-4 py-3">兑换码</th>
-                    <th className="w-24 px-4 py-3">状态</th>
-                    <th className="w-24 px-4 py-3">增加额度</th>
-                    <th className="w-40 px-4 py-3">备注</th>
-                    <th className="w-40 px-4 py-3">创建时间</th>
-                    <th className="w-40 px-4 py-3">使用时间</th>
-                    <th className="w-40 px-4 py-3">使用 key</th>
-                    <th className="w-20 px-4 py-3">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {currentRedeemCodes.map((item) => (
-                    <tr
-                      key={item.id}
-                      className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+              <div className="border-t border-stone-100 px-4 py-4">
+                <div className="flex items-center justify-between gap-3 text-sm text-stone-500">
+                  <div>
+                    显示第{" "}
+                    {filteredRedeemCodes.length === 0
+                      ? 0
+                      : redeemCodeStartIndex + 1}{" "}
+                    -{" "}
+                    {Math.min(
+                      redeemCodeStartIndex + ADMIN_SECONDARY_PAGE_SIZE,
+                      filteredRedeemCodes.length,
+                    )}{" "}
+                    条，共 {filteredRedeemCodes.length} 条，每页{" "}
+                    {ADMIN_SECONDARY_PAGE_SIZE} 条
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span>
+                      {safeRedeemCodePage} / {redeemCodePageCount} 页
+                    </span>
+                    <Button
+                      variant="outline"
+                      className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                      disabled={safeRedeemCodePage <= 1}
+                      onClick={() =>
+                        setRedeemCodePage((prev) => Math.max(1, prev - 1))
+                      }
                     >
-                      <td className="px-4 py-3">
-                        <Checkbox
-                          checked={selectedRedeemCodeIds.includes(item.id)}
-                          onCheckedChange={(checked) => {
-                            setSelectedRedeemCodeIds((prev) =>
-                              checked
-                                ? Array.from(new Set([...prev, item.id]))
-                                : prev.filter((id) => id !== item.id),
-                            );
-                          }}
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium tracking-tight text-stone-700">{item.code}</span>
-                          <button
-                            type="button"
-                            className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                            onClick={() => {
-                              void navigator.clipboard.writeText(item.code);
-                              toast.success("兑换码已复制");
-                            }}
-                          >
-                            <Copy className="size-4" />
-                          </button>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Badge variant={item.status === "未使用" ? "success" : "secondary"} className="rounded-md">
-                          {item.status}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-3">
-                        <Badge variant="info" className="rounded-md">
-                          {formatQuota(item.targetQuota)}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-3 text-stone-500">{item.label || "—"}</td>
-                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.createdAt)}</td>
-                      <td className="px-4 py-3 text-xs text-stone-500">{formatDateTime(item.usedAt)}</td>
-                      <td className="px-4 py-3 text-xs text-stone-500">
-                        {item.usedByKey ? maskToken(item.usedByKey, 3, 3) : "—"}
-                      </td>
-                      <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          className="rounded-lg p-2 text-stone-400 transition hover:bg-rose-50 hover:text-rose-500"
-                          onClick={() => void handleDeleteRedeemCode(item.code)}
-                          disabled={isDeletingRedeemCodes}
-                        >
-                          <Trash2 className="size-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-
-              {!isLoadingRedeemCodes && filteredRedeemCodes.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                    <Ticket className="size-5" />
+                      <ChevronLeft className="size-4" />
+                      上一页
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
+                      disabled={safeRedeemCodePage >= redeemCodePageCount}
+                      onClick={() =>
+                        setRedeemCodePage((prev) =>
+                          Math.min(redeemCodePageCount, prev + 1),
+                        )
+                      }
+                    >
+                      下一页
+                      <ChevronRight className="size-4" />
+                    </Button>
                   </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-stone-700">还没有兑换码</p>
-                    <p className="text-sm text-stone-500">先选额度和数量，再生成一批。</p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-            <div className="border-t border-stone-100 px-4 py-4">
-              <div className="flex items-center justify-between gap-3 text-sm text-stone-500">
-                <div>
-                  显示第 {filteredRedeemCodes.length === 0 ? 0 : redeemCodeStartIndex + 1} -{" "}
-                  {Math.min(redeemCodeStartIndex + ADMIN_SECONDARY_PAGE_SIZE, filteredRedeemCodes.length)} 条，共{" "}
-                  {filteredRedeemCodes.length} 条，每页 {ADMIN_SECONDARY_PAGE_SIZE} 条
-                </div>
-                <div className="flex items-center gap-2">
-                  <span>
-                    {safeRedeemCodePage} / {redeemCodePageCount} 页
-                  </span>
-                  <Button
-                    variant="outline"
-                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
-                    disabled={safeRedeemCodePage <= 1}
-                    onClick={() => setRedeemCodePage((prev) => Math.max(1, prev - 1))}
-                  >
-                    <ChevronLeft className="size-4" />
-                    上一页
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700"
-                    disabled={safeRedeemCodePage >= redeemCodePageCount}
-                    onClick={() => setRedeemCodePage((prev) => Math.min(redeemCodePageCount, prev + 1))}
-                  >
-                    下一页
-                    <ChevronRight className="size-4" />
-                  </Button>
                 </div>
               </div>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
+            </CardContent>
+          </Card>
+        </section>
       ) : null}
     </div>
   );

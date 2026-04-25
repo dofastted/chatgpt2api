@@ -31,6 +31,7 @@ import { cn } from "@/lib/utils";
 
 const navItems: Array<{ href: string; label: string; roles?: AuthRole[] }> = [
   { href: "/image", label: "画图" },
+  { href: "/gallery", label: "画廊" },
   { href: "/accounts", label: "号池管理", roles: ["admin"] },
 ];
 
@@ -68,12 +69,16 @@ export function TopNav() {
   const [redeemInput, setRedeemInput] = useState("");
 
   const syncSession = async () => {
-    const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
+    const session = await fetchAuthSession({
+      redirectOnUnauthorized: false,
+      retries: 1,
+    });
     setSessionState({
       role: session.role,
       authType: session.auth_type ?? null,
       remainingQuota:
-        session.remaining_quota === null || session.remaining_quota === undefined
+        session.remaining_quota === null ||
+        session.remaining_quota === undefined
           ? null
           : Math.max(0, Number(session.remaining_quota || 0)),
     });
@@ -87,15 +92,19 @@ export function TopNav() {
     let cancelled = false;
     const loadSession = async () => {
       try {
-        const session = await fetchAuthSession({ redirectOnUnauthorized: false, retries: 1 });
+        const session = await fetchAuthSession({
+          redirectOnUnauthorized: false,
+          retries: 1,
+        });
         if (!cancelled) {
           setSessionState({
             role: session.role,
             authType: session.auth_type ?? null,
-              remainingQuota:
-                session.remaining_quota === null || session.remaining_quota === undefined
-                  ? null
-                  : Math.max(0, Number(session.remaining_quota || 0)),
+            remainingQuota:
+              session.remaining_quota === null ||
+              session.remaining_quota === undefined
+                ? null
+                : Math.max(0, Number(session.remaining_quota || 0)),
           });
         }
       } catch {
@@ -128,7 +137,10 @@ export function TopNav() {
     setIsUploadingDonation(true);
 
     try {
-      const importedAccounts: Array<{ access_token: string; [key: string]: unknown }> = [];
+      const importedAccounts: Array<{
+        access_token: string;
+        [key: string]: unknown;
+      }> = [];
       const invalidFiles: string[] = [];
       const emptyFiles: string[] = [];
       let matchedFiles = 0;
@@ -155,7 +167,10 @@ export function TopNav() {
         }
       }
 
-      const indexedAccounts = new Map<string, { access_token: string; [key: string]: unknown }>();
+      const indexedAccounts = new Map<
+        string,
+        { access_token: string; [key: string]: unknown }
+      >();
       importedAccounts.forEach((item) => {
         const accessToken = String(item.access_token || "").trim();
         if (!accessToken) {
@@ -176,7 +191,11 @@ export function TopNav() {
         if (emptyFiles.length > 0) {
           errors.push(`${emptyFiles.length} 个文件没有可识别的 token 字段`);
         }
-        toast.error(errors.length > 0 ? `未提取到可用 Token，${errors.join("，")}` : "未提取到可用 Token");
+        toast.error(
+          errors.length > 0
+            ? `未提取到可用 Token，${errors.join("，")}`
+            : "未提取到可用 Token",
+        );
         return;
       }
 
@@ -185,13 +204,17 @@ export function TopNav() {
       const rewardedLdc = Math.max(0, Number(data.rewarded_ldc || 0));
       const rewardedAccounts = Math.max(0, Number(data.rewarded_accounts || 0));
 
-      const messages = [`已提交 ${matchedFiles} 个文件，共 ${accountsToImport.length} 个账户`];
+      const messages = [
+        `已提交 ${matchedFiles} 个文件，共 ${accountsToImport.length} 个账户`,
+      ];
       messages.push("这些账户会按捐赠账户入池");
       if ((data.skipped ?? 0) > 0) {
         messages.push(`跳过 ${data.skipped} 个重复项`);
       }
       if (rewardedLdc > 0) {
-        messages.push(`有效 Free 账号 ${rewardedAccounts} 个，已到账 ${rewardedLdc} 积分`);
+        messages.push(
+          `有效 Free 账号 ${rewardedAccounts} 个，已到账 ${rewardedLdc} 积分`,
+        );
       }
       if (errorCount > 0) {
         messages.push(`刷新失败 ${errorCount} 个`);
@@ -210,7 +233,8 @@ export function TopNav() {
         toast.success(messages.join("，"));
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "上传捐赠账户失败";
+      const message =
+        error instanceof Error ? error.message : "上传捐赠账户失败";
       toast.error(message);
     } finally {
       setIsUploadingDonation(false);
@@ -248,17 +272,19 @@ export function TopNav() {
   }
 
   const visibleNavItems = navItems.filter(
-    (item) => !item.roles || (sessionState.role ? item.roles.includes(sessionState.role) : false),
+    (item) =>
+      !item.roles ||
+      (sessionState.role ? item.roles.includes(sessionState.role) : false),
   );
   const isUserKey = sessionState.authType === "user_key";
 
   return (
-    <header className="minimal-topnav">
+    <header className="minimal-topnav minimal-nav-enter">
       <div className="relative flex min-h-[84px] flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-1 items-center gap-3">
           <Link
             href="/image"
-            className="relative py-2 font-[var(--font-heading)] text-lg font-semibold tracking-[-0.03em] text-stone-100 transition hover:text-amber-100"
+            className="minimal-surface-hover relative rounded-full px-3 py-2 font-[var(--font-heading)] text-lg font-semibold tracking-[-0.03em] text-stone-100 transition hover:text-amber-100"
           >
             chatgpt2api
           </Link>
@@ -266,14 +292,17 @@ export function TopNav() {
             <DialogTrigger asChild>
               <button
                 type="button"
-                className="inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-amber-300/25 hover:bg-amber-300/10"
+                className="minimal-surface-hover inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-amber-300/25 hover:bg-amber-300/10"
                 aria-label="打开兑换中心"
               >
                 <Ticket className="size-4" />
                 <span>兑换中心</span>
               </button>
             </DialogTrigger>
-            <DialogContent showCloseButton={false} className="rounded-[24px] p-6">
+            <DialogContent
+              showCloseButton={false}
+              className="rounded-[24px] p-6"
+            >
               <DialogHeader className="gap-2">
                 <DialogTitle>兑换中心</DialogTitle>
                 <DialogDescription className="text-sm leading-6">
@@ -295,7 +324,11 @@ export function TopNav() {
                   accept=".json,application/json"
                   multiple
                   className="hidden"
-                  onChange={(event) => void handleDonationUpload(Array.from(event.target.files ?? []))}
+                  onChange={(event) =>
+                    void handleDonationUpload(
+                      Array.from(event.target.files ?? []),
+                    )
+                  }
                 />
 
                 <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.04] p-4">
@@ -306,10 +339,17 @@ export function TopNav() {
                         捐赠换积分
                       </div>
                       <p className="text-xs leading-5 text-stone-400">
-                        支持标准账号 JSON 和 CPA 格式 JSON。只有成功入池并识别成 Free 的账号才会给当前用户 key 发放 `20 积分`。
+                        支持标准账号 JSON 和 CPA 格式 JSON。只有成功入池并识别成
+                        Free 的账号才会给当前用户 key 发放 `20 积分`。
                       </p>
                     </div>
-                    <Button type="button" variant="outline" className="h-10 px-4" onClick={() => uploadInputRef.current?.click()} disabled={isUploadingDonation}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-10 px-4"
+                      onClick={() => uploadInputRef.current?.click()}
+                      disabled={isUploadingDonation}
+                    >
                       {isUploadingDonation ? (
                         <LoaderCircle className="size-4 animate-spin" />
                       ) : (
@@ -335,13 +375,19 @@ export function TopNav() {
                           rel="noreferrer"
                           className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm transition hover:border-amber-300/20 hover:bg-white/[0.07]"
                         >
-                          <div className="font-semibold text-stone-100">{item.label}</div>
-                          <div className="mt-1 text-xs text-stone-400">直达购买页面，购买后回来输入兑换码。</div>
+                          <div className="font-semibold text-stone-100">
+                            {item.label}
+                          </div>
+                          <div className="mt-1 text-xs text-stone-400">
+                            直达购买页面，购买后回来输入兑换码。
+                          </div>
                         </a>
                       ))}
                     </div>
                     {!isUserKey ? (
-                      <p className="text-xs leading-5 text-stone-500">只有用户 key 才能在这里兑换额度。</p>
+                      <p className="text-xs leading-5 text-stone-500">
+                        只有用户 key 才能在这里兑换额度。
+                      </p>
                     ) : null}
                   </div>
                 </div>
@@ -354,16 +400,28 @@ export function TopNav() {
                     </div>
                     <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
                       <div className="space-y-2">
-                        <label className="text-xs text-stone-400">输入兑换码</label>
+                        <label className="text-xs text-stone-400">
+                          输入兑换码
+                        </label>
                         <Input
                           value={redeemInput}
-                          onChange={(event) => setRedeemInput(event.target.value)}
+                          onChange={(event) =>
+                            setRedeemInput(event.target.value)
+                          }
                           placeholder="例如 RDM-XXXXXX"
                           className="h-11"
                         />
                       </div>
-                      <Button className="h-11 px-5" onClick={() => void handleRedeemCode()} disabled={!isUserKey || isRedeemingCode}>
-                        {isRedeemingCode ? <LoaderCircle className="size-4 animate-spin" /> : <Ticket className="size-4" />}
+                      <Button
+                        className="h-11 px-5"
+                        onClick={() => void handleRedeemCode()}
+                        disabled={!isUserKey || isRedeemingCode}
+                      >
+                        {isRedeemingCode ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <Ticket className="size-4" />
+                        )}
                         兑换
                       </Button>
                     </div>
@@ -375,14 +433,19 @@ export function TopNav() {
               </div>
 
               <DialogFooter className="pt-2">
-                <Button variant="outline" className="h-10 px-5" onClick={() => setCenterOpen(false)} disabled={isUploadingDonation || isRedeemingCode}>
+                <Button
+                  variant="outline"
+                  className="h-10 px-5"
+                  onClick={() => setCenterOpen(false)}
+                  disabled={isUploadingDonation || isRedeemingCode}
+                >
                   关闭
                 </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
-        <div className="flex flex-wrap justify-center gap-3 lg:gap-4">
+        <div className="flex flex-wrap items-end justify-center gap-4 lg:gap-5">
           {visibleNavItems.map((item) => {
             const active = pathname === item.href;
             return (
@@ -390,10 +453,10 @@ export function TopNav() {
                 key={item.href}
                 href={item.href}
                 className={cn(
-                  "relative rounded-full border px-4 py-2 text-sm transition",
+                  "relative border-b px-1 pb-2 text-sm transition",
                   active
-                    ? "border-amber-300/25 bg-amber-300/12 text-amber-100"
-                    : "border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/18 hover:text-stone-100",
+                    ? "border-amber-300/70 text-amber-100"
+                    : "border-transparent text-stone-400 hover:border-white/18 hover:text-stone-100",
                 )}
               >
                 {item.label}
@@ -402,12 +465,12 @@ export function TopNav() {
           })}
         </div>
         <div className="flex flex-1 items-center justify-end gap-3">
-          <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] text-stone-400">
+          <span className="minimal-surface-hover rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] text-stone-400">
             v{webConfig.appVersion}
           </span>
           <button
             type="button"
-            className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-rose-400/20 hover:bg-rose-400/10 hover:text-rose-200"
+            className="minimal-surface-hover rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-rose-400/20 hover:bg-rose-400/10 hover:text-rose-200"
             onClick={() => void handleLogout()}
           >
             退出

@@ -44,8 +44,12 @@
 - `GET /api/redeem-codes`，返回兑换码列表。
 - `POST /api/redeem-codes`，接收 `count`、`target_quota`、`prefix`、`label`。兼容旧字段名 `targetQuota`。`target_quota` 现在只允许 `20` 或 `100`。
 - `DELETE /api/redeem-codes`，接收 `codes: string[]`。前端会用它处理选中兑换码删除，也会拿它一次删掉全部已使用兑换码。
+- `GET /api/proxies`，返回代理列表和当前启用代理 URL。
+- `POST /api/proxies`，新增或更新代理。字段包含 `id`、`name`、`protocol`、`host`、`port`、`username`、`password`、`enabled`，其中 `protocol` 只支持 `http` 和 `socks5`。
+- `DELETE /api/proxies`，请求体是 `id`。删除当前启用代理后，如果还有剩余代理，会启用列表第一项。
 
 前端对应封装：
 
 - 登录、会话、额度、账号列表、新增、捐赠新增、刷新、更新都在 `web/src/lib/api.ts:98` 到 `web/src/lib/api.ts:245`。
+- proxy 列表、新增、更新和删除封装在 `web/src/lib/api.ts` 的 `fetchProxies`、`upsertProxy`、`deleteProxy`。
 - 图片页上传和最近上传列表封装在 `web/src/lib/api.ts:350` 到 `web/src/lib/api.ts:364`。
