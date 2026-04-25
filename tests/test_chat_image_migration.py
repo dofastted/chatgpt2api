@@ -121,7 +121,7 @@ class ChatImageMigrationTests(unittest.TestCase):
 
     def test_route_selector_uses_images_for_free_and_responses_for_paid(self) -> None:
         self.assertEqual(select_image_route(account={"type": "Free"}), "images")
-        self.assertEqual(select_image_route(account={"type": "Free"}, has_input_image=True), "images_edit")
+        self.assertEqual(select_image_route(account={"type": "Free"}, has_input_image=True), "responses")
         self.assertEqual(select_image_route(account={"type": "Plus"}), "responses")
         self.assertEqual(select_image_route(account={"type": "Team"}, has_input_image=True), "responses")
 
@@ -136,7 +136,7 @@ class ChatImageMigrationTests(unittest.TestCase):
     def test_backend_service_passes_plan_route_to_gateway(self) -> None:
         cases = [
             ("Free", None, "images"),
-            ("Free", [{"image_url": "data:image/png;base64,aW1n"}], "images_edit"),
+            ("Free", [{"image_url": "data:image/png;base64,aW1n"}], "responses"),
             ("Plus", None, "responses"),
             ("Pro", None, "responses"),
             ("Team", [{"image_url": "data:image/png;base64,aW1n"}], "responses"),
@@ -161,21 +161,28 @@ class ChatImageMigrationTests(unittest.TestCase):
         self.assertEqual(payload["data"][0]["b64_json"], "ok")
         self.assertEqual(gateway.routes, ["responses", "images"])
 
-    def test_backend_service_falls_back_to_images_edit_when_responses_rejects_input_image(self) -> None:
-        service = BackendService(FakeRouteAccountService("Team"))
-        gateway = RecordingGateway(route_errors={"responses": "responses failed: 400"})
-        service.image_gateway = gateway
-
-        with patch("services.backend_service.config", SimpleNamespace(image_route_policy="plan_type")):
-            payload = service.generate_with_pool(
-                "draw",
-                "gpt-image-2",
-                1,
-                input_images=[{"file_id": "upload-1"}],
+    def test_backend_service_does_not_fallback_to_images_edit_for_paid_input_images(self) -> None:
+        self.assertIsNone(
+            BackendService._fallback_route_for(
+                "responses",
+                [{"image_url": "data:image/png;base64,aW1n"}],
             )
+        )
+        self.assertEqual(BackendService._fallback_route_for("responses", None), "images")
 
-        self.assertEqual(payload["data"][0]["b64_json"], "ok")
-        self.assertEqual(gateway.routes, ["responses", "images_edit"])
+    def test_backend_service_treats_responses_input_image_400_as_next_account_retry(self) -> None:
+        self.assertTrue(
+            BackendService._is_responses_input_image_rejection(
+                ImageGenerationError("responses failed: 400"),
+                [{"file_id": "upload-1"}],
+            )
+        )
+        self.assertFalse(
+            BackendService._is_responses_input_image_rejection(
+                ImageGenerationError("responses failed: 400"),
+                None,
+            )
+        )
 
     def test_image_gateway_forwards_route_to_executor(self) -> None:
         calls: list[dict[str, object]] = []

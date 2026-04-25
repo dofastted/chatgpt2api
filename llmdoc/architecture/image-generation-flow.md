@@ -17,8 +17,8 @@
 - 先从账号池选一个当前可用的 token，逻辑在 `services/backend_service.py:38`。
 - 再用 `services/backend_service.py:21` 先刷新这个 token 的远端信息，确认它还有额度、状态也可用。
 - 刷新结果不满足条件时会跳过这个 token，继续尝试下一个。
-- 选号后会按账号套餐选择执行路线：Free 账号走 Images 路线，Plus/Pro/Team 账号先走 Responses 路线，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
-- 如果 Plus/Pro/Team 的 Responses 路线遇到 `429`、网关超时或其他瞬时上游错误，同一个账号会先退到 Images 路线再试一次；仍失败才换下一个账号。
+- 选号后会按账号套餐选择执行路线：带输入图的请求默认走 Responses 路线；无输入图时 Free 账号走 Images 路线，Plus/Pro/Team 账号先走 Responses 路线，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
+- 如果 Plus/Pro/Team 的无输入图 Responses 路线遇到 `429`、网关超时或其他瞬时上游错误，同一个账号会先退到 Images 路线再试一次；仍失败才换下一个账号。带输入图的 Responses 请求不会默认退到旧 `images_edit` 路线，避免进入 `/backend-api/f/conversation` 的 422 重试循环。
 - 这条分层来自 `IMAGE_ROUTE_POLICY=plan_type` 的默认配置；主容器默认走 `IMAGE_ENGINE=chat_image`，不要退回旧后端协议作为长期方案。
 - 真正的远端图片请求交给 `services/image_service.py`。
 

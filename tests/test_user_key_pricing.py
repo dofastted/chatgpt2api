@@ -688,6 +688,38 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(second_response.status_code, 404)
         self.assertIn("input image file_id was not found", second_response.text)
 
+    def test_images_edits_accepts_multipart_image(self) -> None:
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
+
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/images/edits",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"prompt": "edit this image", "model": "gpt-image-2", "n": "1"},
+                files={"image": ("input.png", png_bytes, "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(FakeBackendService.last_call)
+        assert FakeBackendService.last_call is not None
+        input_images = FakeBackendService.last_call["input_images"]
+        self.assertIsInstance(input_images, list)
+        self.assertTrue(str(input_images[0]["image_url"]).startswith("data:image/png;base64,"))
+
+    def test_images_edits_rejects_too_small_image(self) -> None:
+        png_bytes = base64.b64decode(TOO_SMALL_UPLOAD_PNG_B64)
+
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/images/edits",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"prompt": "edit this image", "model": "gpt-image-2", "n": "1"},
+                files={"image": ("pixel.png", png_bytes, "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("at least 64px", response.text)
+
     def test_image_generation_rejects_more_than_two_images(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,

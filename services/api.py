@@ -26,7 +26,12 @@ from services.image_size import normalize_image_size
 from services.image_queue_service import image_queue_service
 from services.proxy_service import proxy_service
 from services.redeem_code_service import redeem_code_service
-from services.uploaded_image_service import uploaded_image_service
+from services.uploaded_image_service import (
+    MIN_INPUT_IMAGE_SIDE,
+    detect_image_dimensions,
+    normalize_uploaded_image_mime_type,
+    uploaded_image_service,
+)
 from services.user_key_service import user_key_service
 from services.version import get_app_version
 
@@ -1667,9 +1672,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail={"error": "image file is required"})
         if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
             raise HTTPException(status_code=400, detail={"error": "image file must be <= 8 MB"})
-        content_type = str(image.content_type or "image/png").split(";", 1)[0].strip().lower() or "image/png"
-        if not content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail={"error": "image file must use an image mime type"})
+        try:
+            content_type = normalize_uploaded_image_mime_type(image_bytes, image.content_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        width, height = detect_image_dimensions(image_bytes)
+        if width is not None and height is not None and (width < MIN_INPUT_IMAGE_SIDE or height < MIN_INPUT_IMAGE_SIDE):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"image width and height must be at least {MIN_INPUT_IMAGE_SIDE}px"},
+            )
         input_images = [
             {
                 "type": "input_image",

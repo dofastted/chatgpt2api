@@ -22,8 +22,11 @@ def select_image_route(
     if normalized_policy == "force_images":
         return "images_edit" if has_input_image else "images"
 
+    if has_input_image:
+        return "responses"
+
     plan_type = normalize_plan_type((account or {}).get("type") or (account or {}).get("plan_type"))
     if plan_type == "Free":
-        return "images_edit" if has_input_image else "images"
+        return "images"
     return "responses"
 
