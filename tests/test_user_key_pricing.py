@@ -25,6 +25,14 @@ from services.uploaded_image_service import uploaded_image_service  # noqa: E402
 from services.user_key_service import UserKeyService  # noqa: E402
 
 
+TEST_UPLOAD_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAl0lEQVR4nO2SwQkAMBCD3H9pO0QfchDIACpBOD1yAidAXtFdiLsjJ3AC5BXdhbg7cgInQF7RXYi7IydwAuQV3YW4O3ICJ0Be0V2IuyMncALkFd2FuDtyAidAXtFdiLsjJ3AC5BXdhbg7cgInQF7RXYi7IydwAuQV3YW4O3ICJ0Be0V2IuyMncALkFd2FuDtyAidAXvHnQg+p3PDiuUoi2QAAAABJRU5ErkJggg=="
+)
+TOO_SMALL_UPLOAD_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+)
+
+
 class FakeThread:
     def join(self, timeout: float | None = None) -> None:
         return None
@@ -486,9 +494,7 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(current_item["ldc_balance"], 20)
 
     def test_process_upload_stream_and_recent_uploaded_images(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
         client_conversation_id = "conv-upload-1"
 
         with self.make_client() as client:
@@ -512,11 +518,25 @@ class UserKeyPricingTests(unittest.TestCase):
             items = list_response.json()["items"]
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["file_id"], uploaded["file_id"])
+            self.assertEqual(items[0]["width"], 64)
+            self.assertEqual(items[0]["height"], 64)
+
+    def test_process_upload_stream_rejects_too_small_image(self) -> None:
+        png_bytes = base64.b64decode(TOO_SMALL_UPLOAD_PNG_B64)
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": "conv-too-small"},
+                files={"file": ("pixel.png", png_bytes, "image/png")},
+            )
+
+        self.assertEqual(upload_response.status_code, 400)
+        self.assertIn("at least 64px", upload_response.text)
 
     def test_responses_accepts_uploaded_image_file_id(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
         client_conversation_id = "conv-response-1"
 
         with self.make_client() as client:
@@ -558,9 +578,7 @@ class UserKeyPricingTests(unittest.TestCase):
         )
 
     def test_responses_rejects_uploaded_image_file_id_from_other_conversation(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
 
         with self.make_client() as client:
             upload_response = client.post(
@@ -591,9 +609,7 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertIn("input image file_id was not found", response.text)
 
     def test_responses_rejects_uploaded_image_file_id_from_other_owner(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
         created = api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
         user_key = created["created_items"][0]["key"]
 
@@ -626,9 +642,7 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertIn("input image file_id was not found", response.text)
 
     def test_responses_rejects_consumed_uploaded_image_file_id_for_new_conversation(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
 
         with self.make_client() as client:
             upload_response = client.post(

@@ -37,9 +37,10 @@ class FakeRouteAccountService:
 
 
 class RecordingGateway:
-    def __init__(self, fail_routes: set[str] | None = None) -> None:
+    def __init__(self, fail_routes: set[str] | None = None, route_errors: dict[str, str] | None = None) -> None:
         self.routes: list[str] = []
         self.fail_routes = fail_routes or set()
+        self.route_errors = route_errors or {}
 
     def generate_image(
         self,
@@ -54,6 +55,8 @@ class RecordingGateway:
     ) -> dict:
         del access_token, prompt, model, n, input_images, size
         self.routes.append(route)
+        if route in self.route_errors:
+            raise ImageGenerationError(self.route_errors[route])
         if route in self.fail_routes:
             raise ImageGenerationError("responses failed: 429")
         return {"created": 1, "data": [{"b64_json": "ok"}]}
@@ -157,6 +160,22 @@ class ChatImageMigrationTests(unittest.TestCase):
 
         self.assertEqual(payload["data"][0]["b64_json"], "ok")
         self.assertEqual(gateway.routes, ["responses", "images"])
+
+    def test_backend_service_falls_back_to_images_edit_when_responses_rejects_input_image(self) -> None:
+        service = BackendService(FakeRouteAccountService("Team"))
+        gateway = RecordingGateway(route_errors={"responses": "responses failed: 400"})
+        service.image_gateway = gateway
+
+        with patch("services.backend_service.config", SimpleNamespace(image_route_policy="plan_type")):
+            payload = service.generate_with_pool(
+                "draw",
+                "gpt-image-2",
+                1,
+                input_images=[{"file_id": "upload-1"}],
+            )
+
+        self.assertEqual(payload["data"][0]["b64_json"], "ok")
+        self.assertEqual(gateway.routes, ["responses", "images_edit"])
 
     def test_image_gateway_forwards_route_to_executor(self) -> None:
         calls: list[dict[str, object]] = []
