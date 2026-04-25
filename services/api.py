@@ -96,7 +96,7 @@ class ResponsesCreateRequest(BaseModel):
     tool_choice: dict[str, Any] | str | None = None
     previous_response_id: str | None = None
     stream: bool = False
-    metadata: dict[str, str] | None = None
+    metadata: dict[str, Any] | None = None
 
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
@@ -548,10 +548,7 @@ def extract_image_inputs_from_responses_input(value: Any) -> list[dict[str, str]
                 return [{"type": "input_image", "file_id": file_id}]
             return [{"type": "input_image", "image_url": _normalize_response_input_image_url(value)}]
         if item_type in {"image", "image_generation_call"}:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "responses image output replay and multi-turn image edit are not supported yet"},
-            )
+            return []
         if "content" in value:
             return extract_image_inputs_from_responses_input(value.get("content"))
     return []
@@ -613,10 +610,7 @@ def extract_text_segments_from_responses_input(value: Any) -> list[str]:
         if item_type == "input_image":
             return []
         if item_type in {"image", "image_generation_call"}:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "responses image output replay and multi-turn image edit are not supported yet"},
-            )
+            return []
         if item_type in {"input_text", "output_text", "text"}:
             return extract_text_segments_from_responses_input(value.get("text"))
         if "content" in value:

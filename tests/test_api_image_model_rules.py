@@ -208,6 +208,35 @@ class ApiImageModelRuleTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 404)
 
+    def test_responses_input_replay_ignores_previous_image_output_item(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        async def fake_generate_image_payload(**kwargs):
+            calls.append(dict(kwargs))
+            return {
+                "created": 123,
+                "data": [{"b64_json": "new", "mime_type": "image/png"}],
+            }, None
+
+        with patch.object(api, "generate_image_payload", side_effect=fake_generate_image_payload):
+            with TestClient(api.create_app()) as client:
+                response = client.post(
+                    "/v1/responses",
+                    headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                    json={
+                        "model": "gpt-5",
+                        "metadata": {"client_conversation_id": "conv-1", "turn": 2},
+                        "input": [
+                            {"type": "image_generation_call", "result": "old-image"},
+                            {"type": "input_text", "text": "continue image"},
+                        ],
+                        "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls[0]["prompt"], "continue image")
+
     def test_build_image_payloads_preserve_copied_text(self) -> None:
         image_result = {
             "created": 123,
