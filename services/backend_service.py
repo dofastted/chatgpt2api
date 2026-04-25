@@ -50,6 +50,14 @@ class BackendService:
         )
 
     @staticmethod
+    def _is_terminal_refresh_error(message: str) -> bool:
+        normalized = str(message or "").lower()
+        return (
+            "/backend-api/me failed: http 401" in normalized
+            or "/backend-api/me failed: http 402" in normalized
+        )
+
+    @staticmethod
     def _is_account_ready_for_image(account: dict | None) -> bool:
         if not isinstance(account, dict):
             return False
@@ -71,12 +79,13 @@ class BackendService:
         except Exception as exc:
             message = str(exc)
             print(f"[image-generate] refresh token={self._token_label(access_token)} fail {message}")
-            if "/backend-api/me failed: HTTP 401" in message:
+            if self._is_terminal_refresh_error(message):
                 return self.account_service.update_account(
                     access_token,
                     {
                         "status": "异常",
                         "quota": 0,
+                        "cooldown_until": None,
                     },
                 )
             if self._is_transient_refresh_error(message) and self._is_account_ready_for_image(cached_account):

@@ -149,6 +149,14 @@ class AccountService:
             return False
         return True
 
+    @staticmethod
+    def _is_terminal_refresh_error(message: str) -> bool:
+        normalized = str(message or "").lower()
+        return (
+            "/backend-api/me failed: http 401" in normalized
+            or "/backend-api/me failed: http 402" in normalized
+        )
+
     def _decode_access_token_payload(self, access_token: str) -> dict[str, Any]:
         parts = self._clean_token(access_token).split(".")
         if len(parts) < 2:
@@ -700,15 +708,16 @@ class AccountService:
                 except Exception as exc:
                     message = str(exc)
                     print(f"[account-refresh] fail {self._token_label(access_token)} {message}")
-                    if "/backend-api/me failed: HTTP 401" in message:
+                    if self._is_terminal_refresh_error(message):
                         self.update_account(
                             access_token,
                             {
                                 "status": "异常",
                                 "quota": 0,
+                                "cooldown_until": None,
                             },
                         )
-                        message = "检测到封号"
+                        message = "账号不可用"
                     errors.append({"access_token": access_token, "error": message})
 
         print(f"[account-refresh] done refreshed={refreshed} errors={len(errors)} workers={max_workers}")

@@ -5,6 +5,7 @@
 公开接口：
 
 - `GET /v1/models`，返回支持的模型列表，位置在 `services/api.py:273`。
+- `POST /v1/chat/completions`，轻量健康检查兼容入口。它只验证 Bearer Token 并返回一条 `ok` assistant 消息，`metadata.health_check=true`，不走上游聊天、不生图、不扣费。
 - `GET /v1/responses` 和 `HEAD /v1/responses`，轻量探活入口，会校验 Bearer Token 并返回当前 key 的队列简况，不进入生图队列。
 - `POST /v1/responses`，主 Response 生图入口，位置在 `services/api.py` 的 Responses 路由段。
 - `GET /v1/responses/{response_id}`，读取刚创建过的 Response 结果，位置在 `services/api.py` 的 Responses 路由段。

@@ -952,6 +952,36 @@ def create_app() -> FastAPI:
             ],
         }
 
+    @router.post("/v1/chat/completions")
+    async def create_chat_completion_health(body: dict[str, Any], authorization: str | None = Header(default=None)):
+        context = require_auth_key(authorization)
+        model = str(body.get("model") or DEFAULT_RESPONSES_MODEL).strip() or DEFAULT_RESPONSES_MODEL
+        return {
+            "id": f"chatcmpl_{uuid4().hex}",
+            "object": "chat.completion",
+            "created": int(time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "ok",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+            "metadata": {
+                "auth_type": context.auth_type,
+                "health_check": True,
+            },
+        }
+
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
         context = require_auth_key(authorization)

@@ -6,6 +6,7 @@
 - 新兼容层主入口是 `POST /v1/responses`，第一版支持文本加单张 `input_image`，位置在 `services/api.py` 的 Responses 路由段。单数 `/v1/response` 不再注册。
 - 图片编辑兼容入口是 `POST /v1/images/edits`，接收 multipart 图片并转成单张 `input_image`，再进入同一套队列和账号池路径。
 - 三条入口都接受图片尺寸。`auto` 是默认值，不传给上游；`WIDTHxHEIGHT` 会先按 16 的倍数向下规整，再进入后端路径。
+- `POST /v1/chat/completions` 只作为 API key 健康检查兼容入口，不进入图片生成链路。
 
 两条路最终都会交给 `BackendService.generate_with_pool`，位置在 `services/backend_service.py:37`。
 
