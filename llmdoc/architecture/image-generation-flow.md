@@ -15,6 +15,7 @@
 - 再用 `services/backend_service.py:21` 先刷新这个 token 的远端信息，确认它还有额度、状态也可用。
 - 刷新结果不满足条件时会跳过这个 token，继续尝试下一个。
 - 选号后会按账号套餐选择执行路线：Free 账号走 Images 路线，Plus/Pro/Team 账号走 Responses 路线，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
+- 这条分层来自 `IMAGE_ROUTE_POLICY=plan_type` 的默认配置；主容器默认走 `IMAGE_ENGINE=chat_image`，不要退回旧后端协议作为长期方案。
 - 真正的远端图片请求交给 `services/image_service.py`。
 
 远端请求过程：
@@ -38,6 +39,7 @@
 - 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
 - `/v1/images/generations` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
 - `/v1/responses` 流式时，最后一定会给 `response.completed` 和 `data: [DONE]`。
+- 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。
 - 前端图片页现在会把已选参考图的缩略图、`fileId` 和 `copied_text` 一起存进本地会话历史，刷新后仍能区分“参考图”“生成结果”和“可复制文本”，实现见 `web/src/store/image-conversations.ts`。
 - 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。
 

@@ -35,6 +35,7 @@
 
 - `llmdoc/memory/decisions/` 留给后续设计决策。
 - `llmdoc/memory/reflections/` 留给后续任务回顾。
+- `llmdoc/memory/reflections/2026-04-25-main-worktree-data-handoff.md` 记录主工作树接管、运行数据合并和迁移 worktree 归档规则。
 
 ## 临时调查
 
