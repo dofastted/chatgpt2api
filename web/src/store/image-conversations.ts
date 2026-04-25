@@ -25,13 +25,12 @@ export type StoredInputImage = {
 
 export type ImageConversationStatus = "draft" | "queued" | "assigning_account" | "running" | "success" | "error";
 
-export type ImageConversation = {
+export type ImageConversationTurn = {
   id: string;
-  clientConversationId: string;
-  title: string;
   prompt: string;
   model: ImageModel;
   count: number;
+  size: string;
   copiedText?: string;
   inputImage?: StoredInputImage | null;
   images: StoredImage[];
@@ -42,6 +41,29 @@ export type ImageConversation = {
   requestStartedAt?: string;
   requestFinishedAt?: string;
   lastError?: string;
+  responseId?: string;
+};
+
+export type ImageConversation = {
+  id: string;
+  clientConversationId: string;
+  title: string;
+  createdAt: string;
+  turns: ImageConversationTurn[];
+  prompt?: string;
+  model?: ImageModel;
+  count?: number;
+  size?: string;
+  copiedText?: string;
+  inputImage?: StoredInputImage | null;
+  images?: StoredImage[];
+  status?: ImageConversationStatus;
+  error?: string;
+  queueRequestId?: string;
+  requestStartedAt?: string;
+  requestFinishedAt?: string;
+  lastError?: string;
+  responseId?: string;
 };
 
 const imageConversationStorage = localforage.createInstance({
@@ -115,31 +137,86 @@ function normalizeStoredInputImage(inputImage: StoredInputImage | null | undefin
   };
 }
 
+function normalizeTurn(turn: ImageConversationTurn, fallbackId: string): ImageConversationTurn {
+  const normalizedStatus =
+    turn.status === "success" ||
+    turn.status === "error" ||
+    turn.status === "draft" ||
+    turn.status === "queued" ||
+    turn.status === "assigning_account" ||
+    turn.status === "running"
+      ? turn.status
+      : "error";
+  return {
+    ...turn,
+    id: String(turn.id || fallbackId || "").trim() || `turn-${Date.now()}`,
+    prompt: String(turn.prompt || "").trim(),
+    model: (turn.model || "gpt-image-2") as ImageModel,
+    count: Math.max(1, Number(turn.count || 1)),
+    size: String(turn.size || "auto").trim() || "auto",
+    copiedText: String(turn.copiedText || "").trim() || undefined,
+    inputImage: normalizeStoredInputImage(turn.inputImage),
+    images: (turn.images || []).map(normalizeStoredImage),
+    status: normalizedStatus,
+    queueRequestId: String(turn.queueRequestId || "").trim() || undefined,
+    requestStartedAt: String(turn.requestStartedAt || "").trim() || undefined,
+    requestFinishedAt: String(turn.requestFinishedAt || "").trim() || undefined,
+    lastError: String(turn.lastError || turn.error || "").trim() || undefined,
+    error: String(turn.error || "").trim() || undefined,
+    responseId: String(turn.responseId || "").trim() || undefined,
+  };
+}
+
+function legacyConversationToTurn(conversation: ImageConversation): ImageConversationTurn {
+  return normalizeTurn(
+    {
+      id: `${conversation.id}-turn-1`,
+      prompt: String(conversation.prompt || "").trim(),
+      model: (conversation.model || "gpt-image-2") as ImageModel,
+      count: Math.max(1, Number(conversation.count || 1)),
+      size: String(conversation.size || "auto").trim() || "auto",
+      copiedText: conversation.copiedText,
+      inputImage: conversation.inputImage,
+      images: conversation.images || [],
+      createdAt: conversation.createdAt,
+      status: conversation.status || "draft",
+      error: conversation.error,
+      queueRequestId: conversation.queueRequestId,
+      requestStartedAt: conversation.requestStartedAt,
+      requestFinishedAt: conversation.requestFinishedAt,
+      lastError: conversation.lastError,
+      responseId: conversation.responseId,
+    },
+    `${conversation.id}-turn-1`,
+  );
+}
+
 function normalizeConversation(conversation: ImageConversation): ImageConversation {
   const clientConversationId =
     String(conversation.clientConversationId || conversation.id || "").trim() ||
     String(conversation.id || "").trim();
-  const normalizedStatus =
-    conversation.status === "success" ||
-    conversation.status === "error" ||
-    conversation.status === "draft" ||
-    conversation.status === "queued" ||
-    conversation.status === "assigning_account" ||
-    conversation.status === "running"
-      ? conversation.status
-      : "error";
+  const turns = Array.isArray(conversation.turns) && conversation.turns.length > 0
+    ? conversation.turns.map((turn, index) => normalizeTurn(turn, `${conversation.id}-turn-${index + 1}`))
+    : [legacyConversationToTurn(conversation)];
+  const latestTurn = turns[turns.length - 1];
   return {
     ...conversation,
     clientConversationId,
-    copiedText: String(conversation.copiedText || "").trim() || undefined,
-    inputImage: normalizeStoredInputImage(conversation.inputImage),
-    images: (conversation.images || []).map(normalizeStoredImage),
-    status: normalizedStatus,
-    queueRequestId: String(conversation.queueRequestId || "").trim() || undefined,
-    requestStartedAt: String(conversation.requestStartedAt || "").trim() || undefined,
-    requestFinishedAt: String(conversation.requestFinishedAt || "").trim() || undefined,
-    lastError: String(conversation.lastError || conversation.error || "").trim() || undefined,
-    error: String(conversation.error || "").trim() || undefined,
+    turns,
+    prompt: latestTurn.prompt,
+    model: latestTurn.model,
+    count: latestTurn.count,
+    size: latestTurn.size,
+    copiedText: latestTurn.copiedText,
+    inputImage: latestTurn.inputImage,
+    images: latestTurn.images,
+    status: latestTurn.status,
+    queueRequestId: latestTurn.queueRequestId,
+    requestStartedAt: latestTurn.requestStartedAt,
+    requestFinishedAt: latestTurn.requestFinishedAt,
+    lastError: latestTurn.lastError,
+    error: latestTurn.error,
+    responseId: latestTurn.responseId,
   };
 }
 

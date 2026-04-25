@@ -22,13 +22,14 @@ class BackendService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
         self.image_gateway = ImageGateway(
-            lambda access_token, prompt, model, n, input_images, route: generate_image_result(
+            lambda access_token, prompt, model, n, input_images, route, size=None: generate_image_result(
                 access_token,
                 prompt,
                 model,
                 n,
                 input_images=input_images,
                 route=route,
+                size=size,
             )
         )
 
@@ -95,6 +96,7 @@ class BackendService:
         n: int,
         input_images: list[dict[str, str]] | None = None,
         queue_request_id: str | None = None,
+        size: str | None = None,
     ):
         attempted_tokens: set[str] = set()
 
@@ -126,7 +128,7 @@ class BackendService:
                 )
                 print(
                     f"[image-generate] start pooled token={self._token_label(request_token)} "
-                    f"model={model} n={n} route={route}"
+                    f"model={model} n={n} size={size or 'auto'} route={route}"
                 )
                 result = self.image_gateway.generate_image(
                     request_token,
@@ -135,6 +137,7 @@ class BackendService:
                     n,
                     input_images=input_images,
                     route=route,
+                    size=size,
                 )
                 account = self.account_service.mark_image_result(request_token, success=True)
                 print(

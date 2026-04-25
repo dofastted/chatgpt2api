@@ -67,6 +67,7 @@ POST /v1/images/generations
 说明：
 
 - `model` 当前只支持 `gpt-image-2`
+- `size` 默认 `auto`；传 `WIDTHxHEIGHT` 时会按 16 的倍数向下规整
 - `user key` 调用时，实际扣费 = 当前 key 的模型单价 × `n`
 - 响应会额外返回 `billing`，包含本次模型、单价、实际扣减次数和剩余次数
 - 如果上游页面返回了可复制文本，响应还会额外带 `copied_text`
@@ -93,6 +94,8 @@ POST /v1/responses
 - 顶层 `model` 按 OpenAI 官方格式应传文本模型，比如 `gpt-5`、`gpt-5.4`
 - `input_image` 支持两种写法：`image_url` 只接受 `http(s)` 或 `data:image/*`，`file_id` 对应本地上传接口返回的文件标识
 - 图片模型放在 `tools[].model`，当前只支持 `gpt-image-2`；如果没传，默认按 `gpt-image-2` 处理
+- 图片尺寸放在 `tools[].size`，默认 `auto`；非 `auto` 会规整后传给上游
+- 支持 `previous_response_id` 指向本服务生成过的 response，用于带入最近历史文本上下文；找不到会返回 `404`
 - `n` 最多 2
 - 返回 `response.output[]`，其中图片结果项是 `type: "image_generation_call"`，图片 base64 在 `result`
 - 如果上游页面返回了可复制文本，响应顶层还会带 `copied_text`
@@ -112,7 +115,7 @@ POST /v1/images/edits
 
 说明：
 
-- 接收 `multipart/form-data`，字段包含 `prompt`、`image`，可选 `model`、`n`、`response_format` 和 `stream`
+- 接收 `multipart/form-data`，字段包含 `prompt`、`image`，可选 `model`、`n`、`response_format`、`size` 和 `stream`
 - `model` 当前只支持 `gpt-image-2`
 - 当前实现会把上传图片转为输入图，再走同一套队列、账号池、上游请求和用户 key 计费规则
 

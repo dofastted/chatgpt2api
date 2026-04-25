@@ -36,8 +36,10 @@
 
 - 画图页不再读账号列表，而是调用 `/api/quota` 显示当前 key 可用次数。如果当前是 `user_key`，也会拿到这个 key 自己的 `pricing`，入口在 `web/src/app/image/page.tsx:240`。
 - 画图页工具区提供“打开画廊”入口，画廊预览弹层可把 prompt 带回 `/image?prompt=...&focus=prompt`。
+- 画图页左侧只保留新建对话、图像尺寸、队列简况和会话列表。图像尺寸默认 `auto`，弹窗支持自动、比例和自定义宽高；尺寸计算在 `web/src/lib/image-size.ts`。
 - 前端发送时会先按当前 key 的模型单价和张数算成本，展示“本次消耗”和“当前单价”。当前默认模型已经固定成 `gpt-image-2`，实现见 `web/src/app/image/page.tsx:151`、`web/src/app/image/page.tsx:169`、`web/src/app/image/page.tsx:864`。
 - 如果当前额度不够，发送按钮会禁用，并显示提示，位置在 `web/src/app/image/page.tsx:644` 和 `web/src/app/image/page.tsx:652`。
 - 图片请求继续一次请求带 `n`。如果后端返回 `billing.remaining_quota`，前端会先就地刷新余额，再同步拉一次 `/api/quota`，位置在 `web/src/app/image/page.tsx:373` 和 `web/src/lib/api.ts:235`。
 - 如果后端返回了 `copied_text`，画图页会把它保存到当前会话，并在结果区渲染一个“可复制文本”卡片，入口在 `web/src/app/image/page.tsx:489` 和 `web/src/app/image/page.tsx:724`。
-- 会话历史保存在浏览器本地，读写入口在 `web/src/store/image-conversations.ts:26`、`web/src/store/image-conversations.ts:89`、`web/src/store/image-conversations.ts:98`、`web/src/store/image-conversations.ts:103`。
+- 会话历史保存在浏览器本地，读写入口在 `web/src/store/image-conversations.ts`。新结构是会话级 `id/title/clientConversationId/createdAt` 加 `turns[]`，旧单轮记录读取时自动映射成一个 turn。
+- 在已有会话内继续发送时，前端会追加新 turn，不覆盖旧结果；结果按 `conversationId + turnId` 回写，避免切换会话后写到当前可见会话。

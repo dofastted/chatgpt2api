@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
 
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="chatgpt2api-tests-config-"))
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth-key")
@@ -18,11 +19,15 @@ os.environ.setdefault("CHATGPT2API_USER_KEYS_FILE", str(TEST_ROOT / "bootstrap-u
 sys.modules.setdefault("pybase64", base64)
 
 from services import api  # noqa: E402
+from services.image_size import normalize_image_size  # noqa: E402
 from services.image_service import ImageGenerationError  # noqa: E402
 from services.user_key_service import UserKeyService  # noqa: E402
 
 
 class FakeBackendService:
+    def __init__(self) -> None:
+        self.last_call: dict[str, object] = {}
+
     def generate_with_pool(
         self,
         prompt: str,
@@ -30,8 +35,16 @@ class FakeBackendService:
         n: int,
         input_images: list[dict[str, str]] | None = None,
         queue_request_id: str | None = None,
+        size: str | None = None,
     ) -> dict:
-        del prompt, n, input_images, queue_request_id
+        del queue_request_id
+        self.last_call = {
+            "prompt": prompt,
+            "model": model,
+            "n": n,
+            "input_images": input_images,
+            "size": size,
+        }
         return {
             "created": 123,
             "data": [{"b64_json": model, "mime_type": "image/png"}],
@@ -47,6 +60,8 @@ class ApiImageModelRuleTests(unittest.TestCase):
         api.user_key_service._user_keys = []
         api.redeem_code_service.store_file = self.redeem_codes_file
         api.redeem_code_service._items = []
+        with api.RESPONSES_STORE_LOCK:
+            api.RESPONSES_STORE.clear()
 
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -72,6 +87,13 @@ class ApiImageModelRuleTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 400)
         self.assertIn("unsupported image model", raised.exception.detail["error"])
+
+    def test_normalize_image_size_rounds_down_to_multiple_of_sixteen(self) -> None:
+        self.assertEqual(normalize_image_size(None), "auto")
+        self.assertEqual(normalize_image_size("auto"), "auto")
+        self.assertEqual(normalize_image_size("1025x1351"), "1024x1344")
+        with self.assertRaises(ValueError):
+            normalize_image_size("wide")
 
     def test_responses_request_defaults_to_image_2_when_tool_model_missing(self) -> None:
         request = api.ResponsesCreateRequest(
@@ -106,6 +128,7 @@ class ApiImageModelRuleTests(unittest.TestCase):
                     prompt="draw a cat",
                     model="gpt-image-2",
                     n=1,
+                    size="1024x1024",
                 )
             )
 
@@ -116,6 +139,74 @@ class ApiImageModelRuleTests(unittest.TestCase):
         self.assertEqual(billing_payload["charged_quota"], 2)
         self.assertEqual(billing_payload["remaining_quota"], 8)
         self.assertEqual(result["data"][0]["b64_json"], "gpt-image-2")
+        self.assertEqual(service.last_call["size"], "1024x1024")
+
+    def test_responses_previous_response_id_adds_history_context_and_size(self) -> None:
+        previous_payload = api.build_responses_payload(
+            response_id="resp_previous",
+            response_model="gpt-5",
+            image_result={"created": 123, "data": [{"b64_json": "old"}]},
+            billing=None,
+            metadata={"size": "1024x1024"},
+        )
+        api.response_store_set(
+            "resp_previous",
+            {
+                **previous_payload,
+                "_history": [
+                    {
+                        "response_id": "resp_previous",
+                        "prompt": "draw first image",
+                        "size": "1024x1024",
+                        "input_images": [],
+                        "output_count": 1,
+                    }
+                ],
+            },
+        )
+        calls: list[dict[str, object]] = []
+
+        async def fake_generate_image_payload(**kwargs):
+            calls.append(dict(kwargs))
+            return {
+                "created": 123,
+                "data": [{"b64_json": "new", "mime_type": "image/png"}],
+            }, None
+
+        with patch.object(api, "generate_image_payload", side_effect=fake_generate_image_payload):
+            with TestClient(api.create_app()) as client:
+                response = client.post(
+                    "/v1/responses",
+                    headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                    json={
+                        "model": "gpt-5",
+                        "previous_response_id": "resp_previous",
+                        "input": [{"type": "input_text", "text": "draw second image"}],
+                        "tools": [{"type": "image_generation", "model": "gpt-image-2", "size": "1025x1351"}],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["previous_response_id"], "resp_previous")
+        self.assertEqual(payload["metadata"]["size"], "1024x1344")
+        self.assertEqual(payload["metadata"]["context_mode"], "text_history")
+        self.assertIn("历史上下文", calls[0]["prompt"])
+        self.assertEqual(calls[0]["size"], "1024x1344")
+
+    def test_responses_previous_response_id_not_found_returns_404(self) -> None:
+        with TestClient(api.create_app()) as client:
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "model": "gpt-5",
+                    "previous_response_id": "resp_missing",
+                    "input": [{"type": "input_text", "text": "draw"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                },
+            )
+        self.assertEqual(response.status_code, 404)
 
     def test_build_image_payloads_preserve_copied_text(self) -> None:
         image_result = {
@@ -146,8 +237,8 @@ class ApiImageModelRuleTests(unittest.TestCase):
         self.assertIsNotNone(context)
 
         class FailingBackendService:
-            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None, queue_request_id=None) -> dict:
-                del prompt, model, n, input_images, queue_request_id
+            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None, queue_request_id=None, size=None) -> dict:
+                del prompt, model, n, input_images, queue_request_id, size
                 raise ImageGenerationError("conversation failed: 524")
 
         async def fake_run_in_threadpool(func, *args):

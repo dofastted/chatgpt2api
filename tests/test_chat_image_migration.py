@@ -48,8 +48,9 @@ class RecordingGateway:
         *,
         input_images: list[dict[str, str]] | None = None,
         route: str = "legacy",
+        size: str | None = None,
     ) -> dict:
-        del access_token, prompt, model, n, input_images
+        del access_token, prompt, model, n, input_images, size
         self.routes.append(route)
         return {"created": 1, "data": [{"b64_json": "ok"}]}
 
@@ -152,8 +153,9 @@ class ChatImageMigrationTests(unittest.TestCase):
             n: int,
             input_images: list[dict[str, str]] | None,
             route: str,
+            size: str | None = None,
         ) -> dict:
-            calls.append({"route": route, "input_images": input_images})
+            calls.append({"route": route, "input_images": input_images, "size": size})
             return {"created": 1, "data": [{"b64_json": "ok"}]}
 
         gateway = ImageGateway(fake_executor)
@@ -166,7 +168,10 @@ class ChatImageMigrationTests(unittest.TestCase):
             route="responses",
         )
 
-        self.assertEqual(calls, [{"route": "responses", "input_images": [{"image_url": "data:image/png;base64,aW1n"}]}])
+        self.assertEqual(
+            calls,
+            [{"route": "responses", "input_images": [{"image_url": "data:image/png;base64,aW1n"}], "size": None}],
+        )
 
     def test_singular_response_endpoint_is_not_registered(self) -> None:
         client = TestClient(api.create_app())

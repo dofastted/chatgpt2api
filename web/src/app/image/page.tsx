@@ -19,6 +19,7 @@ import {
   ImagePlus,
   LoaderCircle,
   MessageSquarePlus,
+  Ruler,
   Trash2,
   X,
 } from "lucide-react";
@@ -47,11 +48,18 @@ import {
   replaceImageConversations,
   saveImageConversation,
   type ImageConversation,
+  type ImageConversationTurn,
   type StoredInputImage,
   type StoredImage,
 } from "@/store/image-conversations";
 import { getStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
+import {
+  calculateImageSize,
+  formatImageSizeLabel,
+  normalizeImageSize,
+  type ImageSizeMode,
+} from "@/lib/image-size";
 
 const imageModelMeta: Record<ImageModel, { helperText: string }> = {
   "gpt-image-1": {
@@ -131,6 +139,13 @@ type PendingInputImage = {
   clientConversationId: string;
 };
 
+type SizeDialogState = {
+  mode: ImageSizeMode;
+  ratio: string;
+  width: string;
+  height: string;
+};
+
 type ImageQueueStatusSnapshot = Awaited<
   ReturnType<typeof fetchImageQueueStatus>
 >;
@@ -205,6 +220,26 @@ function createClientRequestId(prefix = "") {
   return prefix ? `${prefix}fallback-request-id` : "fallback-request-id";
 }
 
+function getConversationTurns(conversation: ImageConversation | null | undefined) {
+  return Array.isArray(conversation?.turns) ? conversation.turns : [];
+}
+
+function getLatestTurn(conversation: ImageConversation | null | undefined) {
+  const turns = getConversationTurns(conversation);
+  return turns[turns.length - 1] || null;
+}
+
+function updateConversationTurn(
+  conversation: ImageConversation,
+  turnId: string,
+  updater: (turn: ImageConversationTurn) => ImageConversationTurn,
+) {
+  return {
+    ...conversation,
+    turns: getConversationTurns(conversation).map((turn) => (turn.id === turnId ? updater(turn) : turn)),
+  };
+}
+
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -227,20 +262,21 @@ async function normalizeConversationHistory(
   items: ImageConversation[],
   scope: string,
 ) {
-  const normalized = items.map((item) =>
-    (item.status === "queued" ||
-      item.status === "assigning_account" ||
-      item.status === "running") &&
-    !activeGenerationKeys.has(`${scope}:${item.id}`)
-      ? {
-          ...item,
+  const normalized = items.map((item) => {
+    const turns = getConversationTurns(item).map((turn) => {
+      if (
+        (turn.status === "queued" || turn.status === "assigning_account" || turn.status === "running") &&
+        !activeGenerationKeys.has(`${scope}:${item.id}:${turn.id}`)
+      ) {
+        return {
+          ...turn,
           status: "error" as const,
-          error: item.images.some((image) => image.status === "success")
-            ? item.error || item.lastError || "页面刷新后未找回运行态"
+          error: turn.images.some((image) => image.status === "success")
+            ? turn.error || turn.lastError || "页面刷新后未找回运行态"
             : "页面刷新后未找回运行态",
-          lastError: item.lastError || "页面刷新后未找回运行态",
-          requestFinishedAt: item.requestFinishedAt || new Date().toISOString(),
-          images: item.images.map((image) =>
+          lastError: turn.lastError || "页面刷新后未找回运行态",
+          requestFinishedAt: turn.requestFinishedAt || new Date().toISOString(),
+          images: turn.images.map((image) =>
             image.status === "loading"
               ? {
                   ...image,
@@ -249,9 +285,12 @@ async function normalizeConversationHistory(
                 }
               : image,
           ),
-        }
-      : item,
-  );
+        };
+      }
+      return turn;
+    });
+    return { ...item, turns };
+  });
 
   if (normalized.some((item, index) => item !== items[index])) {
     await replaceImageConversations(scope, normalized);
@@ -266,6 +305,14 @@ export default function ImagePage() {
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
+  const [imageSize, setImageSize] = useState("auto");
+  const [isSizeDialogOpen, setIsSizeDialogOpen] = useState(false);
+  const [sizeDraft, setSizeDraft] = useState<SizeDialogState>({
+    mode: "auto",
+    ratio: "1:1",
+    width: "1024",
+    height: "1024",
+  });
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<
     string | null
@@ -362,36 +409,36 @@ export default function ImagePage() {
     () => availableQuota !== null && requestCost > Math.max(0, availableQuota),
     [availableQuota, requestCost],
   );
-  const availableQuotaLabel =
-    availableQuota === null ? "加载中" : String(Math.max(0, availableQuota));
   const selectedConversation = useMemo(
     () =>
       conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
   );
+  const selectedTurn = useMemo(() => getLatestTurn(selectedConversation), [selectedConversation]);
   const activeRequestIds = useMemo(
     () =>
       Array.from(
         new Set(
           conversations
+            .flatMap((item) => getConversationTurns(item))
             .filter(
-              (item) =>
-                Boolean(item.queueRequestId) &&
-                (item.status === "queued" ||
-                  item.status === "assigning_account" ||
-                  item.status === "running"),
+              (turn) =>
+                Boolean(turn.queueRequestId) &&
+                (turn.status === "queued" ||
+                  turn.status === "assigning_account" ||
+                  turn.status === "running"),
             )
-            .map((item) => String(item.queueRequestId || "").trim())
+            .map((turn) => String(turn.queueRequestId || "").trim())
             .filter(Boolean),
         ),
       ),
     [conversations],
   );
-  const selectedConversationRequestId = selectedConversation?.queueRequestId || null;
+  const selectedConversationRequestId = selectedTurn?.queueRequestId || null;
   const isComposerGenerating = activeRequestIds.length > 0;
   const previewableImages = useMemo<PreviewableImage[]>(
     () =>
-      (selectedConversation?.images || []).flatMap((image, index) =>
+      (selectedTurn?.images || []).flatMap((image, index) =>
         image.status === "success" && image.b64_json
           ? [
               {
@@ -407,7 +454,7 @@ export default function ImagePage() {
             ]
           : [],
       ),
-    [selectedConversation],
+    [selectedTurn],
   );
   const activePreviewImageId = useMemo(
     () =>
@@ -427,15 +474,15 @@ export default function ImagePage() {
   const hasNextPreviewImage =
     previewImageIndex >= 0 && previewImageIndex < previewableImages.length - 1;
   const currentQueueRequest = useMemo(() => {
-    if (!selectedConversation?.queueRequestId) {
+    if (!selectedTurn?.queueRequestId) {
       return null;
     }
     return (
       (queueStatus?.items || []).find(
-        (item) => item.request_id === selectedConversation.queueRequestId,
+        (item) => item.request_id === selectedTurn.queueRequestId,
       ) || null
     );
-  }, [queueStatus, selectedConversation]);
+  }, [queueStatus, selectedTurn]);
   const activeQueueItems = useMemo(
     () =>
       (queueStatus?.items || []).filter(
@@ -668,16 +715,11 @@ export default function ImagePage() {
   };
 
   const handleCreateDraft = () => {
-    const clientConversationId = createClientRequestId("conv-");
     setSelectedConversationId(null);
     setPreviewImageId(null);
     setImagePrompt("");
     setInputImage(null);
-    setInputImage(null);
     textareaRef.current?.focus();
-    void Promise.resolve().then(() => {
-      setInputImage(null);
-    });
   };
 
   const handleDeleteConversation = async (id: string) => {
@@ -723,6 +765,21 @@ export default function ImagePage() {
     }
   };
 
+  const handleApplyImageSize = () => {
+    try {
+      const nextSize =
+        sizeDraft.mode === "auto"
+          ? "auto"
+          : sizeDraft.mode === "ratio"
+            ? calculateImageSize(sizeDraft.ratio)
+            : normalizeImageSize(`${sizeDraft.width}x${sizeDraft.height}`);
+      setImageSize(nextSize);
+      setIsSizeDialogOpen(false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "图片尺寸无效");
+    }
+  };
+
   const handleGenerateImage = async () => {
     if (!conversationScope) {
       toast.error("当前登录信息还在初始化，请稍后再试");
@@ -740,7 +797,14 @@ export default function ImagePage() {
     }
 
     const now = new Date().toISOString();
-    const conversationId = currentInputImage?.clientConversationId || createClientRequestId("conv-");
+    const existingConversation = selectedConversation;
+    const latestTurn = getLatestTurn(existingConversation);
+    const conversationId =
+      existingConversation?.clientConversationId ||
+      currentInputImage?.clientConversationId ||
+      createClientRequestId("conv-");
+    const conversationRecordId = existingConversation?.id || conversationId;
+    const turnId = createClientRequestId("turn-");
     const queueRequestId = createClientRequestId("queue-");
     const draftInputImage: StoredInputImage | null = currentInputImage
       ? {
@@ -756,17 +820,16 @@ export default function ImagePage() {
           sizeBytes: currentInputImage.sizeBytes,
         }
       : null;
-    const draftConversation: ImageConversation = {
-      id: conversationId,
-      clientConversationId: conversationId,
-      title: buildConversationTitle(prompt),
+    const draftTurn: ImageConversationTurn = {
+      id: turnId,
       prompt,
       model: imageModel,
       count: parsedCount,
+      size: imageSize,
       copiedText: undefined,
       inputImage: draftInputImage,
       images: Array.from({ length: parsedCount }, (_, index) => ({
-        id: `${conversationId}-${index}`,
+        id: `${turnId}-${index}`,
         status: "loading" as const,
       })),
       createdAt: now,
@@ -774,13 +837,25 @@ export default function ImagePage() {
       queueRequestId,
       requestStartedAt: now,
     };
-    const activeGenerationKey = `${conversationScope}:${conversationId}`;
+    const draftConversation: ImageConversation = existingConversation
+      ? {
+          ...existingConversation,
+          turns: [...getConversationTurns(existingConversation), draftTurn],
+        }
+      : {
+          id: conversationRecordId,
+          clientConversationId: conversationId,
+          title: buildConversationTitle(prompt),
+          createdAt: now,
+          turns: [draftTurn],
+        };
+    const activeGenerationKey = `${conversationScope}:${conversationRecordId}:${turnId}`;
     setQueueTitles((prev) => ({
       ...prev,
       [queueRequestId]: draftConversation.title,
     }));
 
-    setSelectedConversationId(conversationId);
+    setSelectedConversationId(conversationRecordId);
     setImagePrompt("");
     setInputImage(null);
 
@@ -793,6 +868,8 @@ export default function ImagePage() {
         inputImageFileId: currentInputImage?.fileId,
         queueRequestId,
         clientConversationId: conversationId,
+        previousResponseId: latestTurn?.responseId,
+        size: imageSize,
       });
       const returnedItems = Array.isArray(data.data) ? data.data : [];
       if (data.billing) {
@@ -806,7 +883,7 @@ export default function ImagePage() {
           const current = returnedItems[index];
           if (current?.b64_json) {
             return {
-              id: `${conversationId}-${index}`,
+              id: `${turnId}-${index}`,
               status: "success",
               b64_json: current.b64_json,
               mimeType:
@@ -815,7 +892,7 @@ export default function ImagePage() {
             };
           }
           return {
-            id: `${conversationId}-${index}`,
+            id: `${turnId}-${index}`,
             status: "error",
             error: `第 ${index + 1} 张没有返回图片数据`,
           };
@@ -831,15 +908,18 @@ export default function ImagePage() {
         throw new Error("生成图片失败");
       }
 
-      await updateConversation(conversationId, (current) => ({
-        ...(current ?? draftConversation),
-        copiedText: String(data.copied_text || "").trim() || undefined,
-        images: nextImages,
-        status: failedCount > 0 ? "error" : "success",
-        error: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
-        lastError: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
-        requestFinishedAt: new Date().toISOString(),
-      }));
+      await updateConversation(conversationRecordId, (current) =>
+        updateConversationTurn(current ?? draftConversation, turnId, (turn) => ({
+          ...turn,
+          copiedText: String(data.copied_text || "").trim() || undefined,
+          images: nextImages,
+          status: failedCount > 0 ? "error" : "success",
+          error: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
+          lastError: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
+          requestFinishedAt: new Date().toISOString(),
+          responseId: String(data.id || "").trim() || turn.responseId,
+        })),
+      );
       await loadQuota();
 
       if (failedCount > 0) {
@@ -853,10 +933,17 @@ export default function ImagePage() {
       const message = error instanceof Error ? error.message : "生成图片失败";
       await persistConversation({
         ...draftConversation,
-        status: "error",
-        error: message,
-        lastError: message,
-        requestFinishedAt: new Date().toISOString(),
+        turns: getConversationTurns(draftConversation).map((turn) =>
+          turn.id === turnId
+            ? {
+                ...turn,
+                status: "error",
+                error: message,
+                lastError: message,
+                requestFinishedAt: new Date().toISOString(),
+              }
+            : turn,
+        ),
       });
       toast.error(message);
     } finally {
@@ -893,14 +980,17 @@ export default function ImagePage() {
     }
     try {
       setIsUploadingInputImage(true);
+      const uploadConversationId =
+        selectedConversation?.clientConversationId ||
+        inputImage?.clientConversationId ||
+        createClientRequestId("conv-");
       const [dataUrl, uploadedImage] = await Promise.all([
         readFileAsDataUrl(file),
-        uploadInputImage(file, inputImage?.clientConversationId || createClientRequestId("conv-")),
+        uploadInputImage(file, uploadConversationId),
       ]);
       const clientConversationId =
         String(uploadedImage.client_conversation_id || "").trim() ||
-        inputImage?.clientConversationId ||
-        createClientRequestId("conv-");
+        uploadConversationId;
       const imageId =
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? crypto.randomUUID()
@@ -972,28 +1062,21 @@ export default function ImagePage() {
             </div>
 
             <div className="minimal-fade-soft flex min-h-0 flex-col border-t border-white/8 pt-4 [animation-delay:120ms] lg:flex-1">
-              <div className="space-y-2 text-xs text-stone-500">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-stone-400">当前模型</span>
-                  <span className="font-medium text-stone-900">
-                    {imageModel}
+              <div className="space-y-3 text-xs text-stone-500">
+                <button
+                  type="button"
+                  onClick={() => setIsSizeDialogOpen(true)}
+                  className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3 text-left text-stone-200 transition hover:bg-white/[0.08]"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Ruler className="size-4" />
+                    图像尺寸
                   </span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-stone-400">剩余额度</span>
-                  <span className="font-medium text-stone-900">
-                    {availableQuotaLabel}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-stone-400">本次消耗</span>
-                  <span className="font-medium text-stone-900">
-                    {requestCost} 额度
-                  </span>
-                </div>
+                  <span className="font-medium">{formatImageSizeLabel(imageSize)}</span>
+                </button>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-stone-400">当前队列</span>
-                  <span className="font-medium text-stone-900">
+                  <span className="font-medium text-stone-200">
                     {queueStatus
                       ? `${queueStatus.user.waiting} 等待 / ${queueStatus.user.running} 运行`
                       : "加载中"}
@@ -1001,7 +1084,7 @@ export default function ImagePage() {
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-stone-400">当前请求</span>
-                  <span className="text-right font-medium text-stone-900">
+                  <span className="text-right font-medium text-stone-200">
                     {currentQueueRequest?.position
                       ? `第 ${currentQueueRequest.position} 位`
                       : currentQueueRequest
@@ -1011,9 +1094,6 @@ export default function ImagePage() {
                 </div>
               </div>
               <p className="mt-4 text-[11px] leading-5 text-stone-400">
-                当前单价 {currentUnitCost} 额度 / 张
-              </p>
-              <p className="mt-2 text-[11px] leading-5 text-stone-400">
                 {currentQueueProgressText}
               </p>
 
@@ -1130,136 +1210,138 @@ export default function ImagePage() {
               </div>
             ) : (
               <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5">
-                <div className="flex justify-end">
-                  <div className="flex max-w-full flex-col items-end gap-3 sm:max-w-[80%]">
-                    {selectedConversation.inputImage ? (
-                      <div className="minimal-surface-hover minimal-fade-soft overflow-hidden rounded-[18px] border border-stone-200 bg-white shadow-sm">
-                        <img
-                          src={selectedConversation.inputImage.dataUrl}
-                          alt={
-                            selectedConversation.inputImage.fileName || "参考图"
-                          }
-                          className="block h-28 w-28 object-cover"
-                        />
-                        <div className="border-t border-stone-100 px-3 py-2 text-[11px] text-stone-500">
-                          {selectedConversation.inputImage.fileName || "参考图"}
+                {getConversationTurns(selectedConversation).map((turn) => (
+                  <div key={turn.id} className="space-y-4">
+                    <div className="flex justify-end">
+                      <div className="flex max-w-full flex-col items-end gap-3 sm:max-w-[80%]">
+                        {turn.inputImage ? (
+                          <div className="minimal-surface-hover minimal-fade-soft overflow-hidden rounded-[18px] border border-stone-200 bg-white shadow-sm">
+                            <img
+                              src={turn.inputImage.dataUrl}
+                              alt={turn.inputImage.fileName || "参考图"}
+                              className="block h-28 w-28 object-cover"
+                            />
+                            <div className="border-t border-stone-100 px-3 py-2 text-[11px] text-stone-500">
+                              {turn.inputImage.fileName || "参考图"}
+                            </div>
+                          </div>
+                        ) : null}
+                        <div className="px-1 pt-1 text-right text-sm leading-7 text-stone-700 sm:text-[15px] sm:leading-8">
+                          {turn.prompt}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                        {turn.model}
+                      </span>
+                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                        {turn.count} 张
+                      </span>
+                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                        {formatImageSizeLabel(turn.size || "auto")}
+                      </span>
+                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                        {formatConversationTime(turn.createdAt)}
+                      </span>
+                    </div>
+
+                    {(turn.status === "queued" ||
+                      turn.status === "assigning_account" ||
+                      turn.status === "running") &&
+                    turn.id === selectedTurn?.id ? (
+                      <div className="minimal-surface-hover minimal-fade-soft rounded-[20px] border border-stone-200 bg-stone-50/90 px-4 py-4">
+                        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-stone-400">
+                          <LoaderCircle className="size-4 animate-spin" />
+                          排队进度
+                        </div>
+                        <div className="mt-3 text-sm leading-6 text-stone-700">
+                          {currentQueueProgressText}
                         </div>
                       </div>
                     ) : null}
-                    <div className="px-1 pt-1 text-right text-sm leading-7 text-stone-700 sm:text-[15px] sm:leading-8">
-                      {selectedConversation.prompt}
-                    </div>
-                  </div>
-                </div>
 
-                <div className="space-y-4">
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                    <span className="rounded-full bg-stone-100 px-3 py-1">
-                      {selectedConversation.model}
-                    </span>
-                    <span className="rounded-full bg-stone-100 px-3 py-1">
-                      {selectedConversation.count} 张
-                    </span>
-                    <span className="rounded-full bg-stone-100 px-3 py-1">
-                      {formatConversationTime(selectedConversation.createdAt)}
-                    </span>
-                  </div>
-
-                  {selectedConversation.status === "generating" ? (
-                    <div className="minimal-surface-hover minimal-fade-soft rounded-[20px] border border-stone-200 bg-stone-50/90 px-4 py-4">
-                      <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-stone-400">
-                        <LoaderCircle className="size-4 animate-spin" />
-                        排队进度
-                      </div>
-                      <div className="mt-3 text-sm leading-6 text-stone-700">
-                        {currentQueueProgressText}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {selectedConversation.copiedText ? (
-                    <div className="minimal-surface-hover minimal-fade-soft rounded-[20px] border border-stone-200 bg-stone-50/80 px-4 py-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-xs font-medium uppercase tracking-[0.16em] text-stone-400">
-                          可复制文本
+                    {turn.copiedText ? (
+                      <div className="minimal-surface-hover minimal-fade-soft rounded-[20px] border border-stone-200 bg-stone-50/80 px-4 py-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-xs font-medium uppercase tracking-[0.16em] text-stone-400">
+                            可复制文本
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 rounded-full border-stone-200 bg-white text-stone-600 hover:bg-stone-100"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(turn.copiedText || "");
+                              toast.success("文本已复制");
+                            }}
+                          >
+                            <Copy className="size-4" />
+                            复制
+                          </Button>
                         </div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-8 rounded-full border-stone-200 bg-white text-stone-600 hover:bg-stone-100"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(
-                              selectedConversation.copiedText || "",
-                            );
-                            toast.success("文本已复制");
-                          }}
-                        >
-                          <Copy className="size-4" />
-                          复制
-                        </Button>
+                        <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-stone-700">
+                          {turn.copiedText}
+                        </pre>
                       </div>
-                      <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-stone-700">
-                        {selectedConversation.copiedText}
-                      </pre>
-                    </div>
-                  ) : null}
+                    ) : null}
 
-                  {selectedConversation.status === "error" &&
-                  selectedConversation.images.length === 0 ? (
-                    <div className="border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600">
-                      {selectedConversation.error || "生成失败"}
-                    </div>
-                  ) : null}
+                    {turn.status === "error" && turn.images.length === 0 ? (
+                      <div className="border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600">
+                        {turn.error || "生成失败"}
+                      </div>
+                    ) : null}
 
-                  {selectedConversation.images.length > 0 ? (
-                    <div className="columns-1 gap-4 space-y-4 sm:columns-2 xl:columns-3">
-                      {selectedConversation.images.map((image, index) => (
-                        <div
-                          key={image.id}
-                          className="minimal-fade-soft break-inside-avoid overflow-hidden rounded-[22px]"
-                        >
-                          {image.status === "success" && image.b64_json ? (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenPreview(image.id)}
-                              className="minimal-surface-hover group block w-full overflow-hidden rounded-[22px] bg-stone-100 text-left"
-                              aria-label={`预览第 ${index + 1} 张图片`}
-                            >
-                              <img
-                                src={buildImageDataUrl(
-                                  image.b64_json,
-                                  image.mimeType,
-                                )}
-                                alt={`Generated result ${index + 1}`}
-                                loading="lazy"
-                                className="block h-auto w-full transition duration-200 group-hover:scale-[1.01]"
-                              />
-                            </button>
-                          ) : image.status === "error" ? (
-                            <div className="flex min-h-[320px] items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-600">
-                              {image.error || "生成失败"}
-                            </div>
-                          ) : (
-                            <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 bg-stone-100/80 px-6 py-8 text-center text-stone-500">
-                              <div className="rounded-full bg-white p-3 shadow-sm">
-                                <LoaderCircle className="size-5 animate-spin" />
+                    {turn.images.length > 0 ? (
+                      <div className="columns-1 gap-4 space-y-4 sm:columns-2 xl:columns-3">
+                        {turn.images.map((image, index) => (
+                          <div
+                            key={image.id}
+                            className="minimal-fade-soft break-inside-avoid overflow-hidden rounded-[22px]"
+                          >
+                            {image.status === "success" && image.b64_json ? (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenPreview(image.id)}
+                                className="minimal-surface-hover group block w-full overflow-hidden rounded-[22px] bg-stone-100 text-left"
+                                aria-label={`预览第 ${index + 1} 张图片`}
+                              >
+                                <img
+                                  src={buildImageDataUrl(
+                                    image.b64_json,
+                                    image.mimeType,
+                                  )}
+                                  alt={`Generated result ${index + 1}`}
+                                  loading="lazy"
+                                  className="block h-auto w-full transition duration-200 group-hover:scale-[1.01]"
+                                />
+                              </button>
+                            ) : image.status === "error" ? (
+                              <div className="flex min-h-[320px] items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-600">
+                                {image.error || "生成失败"}
                               </div>
-                              <p className="text-sm">正在生成图片...</p>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
+                            ) : (
+                              <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 bg-stone-100/80 px-6 py-8 text-center text-stone-500">
+                                <div className="rounded-full bg-white p-3 shadow-sm">
+                                  <LoaderCircle className="size-5 animate-spin" />
+                                </div>
+                                <p className="text-sm">正在生成图片...</p>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
 
-                  {selectedConversation.status === "error" &&
-                  selectedConversation.images.length > 0 ? (
-                    <div className="border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
-                      {selectedConversation.error}
-                    </div>
-                  ) : null}
-                </div>
+                    {turn.status === "error" && turn.images.length > 0 ? (
+                      <div className="border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
+                        {turn.error}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -1462,6 +1544,95 @@ export default function ImagePage() {
         </div>
 
       </section>
+
+      <Dialog open={isSizeDialogOpen} onOpenChange={setIsSizeDialogOpen}>
+        <DialogContent className="w-[min(94vw,520px)] bg-[rgba(18,18,24,0.98)] p-5 text-stone-100">
+          <div className="space-y-5">
+            <div>
+              <div className="text-sm font-semibold">图像尺寸</div>
+              <div className="mt-1 text-xs text-stone-400">
+                当前：{formatImageSizeLabel(imageSize)}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              {(["auto", "ratio", "custom"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setSizeDraft((prev) => ({ ...prev, mode }))}
+                  className={cn(
+                    "rounded-lg border px-3 py-2 text-sm transition",
+                    sizeDraft.mode === mode
+                      ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
+                      : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
+                  )}
+                >
+                  {mode === "auto" ? "自动" : mode === "ratio" ? "按比例" : "自定义"}
+                </button>
+              ))}
+            </div>
+
+            {sizeDraft.mode === "ratio" ? (
+              <div className="space-y-2">
+                <label className="text-xs text-stone-400" htmlFor="image-size-ratio">
+                  比例
+                </label>
+                <input
+                  id="image-size-ratio"
+                  value={sizeDraft.ratio}
+                  onChange={(event) => setSizeDraft((prev) => ({ ...prev, ratio: event.target.value }))}
+                  className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
+                  placeholder="16:9"
+                />
+              </div>
+            ) : null}
+
+            {sizeDraft.mode === "custom" ? (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <label className="text-xs text-stone-400" htmlFor="image-size-width">
+                    宽
+                  </label>
+                  <input
+                    id="image-size-width"
+                    value={sizeDraft.width}
+                    inputMode="numeric"
+                    onChange={(event) => setSizeDraft((prev) => ({ ...prev, width: event.target.value }))}
+                    className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs text-stone-400" htmlFor="image-size-height">
+                    高
+                  </label>
+                  <input
+                    id="image-size-height"
+                    value={sizeDraft.height}
+                    inputMode="numeric"
+                    onChange={(event) => setSizeDraft((prev) => ({ ...prev, height: event.target.value }))}
+                    className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="border-white/12 bg-white/[0.04] text-stone-200 hover:bg-white/[0.08]"
+                onClick={() => setIsSizeDialogOpen(false)}
+              >
+                取消
+              </Button>
+              <Button type="button" onClick={handleApplyImageSize}>
+                应用
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(previewImage)}

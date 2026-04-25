@@ -5,6 +5,7 @@
 - 旧接口 `POST /v1/images/generations`，位置在 `services/api.py:558`。
 - 新兼容层主入口是 `POST /v1/responses`，第一版支持文本加单张 `input_image`，位置在 `services/api.py` 的 Responses 路由段。单数 `/v1/response` 不再注册。
 - 图片编辑兼容入口是 `POST /v1/images/edits`，接收 multipart 图片并转成单张 `input_image`，再进入同一套队列和账号池路径。
+- 三条入口都接受图片尺寸。`auto` 是默认值，不传给上游；`WIDTHxHEIGHT` 会先按 16 的倍数向下规整，再进入后端路径。
 
 两条路最终都会交给 `BackendService.generate_with_pool`，位置在 `services/backend_service.py:37`。
 
@@ -28,6 +29,7 @@
 - Free/legacy 会话消息有输入图时使用 Studio 同款 `multimodal_text`，`content.parts` 同时包含文本和 `image_asset_pointer`，`metadata.attachments` 只作为附件索引保留。图片指针不能只放在 `metadata.attachments`，否则模型可能识别不到输入图。
 - Free 账号的 Images 路线优先请求上游 `/backend-api/f/conversation`，并带 `client_prepare_state=none` 与 `supported_encodings=["v1"]`。
 - Plus/Pro/Team 账号的 Responses 路线请求上游 `/backend-api/codex/responses`，顶层文本模型使用 `gpt-5.4-mini`，图片工具模型使用调用方请求的 `gpt-image-2`。
+- 非 `auto` 尺寸会继续传给上游。Images 路线在 conversation 请求中带 `image_generation_options.size`；Responses 路线在 `image_generation` tool 中带 `size`。
 - legacy 回退路线仍请求上游 `/backend-api/conversation`，可通过 `IMAGE_ROUTE_POLICY=legacy` 开启。
 - 会话流请求在 `services/image_service.py` 发出。
 - SSE 解析在 `services/image_service.py:295`，会从流里提取文件标识和文字结果。
@@ -35,13 +37,15 @@
 - `gpt-image-2` 直接走真实上游模型 `gpt-image-2`，转换逻辑在 `services/image_service.py` 的 `_resolve_upstream_target`。
 - 如果请求来自 `user_key`，成功响应还会附带 `billing`，里面有本次模型、单价、实际扣减次数和剩余次数，公共逻辑在 `services/api.py:206`。
 - 如果入口是 `/v1/responses`，结果还会被包成 `response.output[]`，图片项类型是 `image_generation_call`。对外应按官方格式把文本模型放在顶层 `model`，把真实图片模型放在 `tools[].model`；如果没传图片模型，当前默认按 `gpt-image-2` 处理。
+- `/v1/responses` 现在允许 `previous_response_id` 指向本进程内已有 response。服务会从 `RESPONSES_STORE` 读取最近历史，把历史 prompt、尺寸和可复制文本合进本次文本上下文；上游会话标识不足时，响应 `metadata.context_mode` 标成 `text_history`。
 - 对外协议转换都在 `services/api.py`。`build_responses_payload` 和 `iter_responses_stream` 负责 Responses 风格输出；`build_images_response_payload` 和 `iter_images_stream` 负责图片接口风格输出。
 - 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
 - `/v1/images/generations` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
 - `/v1/responses` 流式时，最后一定会给 `response.completed` 和 `data: [DONE]`。
 - 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。
-- 前端图片页现在会把已选参考图的缩略图、`fileId` 和 `copied_text` 一起存进本地会话历史，刷新后仍能区分“参考图”“生成结果”和“可复制文本”，实现见 `web/src/store/image-conversations.ts`。
+- 前端图片页现在会把本地 session 存成多轮 `turns[]`。每轮保存 prompt、模型、张数、尺寸、参考图、结果图、队列 id、`responseId` 和 `copied_text`；旧单轮记录读取时会映射成一个 turn，实现见 `web/src/store/image-conversations.ts`。
 - 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。
+- 在同一 session 继续发送新 prompt 时，前端复用 `clientConversationId`，并把上一轮 `responseId` 作为 `previous_response_id` 发给 `/v1/responses`。
 
 2026-04-23 本地实测现状：
 

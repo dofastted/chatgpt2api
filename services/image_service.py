@@ -20,6 +20,7 @@ from services.config import config
 from services import proof_of_work
 from services.proxy_service import proxy_service
 from services.uploaded_image_service import uploaded_image_service
+from services.image_size import upstream_image_size
 
 
 BASE_URL = "https://chatgpt.com"
@@ -489,6 +490,7 @@ def _send_conversation(
     reasoning_effort: Optional[str] = None,
     input_images: list[dict[str, str]] | None = None,
     route: str = "legacy",
+    size: str | None = None,
 ):
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -546,6 +548,9 @@ def _send_conversation(
     }
     if reasoning_effort:
         request_body["reasoning"] = {"effort": reasoning_effort}
+    requested_size = upstream_image_size(size)
+    if requested_size:
+        request_body["image_generation_options"] = {"size": requested_size}
     endpoint_path = "/backend-api/conversation"
     if route in {"images", "images_edit"}:
         endpoint_path = "/backend-api/f/conversation"
@@ -1203,6 +1208,7 @@ def _send_responses_request(
     prompt: str,
     model: str,
     input_images: list[dict[str, str]] | None,
+    size: str | None = None,
 ):
     content = _build_responses_request_content(session, prompt, input_images)
     tool = {
@@ -1211,6 +1217,9 @@ def _send_responses_request(
         "action": "edit" if input_images else "generate",
         "output_format": "png",
     }
+    requested_size = upstream_image_size(size)
+    if requested_size:
+        tool["size"] = requested_size
     body = {
         "model": CODEX_RESPONSES_MODEL,
         "input": [{"role": "user", "content": content}],
@@ -1253,6 +1262,7 @@ def generate_image_result_via_responses(
     model: str = DEFAULT_MODEL,
     n: int = 1,
     input_images: list[dict[str, str]] | None = None,
+    size: str | None = None,
 ) -> dict:
     if not input_images:
         prompt = _refine_prompt_for_text_rendering(prompt)
@@ -1271,7 +1281,7 @@ def generate_image_result_via_responses(
     try:
         print(
             f"[image-upstream] start token={_token_label(access_token)} "
-            f"route=responses text_model={CODEX_RESPONSES_MODEL} image_model={model} n={n}"
+            f"route=responses text_model={CODEX_RESPONSES_MODEL} image_model={model} n={n} size={size or 'auto'}"
         )
         results: list[GeneratedImage] = []
         for _ in range(n):
@@ -1282,6 +1292,7 @@ def generate_image_result_via_responses(
                 prompt,
                 model,
                 input_images,
+                size=size,
             )
             results.extend(_parse_responses_sse(response, prompt))
         print(f"[image-upstream] success token={_token_label(access_token)} route=responses images={len(results)}")
@@ -1320,6 +1331,7 @@ def generate_image_result(
     n: int = 1,
     input_images: list[dict[str, str]] | None = None,
     route: str = "legacy",
+    size: str | None = None,
 ) -> dict:
     normalized_route = str(route or "legacy").strip().lower()
     if normalized_route == "responses":
@@ -1329,6 +1341,7 @@ def generate_image_result(
             model=model,
             n=n,
             input_images=input_images,
+            size=size,
         )
 
     if not input_images:
@@ -1347,7 +1360,7 @@ def generate_image_result(
         print(
             f"[image-upstream] start token={_token_label(access_token)} "
             f"route={normalized_route} requested_model={model} upstream_model={upstream_model} "
-            f"reasoning_effort={reasoning_effort or 'none'} n={n}"
+            f"reasoning_effort={reasoning_effort or 'none'} n={n} size={size or 'auto'}"
         )
         results: list[GeneratedImage] = []
         copied_text = ""
@@ -1377,6 +1390,7 @@ def generate_image_result(
                     reasoning_effort,
                     input_images=input_images,
                     route=normalized_route,
+                    size=size,
                 )
                 try:
                     parsed = _parse_sse(response)

@@ -106,6 +106,7 @@ class FakeBackendService:
         n: int,
         input_images: list[dict[str, str]] | None = None,
         queue_request_id: str | None = None,
+        size: str | None = None,
     ) -> dict:
         del queue_request_id
         self.__class__.last_call = {
@@ -113,6 +114,7 @@ class FakeBackendService:
             "model": model,
             "n": n,
             "input_images": [dict(item) for item in list(input_images or [])],
+            "size": size,
         }
         if self.error is not None:
             raise self.error
@@ -290,8 +292,8 @@ class UserKeyPricingTests(unittest.TestCase):
         seen_quota: list[int] = []
 
         class InspectBackendService:
-            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None, queue_request_id=None) -> dict:
-                del prompt, model, n, input_images, queue_request_id
+            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None, queue_request_id=None, size=None) -> dict:
+                del prompt, model, n, input_images, queue_request_id, size
                 current_item = api.user_key_service.get_user_key(user_key)
                 assert current_item is not None
                 seen_quota.append(int(current_item["quota"]))

@@ -5,7 +5,7 @@ from typing import Any
 
 
 LegacyGenerate = Callable[
-    [str, str, str, int, list[dict[str, str]] | None, str],
+    [str, str, str, int, list[dict[str, str]] | None, str, str | None],
     dict[str, Any],
 ]
 
@@ -23,8 +23,9 @@ class ImageGateway:
         *,
         input_images: list[dict[str, str]] | None = None,
         route: str = "legacy",
+        size: str | None = None,
     ) -> dict[str, Any]:
-        return self._legacy_generate(access_token, prompt, model, n, input_images, route)
+        return self._legacy_generate(access_token, prompt, model, n, input_images, route, size)
 
     def create_response(
         self,
@@ -35,6 +36,7 @@ class ImageGateway:
         *,
         input_images: list[dict[str, str]] | None = None,
         route: str = "legacy",
+        size: str | None = None,
     ) -> dict[str, Any]:
         return self.generate_image(
             access_token,
@@ -43,6 +45,7 @@ class ImageGateway:
             n,
             input_images=input_images,
             route=route,
+            size=size,
         )
 
     def edit_image(
@@ -54,6 +57,7 @@ class ImageGateway:
         *,
         input_images: list[dict[str, str]],
         route: str = "legacy",
+        size: str | None = None,
     ) -> dict[str, Any]:
         return self.generate_image(
             access_token,
@@ -62,4 +66,5 @@ class ImageGateway:
             n,
             input_images=input_images,
             route=route,
+            size=size,
         )

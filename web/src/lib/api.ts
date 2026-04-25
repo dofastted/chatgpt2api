@@ -213,12 +213,15 @@ type ImageQueueStatusResponse = {
 };
 
 export type ImageGenerationResponse = {
+  id?: string;
   created: number;
   data: Array<{ b64_json: string; revised_prompt?: string; mime_type?: string }>;
   billing?: ImageBilling;
   copied_text?: string;
   text_content?: string;
   conversation_id?: string;
+  size?: string;
+  context_mode?: string;
   retry?: {
     retryable?: boolean;
     failed_request_id?: string;
@@ -241,6 +244,7 @@ export type UploadedInputImage = {
 };
 
 type ResponsesImageGenerationResponse = {
+  id?: string;
   created_at?: number;
   output?: Array<{
     type?: string;
@@ -251,6 +255,7 @@ type ResponsesImageGenerationResponse = {
   copied_text?: string;
   text_content?: string;
   conversation_id?: string;
+  metadata?: Record<string, string>;
   retry?: {
     retryable?: boolean;
     failed_request_id?: string;
@@ -486,11 +491,14 @@ function normalizeResponsesImageGenerationResponse(
     : [];
   return {
     created: Math.max(0, Number(payload.created_at || 0)) || Math.floor(Date.now() / 1000),
+    id: String(payload.id || "").trim() || undefined,
     data,
     billing: payload.billing,
     copied_text: String(payload.copied_text || "").trim() || undefined,
     text_content: String(payload.text_content || "").trim() || undefined,
     conversation_id: String(payload.conversation_id || "").trim() || undefined,
+    size: String(payload.metadata?.size || "").trim() || undefined,
+    context_mode: String(payload.metadata?.context_mode || "").trim() || undefined,
     retry: payload.retry
       ? {
           retryable: Boolean(payload.retry.retryable),
@@ -510,12 +518,16 @@ export async function generateImage(
     inputImageFileId?: string | null;
     queueRequestId?: string | null;
     clientConversationId?: string | null;
+    previousResponseId?: string | null;
+    size?: string | null;
   } = {},
 ) {
   const inputImageUrl = String(options.inputImageUrl || "").trim();
   const inputImageFileId = String(options.inputImageFileId || "").trim();
   const queueRequestId = String(options.queueRequestId || "").trim();
   const clientConversationId = String(options.clientConversationId || "").trim();
+  const previousResponseId = String(options.previousResponseId || "").trim();
+  const size = String(options.size || "auto").trim() || "auto";
   const queueHeaders = queueRequestId ? {"X-Image-Queue-Request-Id": queueRequestId} : undefined;
   const inputItems: Array<
     | { type: "input_text"; text: string }
@@ -533,7 +545,8 @@ export async function generateImage(
     body: {
       model: "gpt-5",
       input: inputItems,
-      tools: [{ type: "image_generation", model }],
+      tools: [{ type: "image_generation", model, size }],
+      ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
       n,
       metadata: clientConversationId
         ? { client_conversation_id: clientConversationId }

@@ -22,6 +22,7 @@ from services.config import config
 from services.backend_service import BackendService
 from services.chat_image.account_import import normalize_account_carrier
 from services.image_service import ImageGenerationError
+from services.image_size import normalize_image_size
 from services.image_queue_service import image_queue_service
 from services.proxy_service import proxy_service
 from services.redeem_code_service import redeem_code_service
@@ -317,6 +318,7 @@ async def generate_image_payload(
         n: int,
         input_images: list[dict[str, str]] | None = None,
         queue_request_id: str | None = None,
+        size: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     settled_user_key = ""
     request_cost = 0
@@ -340,6 +342,7 @@ async def generate_image_payload(
             n,
             input_images,
             queue_request_id,
+            size,
         )
         billing_payload = None
         if settled_user_key:
@@ -410,6 +413,102 @@ def resolve_requested_response_image_model(body: ResponsesCreateRequest) -> str:
     if requested_model in ENABLED_IMAGE_MODELS:
         return normalize_requested_image_model(requested_model)
     return DEFAULT_IMAGE_MODEL
+
+
+def resolve_requested_response_image_size(body: ResponsesCreateRequest) -> str:
+    image_tool = get_image_generation_tool(body.tools)
+    raw_size = image_tool.size if image_tool is not None else None
+    try:
+        return normalize_image_size(raw_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
+def resolve_requested_image_size(value: str | None) -> str:
+    try:
+        return normalize_image_size(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
+def summarize_input_images(input_images: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    summaries: list[dict[str, str]] = []
+    for item in input_images or []:
+        file_id = str(item.get("file_id") or "").strip()
+        image_url = str(item.get("image_url") or "").strip()
+        if file_id:
+            summaries.append({"type": "file_id", "file_id": file_id})
+        elif image_url.startswith("data:"):
+            summaries.append({"type": "data_url", "image_url": image_url[:64]})
+        elif image_url:
+            summaries.append({"type": "image_url", "image_url": image_url})
+    return summaries
+
+
+def build_previous_response_context(previous_response_id: str | None) -> tuple[dict[str, object] | None, str]:
+    normalized_id = str(previous_response_id or "").strip()
+    if not normalized_id:
+        return None, "none"
+    previous_payload = response_store_get(normalized_id)
+    if previous_payload is None:
+        raise HTTPException(status_code=404, detail={"error": "previous_response_id was not found"})
+    history = previous_payload.get("_history")
+    if not isinstance(history, list):
+        return previous_payload, "text_history"
+    lines: list[str] = []
+    for item in history[-6:]:
+        if not isinstance(item, dict):
+            continue
+        prompt = str(item.get("prompt") or "").strip()
+        size = str(item.get("size") or "").strip() or "auto"
+        copied_text = str(item.get("copied_text") or "").strip()
+        if prompt:
+            lines.append(f"- prompt: {prompt}; size: {size}")
+        if copied_text:
+            lines.append(f"  copied_text: {copied_text[:500]}")
+    if not lines:
+        return previous_payload, "text_history"
+    return previous_payload, "text_history"
+
+
+def merge_prompt_with_previous_context(prompt: str, previous_payload: dict[str, object] | None) -> str:
+    if not previous_payload:
+        return prompt
+    history = previous_payload.get("_history")
+    if not isinstance(history, list):
+        return prompt
+    lines: list[str] = []
+    for item in history[-6:]:
+        if not isinstance(item, dict):
+            continue
+        previous_prompt = str(item.get("prompt") or "").strip()
+        previous_size = str(item.get("size") or "").strip() or "auto"
+        if previous_prompt:
+            lines.append(f"上一轮提示词: {previous_prompt} (size={previous_size})")
+        previous_text = str(item.get("copied_text") or "").strip()
+        if previous_text:
+            lines.append(f"上一轮可复制文本: {previous_text[:500]}")
+    if not lines:
+        return prompt
+    return "历史上下文:\n" + "\n".join(lines) + "\n\n当前请求:\n" + prompt
+
+
+def build_response_history_entry(
+        *,
+        response_id: str,
+        prompt: str,
+        size: str,
+        input_images: list[dict[str, str]] | None,
+        image_result: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "response_id": response_id,
+        "prompt": prompt,
+        "size": size,
+        "input_images": summarize_input_images(input_images),
+        "output_count": len(list(image_result.get("data") or [])),
+        "copied_text": str(image_result.get("copied_text") or "").strip() or None,
+    }
 
 
 def _normalize_response_input_image_url(item: dict[str, Any]) -> str:
@@ -885,11 +984,6 @@ def create_app() -> FastAPI:
             image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
     ):
         context = require_auth_key(authorization)
-        if body.previous_response_id:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "responses previous_response_id is not supported for image generation yet"},
-            )
         if not has_image_generation_tool(body.tools):
             raise HTTPException(
                 status_code=400,
@@ -914,6 +1008,9 @@ def create_app() -> FastAPI:
             for item in input_images
         ]
         prompt = extract_responses_prompt(body.input)
+        requested_size = resolve_requested_response_image_size(body)
+        previous_payload, context_mode = build_previous_response_context(body.previous_response_id)
+        generation_prompt = merge_prompt_with_previous_context(prompt, previous_payload)
         queue_request_id = resolve_queue_request_id(image_queue_request_id)
         await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
         try:
@@ -931,11 +1028,12 @@ def create_app() -> FastAPI:
                 service=service,
                 context=context,
                 authorization=authorization,
-                prompt=prompt,
+                prompt=generation_prompt,
                 model=requested_model,
                 n=body.n,
                 input_images=input_images,
                 queue_request_id=queue_request_id,
+                size=requested_size,
             )
         except Exception as exc:
             fail_queue_request(queue_request_id, str(exc))
@@ -946,10 +1044,30 @@ def create_app() -> FastAPI:
             response_model=response_model,
             image_result=image_result,
             billing=billing_payload,
-            metadata=body.metadata,
+            metadata={
+                **(body.metadata or {}),
+                "size": requested_size,
+                "context_mode": context_mode,
+            },
             previous_response_id=body.previous_response_id,
         )
-        response_store_set(response_id, payload)
+        previous_history = []
+        if isinstance(previous_payload, dict) and isinstance(previous_payload.get("_history"), list):
+            previous_history = list(previous_payload.get("_history") or [])
+        stored_payload = {
+            **payload,
+            "_history": [
+                *previous_history,
+                build_response_history_entry(
+                    response_id=response_id,
+                    prompt=prompt,
+                    size=requested_size,
+                    input_images=input_images,
+                    image_result=image_result,
+                ),
+            ],
+        }
+        response_store_set(response_id, stored_payload)
         if body.stream:
             return StreamingResponse(
                 iter_responses_stream(payload),
@@ -1028,7 +1146,7 @@ def create_app() -> FastAPI:
         payload = response_store_get(str(response_id or "").strip())
         if payload is None:
             raise HTTPException(status_code=404, detail={"error": "response not found"})
-        return payload
+        return {key: value for key, value in payload.items() if not str(key).startswith("_")}
 
     @router.get("/version")
     async def get_version():
@@ -1380,6 +1498,7 @@ def create_app() -> FastAPI:
     ):
         context = require_auth_key(authorization)
         requested_model = normalize_requested_image_model(body.model)
+        requested_size = resolve_requested_image_size(body.size)
         request_auth_token = extract_bearer_token(authorization)
         queue_request_id = resolve_queue_request_id(image_queue_request_id)
         await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(body.prompt))
@@ -1397,6 +1516,7 @@ def create_app() -> FastAPI:
                 model=requested_model,
                 n=body.n,
                 queue_request_id=queue_request_id,
+                size=requested_size,
             )
         except Exception as exc:
             fail_queue_request(queue_request_id, str(exc))
@@ -1409,7 +1529,7 @@ def create_app() -> FastAPI:
                     output_format=body.output_format or body.response_format,
                     background=body.background,
                     quality=body.quality,
-                    size=body.size,
+                    size=requested_size,
                     partial_images=body.partial_images,
                 ),
                 media_type="text/event-stream",
@@ -1428,12 +1548,14 @@ def create_app() -> FastAPI:
             model: str = Form(default=DEFAULT_IMAGE_MODEL),
             n: int = Form(default=1),
             response_format: str = Form(default="b64_json"),
+            size: str | None = Form(default=None),
             stream: bool = Form(default=False),
             authorization: str | None = Header(default=None),
             image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
     ):
         context = require_auth_key(authorization)
         requested_model = normalize_requested_image_model(model)
+        requested_size = resolve_requested_image_size(size)
         normalized_n = max(1, min(MAX_IMAGES_PER_REQUEST, int(n or 1)))
         image_bytes = await image.read()
         if not image_bytes:
@@ -1467,6 +1589,7 @@ def create_app() -> FastAPI:
                 n=normalized_n,
                 input_images=input_images,
                 queue_request_id=queue_request_id,
+                size=requested_size,
             )
         except Exception as exc:
             fail_queue_request(queue_request_id, str(exc))
@@ -1479,7 +1602,7 @@ def create_app() -> FastAPI:
                     output_format=response_format,
                     background=None,
                     quality=None,
-                    size=None,
+                    size=requested_size,
                 ),
                 media_type="text/event-stream",
                 headers={
