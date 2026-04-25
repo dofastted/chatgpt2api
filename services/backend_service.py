@@ -57,6 +57,13 @@ class BackendService:
             return False
         return int(account.get("quota") or 0) > 0
 
+    @staticmethod
+    def _fallback_route_for(route: str, input_images: list[dict[str, str]] | None) -> str | None:
+        normalized_route = str(route or "").strip().lower()
+        if normalized_route != "responses":
+            return None
+        return "images_edit" if input_images else "images"
+
     def _refresh_request_token(self, access_token: str) -> dict | None:
         cached_account = self.account_service.get_account(access_token)
         try:
@@ -126,19 +133,43 @@ class BackendService:
                     has_input_image=bool(input_images),
                     policy=config.image_route_policy,
                 )
-                print(
-                    f"[image-generate] start pooled token={self._token_label(request_token)} "
-                    f"model={model} n={n} size={size or 'auto'} route={route}"
-                )
-                result = self.image_gateway.generate_image(
-                    request_token,
-                    prompt,
-                    model,
-                    n,
-                    input_images=input_images,
-                    route=route,
-                    size=size,
-                )
+                route_candidates = [route]
+                fallback_route = self._fallback_route_for(route, input_images)
+                if fallback_route:
+                    route_candidates.append(fallback_route)
+                last_route_error: ImageGenerationError | None = None
+                for candidate_route in route_candidates:
+                    print(
+                        f"[image-generate] start pooled token={self._token_label(request_token)} "
+                        f"model={model} n={n} size={size or 'auto'} route={candidate_route}"
+                    )
+                    try:
+                        result = self.image_gateway.generate_image(
+                            request_token,
+                            prompt,
+                            model,
+                            n,
+                            input_images=input_images,
+                            route=candidate_route,
+                            size=size,
+                        )
+                        break
+                    except ImageGenerationError as exc:
+                        last_route_error = exc
+                        if (
+                            candidate_route == route
+                            and fallback_route
+                            and is_transient_image_error(str(exc))
+                        ):
+                            print(
+                                f"[image-generate] fallback route token={self._token_label(request_token)} "
+                                f"from={candidate_route} to={fallback_route} error={exc}"
+                            )
+                            continue
+                        raise
+                else:
+                    assert last_route_error is not None
+                    raise last_route_error
                 account = self.account_service.mark_image_result(request_token, success=True)
                 print(
                     f"[image-generate] success pooled token={self._token_label(request_token)} "

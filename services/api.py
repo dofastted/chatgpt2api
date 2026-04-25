@@ -194,21 +194,21 @@ def resolve_auth_context(authorization: str | None) -> AuthContext | None:
         return None
     if auth_key == str(config.admin_auth_key or "").strip():
         return AuthContext(role="admin", auth_type="admin_auth_key")
-    if auth_key == str(config.auth_key or "").strip():
-        return AuthContext(role="user", auth_type="auth_key")
 
     user_key = user_key_service.get_user_key(auth_key)
-    if user_key is None or user_key.get("status") != user_key_service.ENABLED_STATUS:
-        return None
-    return AuthContext(
-        role="user",
-        auth_type="user_key",
-        remaining_quota=max(0, int(user_key.get("quota") or 0)),
-        ldc_balance=max(0, int(user_key.get("ldc_balance") or 0)),
-        user_key_id=str(user_key.get("id") or "") or None,
-        user_key_label=str(user_key.get("label") or "") or None,
-        pricing=user_key_service.normalize_pricing(user_key.get("pricing")),
-    )
+    if user_key is not None and user_key.get("status") == user_key_service.ENABLED_STATUS:
+        return AuthContext(
+            role="user",
+            auth_type="user_key",
+            remaining_quota=max(0, int(user_key.get("quota") or 0)),
+            ldc_balance=max(0, int(user_key.get("ldc_balance") or 0)),
+            user_key_id=str(user_key.get("id") or "") or None,
+            user_key_label=str(user_key.get("label") or "") or None,
+            pricing=user_key_service.normalize_pricing(user_key.get("pricing")),
+        )
+    if auth_key == str(config.auth_key or "").strip():
+        return AuthContext(role="user", auth_type="auth_key")
+    return None
 
 
 def resolve_auth_role(authorization: str | None) -> str | None:
@@ -973,7 +973,7 @@ def create_app() -> FastAPI:
 
     @router.api_route("/v1/responses", methods=["GET", "HEAD"])
     async def check_responses_endpoint(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        context = require_auth_key(authorization)
         auth_token = extract_bearer_token(authorization)
         queue_snapshot = image_queue_service.snapshot(auth_token)
         return {
@@ -981,6 +981,7 @@ def create_app() -> FastAPI:
             "data": [],
             "status": "ok",
             "endpoint": "/v1/responses",
+            "auth_type": context.auth_type,
             "queue": {
                 "user": queue_snapshot.get("user", {}),
                 "global": queue_snapshot.get("global", {}),
