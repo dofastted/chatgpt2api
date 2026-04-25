@@ -795,6 +795,10 @@ def _normalize_input_image_ref(input_image: dict[str, str] | str) -> dict[str, s
     return dict(input_image or {})
 
 
+def _token_label(access_token: str) -> str:
+    return hashlib.sha1(str(access_token or "").encode("utf-8")).hexdigest()[:10]
+
+
 def _load_input_image_bytes(session: Session, input_image: dict[str, str] | str) -> tuple[bytes, str]:
     normalized_input_image = _normalize_input_image_ref(input_image)
     file_id = str(normalized_input_image.get("file_id") or "").strip()
@@ -1035,7 +1039,7 @@ def generate_image_result(
     try:
         upstream_model, reasoning_effort = _resolve_upstream_target(access_token, model)
         print(
-            f"[image-upstream] start token={access_token[:12]}... "
+            f"[image-upstream] start token={_token_label(access_token)} "
             f"requested_model={model} upstream_model={upstream_model} reasoning_effort={reasoning_effort or 'none'} n={n}"
         )
         results: list[GeneratedImage] = []
@@ -1072,7 +1076,7 @@ def generate_image_result(
                     last_stream_error = exc
                     if stream_attempt < 2 and _is_transient_stream_error(exc):
                         print(
-                            f"[image-upstream] retry token={access_token[:12]}... "
+                            f"[image-upstream] retry token={_token_label(access_token)} "
                             f"stage=parse_sse attempt={stream_attempt + 1} error={exc}"
                         )
                         continue
@@ -1093,8 +1097,8 @@ def generate_image_result(
                         raise ImageGenerationError(response_text)
                     raise ImageGenerationError("no image returned from upstream")
                 print(
-                    f"[image-upstream] attachments token={access_token[:12]}... "
-                    f"conversation_id={actual_conversation_id or 'none'} count={len(file_ids)} file_ids={file_ids}"
+                    f"[image-upstream] attachments token={_token_label(access_token)} "
+                    f"conversation_id={actual_conversation_id or 'none'} count={len(file_ids)}"
                 )
                 try:
                     downloaded_images = _download_generated_images(
@@ -1108,7 +1112,7 @@ def generate_image_result(
                 except ImageGenerationError as exc:
                     if stream_attempt < 2 and "low quality text render" in str(exc):
                         print(
-                            f"[image-upstream] retry token={access_token[:12]}... "
+                            f"[image-upstream] retry token={_token_label(access_token)} "
                             f"stage=text_render attempt={stream_attempt + 1} error={exc}"
                         )
                         continue
@@ -1119,7 +1123,7 @@ def generate_image_result(
                 if last_stream_error is not None:
                     raise ImageGenerationError(str(last_stream_error))
                 raise ImageGenerationError("image stream failed")
-        print(f"[image-upstream] success token={access_token[:12]}... images={len(results)}")
+        print(f"[image-upstream] success token={_token_label(access_token)} images={len(results)}")
         response_payload = {
             "created": time.time_ns() // 1_000_000_000,
             "data": [
@@ -1135,7 +1139,7 @@ def generate_image_result(
             response_payload["copied_text"] = copied_text
         return response_payload
     except Exception as exc:
-        print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
+        print(f"[image-upstream] fail token={_token_label(access_token)} error={exc}")
         raise
     finally:
         session.close()

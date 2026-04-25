@@ -42,6 +42,10 @@ class AccountService:
     def _clean_token(value: Any) -> str:
         return str(value or "").strip()
 
+    @staticmethod
+    def _token_label(access_token: str) -> str:
+        return hashlib.sha1(str(access_token or "").encode("utf-8")).hexdigest()[:10]
+
     def _clean_tokens(self, tokens: list[str]) -> list[str]:
         cleaned: list[str] = []
         seen = set()
@@ -604,7 +608,7 @@ class AccountService:
             raise ValueError("access_token is required")
 
         headers, impersonate = self._build_remote_headers(access_token)
-        print(f"[account-refresh] start {access_token[:12]}...")
+        print(f"[account-refresh] start {self._token_label(access_token)}")
         session = Session(impersonate=impersonate, verify=config.tls_verify)
         session.headers.update(headers)
         try:
@@ -662,10 +666,10 @@ class AccountService:
             }
             print(
                 "[account-refresh] ok",
-                result.get("user_id"),
-                result.get("email"),
+                self._token_label(access_token),
+                f"type={result.get('type')}",
                 f"quota={result.get('quota')}",
-                f"restore_at={result.get('restore_at')}",
+                f"has_restore_at={bool(result.get('restore_at'))}",
             )
             return result
         finally:
@@ -690,7 +694,7 @@ class AccountService:
                         refreshed += 1
                 except Exception as exc:
                     message = str(exc)
-                    print(f"[account-refresh] fail {access_token[:12]}... {message}")
+                    print(f"[account-refresh] fail {self._token_label(access_token)} {message}")
                     if "/backend-api/me failed: HTTP 401" in message:
                         self.update_account(
                             access_token,

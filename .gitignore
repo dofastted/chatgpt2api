@@ -10,6 +10,8 @@ wheels/
 .venv
 .idea
 data
+data-migration
+.llmdoc-tmp
 config.json
 
 docker-compose-local.yml
