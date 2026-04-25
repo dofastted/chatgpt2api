@@ -20,6 +20,7 @@ os.environ.setdefault("CHATGPT2API_USER_KEYS_FILE", str(TEST_ROOT / "bootstrap-u
 sys.modules.setdefault("pybase64", base64)
 
 from services import api  # noqa: E402
+from services import image_service  # noqa: E402
 from services.image_size import normalize_image_size  # noqa: E402
 from services.image_service import ImageGenerationError  # noqa: E402
 from services.user_key_service import UserKeyService  # noqa: E402
@@ -100,6 +101,45 @@ class ApiImageModelRuleTests(unittest.TestCase):
         self.assertEqual(normalize_image_size("1025x1351"), "1024x1344")
         with self.assertRaises(ValueError):
             normalize_image_size("wide")
+
+    def test_codex_responses_request_places_size_inside_image_tool(self) -> None:
+        class Session:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict, dict]] = []
+
+            def post(self, url: str, **kwargs):
+                self.calls.append((url, kwargs.get("headers") or {}, kwargs.get("json") or {}))
+
+                class Response:
+                    ok = True
+                    status_code = 200
+                    text = ""
+
+                    def iter_lines(self):
+                        return iter([])
+
+                return Response()
+
+        session = Session()
+        image_service._send_responses_request(
+            session,
+            "token-123",
+            "account-123",
+            "draw",
+            "gpt-image-2",
+            None,
+            size="1537x1025",
+        )
+
+        url, headers, body = session.calls[0]
+        self.assertEqual(url, "https://chatgpt.com/backend-api/codex/responses")
+        self.assertEqual(headers["Chatgpt-Account-Id"], "account-123")
+        self.assertEqual(body["tools"][0]["type"], "image_generation")
+        self.assertEqual(body["tools"][0]["model"], "gpt-image-2")
+        self.assertEqual(body["tools"][0]["action"], "generate")
+        self.assertEqual(body["tools"][0]["size"], "1536x1024")
+        self.assertEqual(body["tool_choice"], {"type": "image_generation"})
+        self.assertNotIn("size", body)
 
     def test_responses_request_defaults_to_image_2_when_tool_model_missing(self) -> None:
         request = api.ResponsesCreateRequest(
