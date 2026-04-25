@@ -4,6 +4,11 @@ import localforage from "localforage";
 
 import { detectImageMimeType } from "@/lib/image-data";
 import type { ImageModel } from "@/lib/api";
+import {
+  DEFAULT_IMAGE_GENERATION_PREFERENCE,
+  normalizeImageGenerationPreference,
+  type ImageGenerationPreference,
+} from "@/lib/image-size";
 
 export type StoredImage = {
   id: string;
@@ -72,6 +77,7 @@ const imageConversationStorage = localforage.createInstance({
 });
 
 const IMAGE_CONVERSATIONS_KEY_PREFIX = "items";
+const IMAGE_PREFERENCE_KEY_PREFIX = "generation_preference";
 const IMAGE_CONVERSATIONS_DEFAULT_SCOPE = "__anonymous__";
 const conversationWriteQueues = new Map<string, Promise<void>>();
 
@@ -82,6 +88,10 @@ function normalizeConversationScope(scope: string): string {
 
 function buildConversationStorageKey(scope: string): string {
   return `${IMAGE_CONVERSATIONS_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
+}
+
+function buildPreferenceStorageKey(scope: string): string {
+  return `${IMAGE_PREFERENCE_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
 }
 
 function enqueueConversationWrite<T>(scope: string, operation: () => Promise<T>): Promise<T> {
@@ -257,4 +267,23 @@ export async function clearImageConversations(scope: string): Promise<void> {
   await enqueueConversationWrite(scope, async () => {
     await imageConversationStorage.removeItem(buildConversationStorageKey(scope));
   });
+}
+
+export async function getImageGenerationPreference(
+  scope: string,
+): Promise<ImageGenerationPreference> {
+  const stored = await imageConversationStorage.getItem<Partial<ImageGenerationPreference>>(
+    buildPreferenceStorageKey(scope),
+  );
+  return normalizeImageGenerationPreference(stored || DEFAULT_IMAGE_GENERATION_PREFERENCE);
+}
+
+export async function saveImageGenerationPreference(
+  scope: string,
+  preference: ImageGenerationPreference,
+): Promise<void> {
+  await imageConversationStorage.setItem(
+    buildPreferenceStorageKey(scope),
+    normalizeImageGenerationPreference(preference),
+  );
 }

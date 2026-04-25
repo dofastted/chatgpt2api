@@ -45,9 +45,11 @@ import {
 import {
   clearImageConversations,
   deleteImageConversation,
+  getImageGenerationPreference,
   listImageConversations,
   replaceImageConversations,
   saveImageConversation,
+  saveImageGenerationPreference,
   type ImageConversation,
   type ImageConversationTurn,
   type StoredInputImage,
@@ -56,10 +58,16 @@ import {
 import { getStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
 import {
-  calculateImageSize,
+  calculateImageSizeFromPreference,
+  DEFAULT_IMAGE_GENERATION_PREFERENCE,
+  formatImagePreferenceLabel,
   formatImageSizeLabel,
-  normalizeImageSize,
-  type ImageSizeMode,
+  IMAGE_ASPECT_RATIO_PRESETS,
+  IMAGE_RESOLUTION_PRESETS,
+  normalizeImageGenerationPreference,
+  type ImageAspectRatioPreset,
+  type ImageGenerationPreference,
+  type ImageResolutionPreset,
 } from "@/lib/image-size";
 
 const imageModelMeta: Record<ImageModel, { helperText: string }> = {
@@ -141,10 +149,8 @@ type PendingInputImage = {
 };
 
 type SizeDialogState = {
-  mode: ImageSizeMode;
-  ratio: string;
-  width: string;
-  height: string;
+  resolution: ImageResolutionPreset;
+  ratio: ImageAspectRatioPreset;
 };
 
 type ImageQueueStatusSnapshot = Awaited<
@@ -327,12 +333,12 @@ export default function ImagePage() {
   const [imageCount, setImageCount] = useState("1");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
   const [imageSize, setImageSize] = useState("auto");
+  const [imagePreference, setImagePreference] = useState<ImageGenerationPreference>(
+    DEFAULT_IMAGE_GENERATION_PREFERENCE,
+  );
   const [isSizeDialogOpen, setIsSizeDialogOpen] = useState(false);
   const [sizeDraft, setSizeDraft] = useState<SizeDialogState>({
-    mode: "auto",
-    ratio: "1:1",
-    width: "1024",
-    height: "1024",
+    ...DEFAULT_IMAGE_GENERATION_PREFERENCE,
   });
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<
@@ -580,6 +586,39 @@ export default function ImagePage() {
     };
   }, [conversationScope]);
 
+  useEffect(() => {
+    if (conversationScope === null) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPreference = async () => {
+      try {
+        const preference = await getImageGenerationPreference(conversationScope);
+        if (cancelled) {
+          return;
+        }
+        const normalized = normalizeImageGenerationPreference(preference);
+        setImagePreference(normalized);
+        setSizeDraft(normalized);
+        setImageSize(calculateImageSizeFromPreference(normalized));
+      } catch {
+        if (!cancelled) {
+          const fallback = DEFAULT_IMAGE_GENERATION_PREFERENCE;
+          setImagePreference(fallback);
+          setSizeDraft(fallback);
+          setImageSize(calculateImageSizeFromPreference(fallback));
+        }
+      }
+    };
+
+    void loadPreference();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationScope]);
+
   const loadQuota = useCallback(async () => {
     try {
       const data = await fetchQuotaSummary();
@@ -786,18 +825,25 @@ export default function ImagePage() {
     }
   };
 
-  const handleApplyImageSize = () => {
+  const handleOpenImagePreferenceDialog = () => {
+    setSizeDraft(imagePreference);
+    setIsSizeDialogOpen(true);
+  };
+
+  const handleApplyImageSize = async () => {
     try {
-      const nextSize =
-        sizeDraft.mode === "auto"
-          ? "auto"
-          : sizeDraft.mode === "ratio"
-            ? calculateImageSize(sizeDraft.ratio)
-            : normalizeImageSize(`${sizeDraft.width}x${sizeDraft.height}`);
+      const nextPreference = normalizeImageGenerationPreference(sizeDraft);
+      const nextSize = calculateImageSizeFromPreference(nextPreference);
+      if (conversationScope) {
+        await saveImageGenerationPreference(conversationScope, nextPreference);
+      }
+      setImagePreference(nextPreference);
+      setSizeDraft(nextPreference);
       setImageSize(nextSize);
       setIsSizeDialogOpen(false);
+      toast.success("画面配置已保存");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "图片尺寸无效");
+      toast.error(error instanceof Error ? error.message : "画面配置无效");
     }
   };
 
@@ -1103,14 +1149,16 @@ export default function ImagePage() {
               <div className="space-y-3 text-xs text-stone-500">
                 <button
                   type="button"
-                  onClick={() => setIsSizeDialogOpen(true)}
+                  onClick={handleOpenImagePreferenceDialog}
                   className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3 text-left text-stone-200 transition hover:bg-white/[0.08]"
                 >
                   <span className="inline-flex items-center gap-2">
                     <Ruler className="size-4" />
-                    图像尺寸
+                    画面配置
                   </span>
-                  <span className="font-medium">{formatImageSizeLabel(imageSize)}</span>
+                  <span className="text-right font-medium">
+                    {formatImagePreferenceLabel(imagePreference)}
+                  </span>
                 </button>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-stone-400">当前队列</span>
@@ -1627,73 +1675,67 @@ export default function ImagePage() {
         <DialogContent className="w-[min(94vw,520px)] bg-[rgba(18,18,24,0.98)] p-5 text-stone-100">
           <div className="space-y-5">
             <div>
-              <div className="text-sm font-semibold">图像尺寸</div>
+              <div className="text-sm font-semibold">画面配置</div>
               <div className="mt-1 text-xs text-stone-400">
-                当前：{formatImageSizeLabel(imageSize)}
+                当前：{formatImagePreferenceLabel(imagePreference)}
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
-              {(["auto", "ratio", "custom"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setSizeDraft((prev) => ({ ...prev, mode }))}
-                  className={cn(
-                    "rounded-lg border px-3 py-2 text-sm transition",
-                    sizeDraft.mode === mode
-                      ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
-                      : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
-                  )}
-                >
-                  {mode === "auto" ? "自动" : mode === "ratio" ? "按比例" : "自定义"}
-                </button>
-              ))}
+            <div className="space-y-2">
+              <div className="text-xs text-stone-400">画面分辨率</div>
+              <div className="grid grid-cols-3 gap-2">
+                {IMAGE_RESOLUTION_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() =>
+                      setSizeDraft((prev) => ({
+                        ...prev,
+                        resolution: preset.value,
+                      }))
+                    }
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-sm transition",
+                      sizeDraft.resolution === preset.value
+                        ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
+                        : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
+                    )}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {sizeDraft.mode === "ratio" ? (
-              <div className="space-y-2">
-                <label className="text-xs text-stone-400" htmlFor="image-size-ratio">
-                  比例
-                </label>
-                <input
-                  id="image-size-ratio"
-                  value={sizeDraft.ratio}
-                  onChange={(event) => setSizeDraft((prev) => ({ ...prev, ratio: event.target.value }))}
-                  className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
-                  placeholder="16:9"
-                />
+            <div className="space-y-2">
+              <div className="text-xs text-stone-400">图片比例</div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {IMAGE_ASPECT_RATIO_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() =>
+                      setSizeDraft((prev) => ({
+                        ...prev,
+                        ratio: preset.value,
+                      }))
+                    }
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-sm transition",
+                      sizeDraft.ratio === preset.value
+                        ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
+                        : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
+                    )}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
               </div>
-            ) : null}
+            </div>
 
-            {sizeDraft.mode === "custom" ? (
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <label className="text-xs text-stone-400" htmlFor="image-size-width">
-                    宽
-                  </label>
-                  <input
-                    id="image-size-width"
-                    value={sizeDraft.width}
-                    inputMode="numeric"
-                    onChange={(event) => setSizeDraft((prev) => ({ ...prev, width: event.target.value }))}
-                    className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs text-stone-400" htmlFor="image-size-height">
-                    高
-                  </label>
-                  <input
-                    id="image-size-height"
-                    value={sizeDraft.height}
-                    inputMode="numeric"
-                    onChange={(event) => setSizeDraft((prev) => ({ ...prev, height: event.target.value }))}
-                    className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
-                  />
-                </div>
-              </div>
-            ) : null}
+            <div className="rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-xs leading-5 text-stone-400">
+              本次将使用：{formatImagePreferenceLabel(sizeDraft)}
+            </div>
 
             <div className="flex justify-end gap-2">
               <Button
@@ -1704,8 +1746,8 @@ export default function ImagePage() {
               >
                 取消
               </Button>
-              <Button type="button" onClick={handleApplyImageSize}>
-                应用
+              <Button type="button" onClick={() => void handleApplyImageSize()}>
+                保存
               </Button>
             </div>
           </div>
