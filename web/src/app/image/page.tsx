@@ -19,6 +19,7 @@ import {
   ImagePlus,
   LoaderCircle,
   MessageSquarePlus,
+  RotateCcw,
   Ruler,
   Trash2,
   X,
@@ -44,9 +45,11 @@ import {
 import {
   clearImageConversations,
   deleteImageConversation,
+  getImageGenerationPreference,
   listImageConversations,
   replaceImageConversations,
   saveImageConversation,
+  saveImageGenerationPreference,
   type ImageConversation,
   type ImageConversationTurn,
   type StoredInputImage,
@@ -55,24 +58,37 @@ import {
 import { getStoredAuthKey } from "@/store/auth";
 import { cn } from "@/lib/utils";
 import {
-  calculateImageSize,
+  calculateImageSizeFromPreference,
+  DEFAULT_IMAGE_GENERATION_PREFERENCE,
+  formatImagePreferenceLabel,
   formatImageSizeLabel,
-  normalizeImageSize,
-  type ImageSizeMode,
+  IMAGE_ASPECT_RATIO_PRESETS,
+  IMAGE_RESOLUTION_PRESETS,
+  normalizeImageGenerationPreference,
+  type ImageAspectRatioPreset,
+  type ImageGenerationPreference,
+  type ImageResolutionPreset,
 } from "@/lib/image-size";
 
-const imageModelMeta: Record<ImageModel, { helperText: string }> = {
-  "gpt-image-1": {
-    helperText: "gpt-image-1 已下架。",
-  },
+const imageModelMeta: Record<ImageModel, { label: string; helperText: string }> = {
   "gpt-image-2": {
-    helperText: "当前直接走真实 gpt-image-2 生图链路。",
+    label: "基础",
+    helperText: "公开模型 gpt-image-2。",
+  },
+  "gpt-image-2-2K": {
+    label: "2K",
+    helperText: "按 gpt-image-2-2K 计费，上游仍走 gpt-image-2。",
+  },
+  "gpt-image-2-4K": {
+    label: "4K",
+    helperText: "按 gpt-image-2-4K 计费，上游仍走 gpt-image-2。",
   },
 };
 
 const DEFAULT_IMAGE_PRICING: Record<ImageModel, number> = {
-  "gpt-image-1": 0,
   "gpt-image-2": 2,
+  "gpt-image-2-2K": 2,
+  "gpt-image-2-4K": 2,
 };
 const MAX_IMAGES_PER_REQUEST = 2;
 const IMAGE_COUNT_OPTIONS = Array.from(
@@ -140,10 +156,8 @@ type PendingInputImage = {
 };
 
 type SizeDialogState = {
-  mode: ImageSizeMode;
-  ratio: string;
-  width: string;
-  height: string;
+  resolution: ImageResolutionPreset;
+  ratio: ImageAspectRatioPreset;
 };
 
 type ImageQueueStatusSnapshot = Awaited<
@@ -229,6 +243,23 @@ function getLatestTurn(conversation: ImageConversation | null | undefined) {
   return turns[turns.length - 1] || null;
 }
 
+function getPreviousResponseIdForTurn(
+  conversation: ImageConversation | null | undefined,
+  turnId?: string,
+) {
+  const turns = getConversationTurns(conversation);
+  const endIndex = turnId
+    ? turns.findIndex((turn) => turn.id === turnId)
+    : turns.length;
+  const candidates = turns.slice(0, endIndex >= 0 ? endIndex : turns.length);
+  return (
+    [...candidates]
+      .reverse()
+      .map((turn) => String(turn.responseId || "").trim())
+      .find(Boolean) || undefined
+  );
+}
+
 function updateConversationTurn(
   conversation: ImageConversation,
   turnId: string,
@@ -309,12 +340,12 @@ export default function ImagePage() {
   const [imageCount, setImageCount] = useState("1");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
   const [imageSize, setImageSize] = useState("auto");
+  const [imagePreference, setImagePreference] = useState<ImageGenerationPreference>(
+    DEFAULT_IMAGE_GENERATION_PREFERENCE,
+  );
   const [isSizeDialogOpen, setIsSizeDialogOpen] = useState(false);
   const [sizeDraft, setSizeDraft] = useState<SizeDialogState>({
-    mode: "auto",
-    ratio: "1:1",
-    width: "1024",
-    height: "1024",
+    ...DEFAULT_IMAGE_GENERATION_PREFERENCE,
   });
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<
@@ -562,14 +593,54 @@ export default function ImagePage() {
     };
   }, [conversationScope]);
 
+  useEffect(() => {
+    if (conversationScope === null) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPreference = async () => {
+      try {
+        const preference = await getImageGenerationPreference(conversationScope);
+        if (cancelled) {
+          return;
+        }
+        const normalized = normalizeImageGenerationPreference(preference);
+        setImagePreference(normalized);
+        setSizeDraft(normalized);
+        setImageSize(calculateImageSizeFromPreference(normalized));
+      } catch {
+        if (!cancelled) {
+          const fallback = DEFAULT_IMAGE_GENERATION_PREFERENCE;
+          setImagePreference(fallback);
+          setSizeDraft(fallback);
+          setImageSize(calculateImageSizeFromPreference(fallback));
+        }
+      }
+    };
+
+    void loadPreference();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationScope]);
+
   const loadQuota = useCallback(async () => {
     try {
       const data = await fetchQuotaSummary();
       setAvailableQuota(Math.max(0, Number(data.available_quota || 0)));
       if (data.pricing) {
         setCurrentPricing({
-          "gpt-image-1": Math.max(0, Number(data.pricing["gpt-image-1"] || 0)),
-          "gpt-image-2": Math.max(0, Number(data.pricing["gpt-image-2"] || 0)),
+          "gpt-image-2": Math.max(0, Number(data.pricing["gpt-image-2"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2"])),
+          "gpt-image-2-2K": Math.max(
+            0,
+            Number(data.pricing["gpt-image-2-2K"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2-2K"]),
+          ),
+          "gpt-image-2-4K": Math.max(
+            0,
+            Number(data.pricing["gpt-image-2-4K"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2-4K"]),
+          ),
         });
       } else {
         setCurrentPricing(null);
@@ -768,40 +839,62 @@ export default function ImagePage() {
     }
   };
 
-  const handleApplyImageSize = () => {
+  const handleOpenImagePreferenceDialog = () => {
+    setSizeDraft(imagePreference);
+    setIsSizeDialogOpen(true);
+  };
+
+  const handleApplyImageSize = async () => {
     try {
-      const nextSize =
-        sizeDraft.mode === "auto"
-          ? "auto"
-          : sizeDraft.mode === "ratio"
-            ? calculateImageSize(sizeDraft.ratio)
-            : normalizeImageSize(`${sizeDraft.width}x${sizeDraft.height}`);
+      const nextPreference = normalizeImageGenerationPreference(sizeDraft);
+      const nextSize = calculateImageSizeFromPreference(nextPreference);
+      if (conversationScope) {
+        await saveImageGenerationPreference(conversationScope, nextPreference);
+      }
+      setImagePreference(nextPreference);
+      setSizeDraft(nextPreference);
       setImageSize(nextSize);
       setIsSizeDialogOpen(false);
+      toast.success("画面配置已保存");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "图片尺寸无效");
+      toast.error(error instanceof Error ? error.message : "画面配置无效");
     }
   };
 
-  const handleGenerateImage = async () => {
+  const handleGenerateImage = async (
+    retry?: {
+      conversation: ImageConversation;
+      turn: ImageConversationTurn;
+    },
+  ) => {
     if (!conversationScope) {
       toast.error("当前登录信息还在初始化，请稍后再试");
       return;
     }
-    const prompt = imagePrompt.trim();
-    const currentInputImage = inputImage;
+    const prompt = String(retry?.turn.prompt || imagePrompt).trim();
+    const currentInputImage = retry?.turn.inputImage || inputImage;
+    const targetModel = retry?.turn.model || imageModel;
+    const targetCount = Math.max(
+      1,
+      Math.min(MAX_IMAGES_PER_REQUEST, Number(retry?.turn.count || parsedCount) || 1),
+    );
+    const targetSize = String(retry?.turn.size || imageSize || "auto").trim() || "auto";
+    const targetUnitCost = Math.max(0, Number(effectivePricing[targetModel] || 0));
+    const targetRequestCost = targetCount * targetUnitCost;
     if (!prompt) {
       toast.error("请输入提示词");
       return;
     }
-    if (isQuotaInsufficient) {
-      toast.error(`当前额度不足，本次需要 ${requestCost} 额度`);
+    if (availableQuota !== null && targetRequestCost > Math.max(0, availableQuota)) {
+      toast.error(`当前额度不足，本次需要 ${targetRequestCost} 额度`);
       return;
     }
 
     const now = new Date().toISOString();
-    const existingConversation = selectedConversation;
-    const latestTurn = getLatestTurn(existingConversation);
+    const existingConversation = retry?.conversation || selectedConversation;
+    const previousResponseId = retry
+      ? getPreviousResponseIdForTurn(existingConversation, retry.turn.id)
+      : getLatestTurn(existingConversation)?.responseId;
     const conversationId =
       existingConversation?.clientConversationId ||
       currentInputImage?.clientConversationId ||
@@ -826,12 +919,12 @@ export default function ImagePage() {
     const draftTurn: ImageConversationTurn = {
       id: turnId,
       prompt,
-      model: imageModel,
-      count: parsedCount,
-      size: imageSize,
+      model: targetModel,
+      count: targetCount,
+      size: targetSize,
       copiedText: undefined,
       inputImage: draftInputImage,
-      images: Array.from({ length: parsedCount }, (_, index) => ({
+      images: Array.from({ length: targetCount }, (_, index) => ({
         id: `${turnId}-${index}`,
         status: "loading" as const,
       })),
@@ -859,20 +952,22 @@ export default function ImagePage() {
     }));
 
     setSelectedConversationId(conversationRecordId);
-    setImagePrompt("");
-    setInputImage(null);
+    if (!retry) {
+      setImagePrompt("");
+      setInputImage(null);
+    }
 
     try {
       activeGenerationKeys.add(activeGenerationKey);
       await persistConversation(draftConversation);
 
-      const data = await generateImage(prompt, imageModel, parsedCount, {
+      const data = await generateImage(prompt, targetModel, targetCount, {
         inputImageUrl: currentInputImage?.dataUrl,
         inputImageFileId: currentInputImage?.fileId,
         queueRequestId,
         clientConversationId: conversationId,
-        previousResponseId: latestTurn?.responseId,
-        size: imageSize,
+        previousResponseId,
+        size: targetSize,
       });
       const returnedItems = Array.isArray(data.data) ? data.data : [];
       if (data.billing) {
@@ -881,9 +976,11 @@ export default function ImagePage() {
         );
       }
       const nextImages: StoredImage[] = Array.from(
-        { length: parsedCount },
+        { length: targetCount },
         (_, index) => {
-          const current = returnedItems[index];
+          const current =
+            returnedItems.find((item) => item.index === index) ??
+            returnedItems.find((item) => item.index === undefined && returnedItems.indexOf(item) === index);
           if (current?.b64_json) {
             return {
               id: `${turnId}-${index}`,
@@ -894,10 +991,15 @@ export default function ImagePage() {
                 detectImageMimeType(current.b64_json),
             };
           }
+          const partialError = Array.isArray(data.partial_errors)
+            ? data.partial_errors.find((item) => item.index === index)
+            : undefined;
           return {
             id: `${turnId}-${index}`,
             status: "error",
-            error: `第 ${index + 1} 张没有返回图片数据`,
+            error:
+              String(partialError?.error || "").trim() ||
+              `第 ${index + 1} 张没有返回图片数据`,
           };
         },
       );
@@ -1068,14 +1170,16 @@ export default function ImagePage() {
               <div className="space-y-3 text-xs text-stone-500">
                 <button
                   type="button"
-                  onClick={() => setIsSizeDialogOpen(true)}
+                  onClick={handleOpenImagePreferenceDialog}
                   className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3 text-left text-stone-200 transition hover:bg-white/[0.08]"
                 >
                   <span className="inline-flex items-center gap-2">
                     <Ruler className="size-4" />
-                    图像尺寸
+                    画面配置
                   </span>
-                  <span className="font-medium">{formatImageSizeLabel(imageSize)}</span>
+                  <span className="text-right font-medium">
+                    {formatImagePreferenceLabel(imagePreference)}
+                  </span>
                 </button>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-stone-400">当前队列</span>
@@ -1292,8 +1396,28 @@ export default function ImagePage() {
                     ) : null}
 
                     {turn.status === "error" && turn.images.length === 0 ? (
-                      <div className="border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600">
-                        {turn.error || "生成失败"}
+                      <div className="flex flex-col gap-3 border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600 sm:flex-row sm:items-center sm:justify-between">
+                        <span>{turn.error || "生成失败"}</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={isComposerGenerating}
+                          onClick={() =>
+                            void handleGenerateImage({
+                              conversation: selectedConversation,
+                              turn,
+                            })
+                          }
+                          className="h-9 shrink-0 rounded-full border-rose-200 bg-white text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                        >
+                          {isComposerGenerating ? (
+                            <LoaderCircle className="size-4 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-4" />
+                          )}
+                          重试
+                        </Button>
                       </div>
                     ) : null}
 
@@ -1339,8 +1463,28 @@ export default function ImagePage() {
                     ) : null}
 
                     {turn.status === "error" && turn.images.length > 0 ? (
-                      <div className="border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
-                        {turn.error}
+                      <div className="flex flex-col gap-3 border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700 sm:flex-row sm:items-center sm:justify-between">
+                        <span>{turn.error}</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={isComposerGenerating}
+                          onClick={() =>
+                            void handleGenerateImage({
+                              conversation: selectedConversation,
+                              turn,
+                            })
+                          }
+                          className="h-9 shrink-0 rounded-full border-amber-200 bg-white text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+                        >
+                          {isComposerGenerating ? (
+                            <LoaderCircle className="size-4 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-4" />
+                          )}
+                          重试
+                        </Button>
                       </div>
                     ) : null}
                   </div>
@@ -1464,15 +1608,14 @@ export default function ImagePage() {
                     Object.entries(imageModelMeta) as Array<
                       [ImageModel, (typeof imageModelMeta)[ImageModel]]
                     >
-                  )
-                    .filter(([model]) => model === "gpt-image-2")
-                    .map(([model]) => {
+                  ).map(([model, meta]) => {
                       const active = imageModel === model;
                       return (
                         <button
                           key={model}
                           type="button"
                           aria-pressed={active}
+                          title={meta.helperText}
                           onClick={() => setImageModel(model)}
                           className={cn(
                             "cursor-pointer rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/40",
@@ -1481,7 +1624,7 @@ export default function ImagePage() {
                               : "border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/18 hover:text-stone-100",
                           )}
                         >
-                          {model}
+                          {meta.label}
                         </button>
                       );
                     })}
@@ -1552,73 +1695,67 @@ export default function ImagePage() {
         <DialogContent className="w-[min(94vw,520px)] bg-[rgba(18,18,24,0.98)] p-5 text-stone-100">
           <div className="space-y-5">
             <div>
-              <div className="text-sm font-semibold">图像尺寸</div>
+              <div className="text-sm font-semibold">画面配置</div>
               <div className="mt-1 text-xs text-stone-400">
-                当前：{formatImageSizeLabel(imageSize)}
+                当前：{formatImagePreferenceLabel(imagePreference)}
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
-              {(["auto", "ratio", "custom"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setSizeDraft((prev) => ({ ...prev, mode }))}
-                  className={cn(
-                    "rounded-lg border px-3 py-2 text-sm transition",
-                    sizeDraft.mode === mode
-                      ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
-                      : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
-                  )}
-                >
-                  {mode === "auto" ? "自动" : mode === "ratio" ? "按比例" : "自定义"}
-                </button>
-              ))}
+            <div className="space-y-2">
+              <div className="text-xs text-stone-400">画面分辨率</div>
+              <div className="grid grid-cols-3 gap-2">
+                {IMAGE_RESOLUTION_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() =>
+                      setSizeDraft((prev) => ({
+                        ...prev,
+                        resolution: preset.value,
+                      }))
+                    }
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-sm transition",
+                      sizeDraft.resolution === preset.value
+                        ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
+                        : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
+                    )}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {sizeDraft.mode === "ratio" ? (
-              <div className="space-y-2">
-                <label className="text-xs text-stone-400" htmlFor="image-size-ratio">
-                  比例
-                </label>
-                <input
-                  id="image-size-ratio"
-                  value={sizeDraft.ratio}
-                  onChange={(event) => setSizeDraft((prev) => ({ ...prev, ratio: event.target.value }))}
-                  className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
-                  placeholder="16:9"
-                />
+            <div className="space-y-2">
+              <div className="text-xs text-stone-400">图片比例</div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {IMAGE_ASPECT_RATIO_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() =>
+                      setSizeDraft((prev) => ({
+                        ...prev,
+                        ratio: preset.value,
+                      }))
+                    }
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-sm transition",
+                      sizeDraft.ratio === preset.value
+                        ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
+                        : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
+                    )}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
               </div>
-            ) : null}
+            </div>
 
-            {sizeDraft.mode === "custom" ? (
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <label className="text-xs text-stone-400" htmlFor="image-size-width">
-                    宽
-                  </label>
-                  <input
-                    id="image-size-width"
-                    value={sizeDraft.width}
-                    inputMode="numeric"
-                    onChange={(event) => setSizeDraft((prev) => ({ ...prev, width: event.target.value }))}
-                    className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-xs text-stone-400" htmlFor="image-size-height">
-                    高
-                  </label>
-                  <input
-                    id="image-size-height"
-                    value={sizeDraft.height}
-                    inputMode="numeric"
-                    onChange={(event) => setSizeDraft((prev) => ({ ...prev, height: event.target.value }))}
-                    className="h-10 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm text-stone-100 outline-none focus:border-amber-300/45"
-                  />
-                </div>
-              </div>
-            ) : null}
+            <div className="rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-xs leading-5 text-stone-400">
+              本次将使用：{formatImagePreferenceLabel(sizeDraft)}
+            </div>
 
             <div className="flex justify-end gap-2">
               <Button
@@ -1629,8 +1766,8 @@ export default function ImagePage() {
               >
                 取消
               </Button>
-              <Button type="button" onClick={handleApplyImageSize}>
-                应用
+              <Button type="button" onClick={() => void handleApplyImageSize()}>
+                保存
               </Button>
             </div>
           </div>

@@ -70,7 +70,13 @@ class BackendService:
         normalized_route = str(route or "").strip().lower()
         if normalized_route != "responses":
             return None
-        return "images_edit" if input_images else "images"
+        if input_images:
+            return None
+        return "images"
+
+    @staticmethod
+    def _is_responses_input_image_rejection(exc: ImageGenerationError, input_images: list[dict[str, str]] | None) -> bool:
+        return bool(input_images) and "responses failed: 400" in str(exc).lower()
 
     def _refresh_request_token(self, access_token: str) -> dict | None:
         cached_account = self.account_service.get_account(access_token)
@@ -197,6 +203,9 @@ class BackendService:
                     continue
                 if is_low_quality_image_error(str(exc)):
                     print(f"[image-generate] skip low quality token={self._token_label(request_token)}")
+                    continue
+                if self._is_responses_input_image_rejection(exc, input_images):
+                    print(f"[image-generate] skip responses input image rejection token={self._token_label(request_token)}")
                     continue
                 if is_transient_image_error(str(exc)):
                     print(f"[image-generate] skip transient failure token={self._token_label(request_token)}")

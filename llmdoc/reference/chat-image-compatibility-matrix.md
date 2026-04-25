@@ -8,15 +8,15 @@
 | `GET /v1/responses/{response_id}` | 保留，读取进程内结果 | 继续读 `RESPONSES_STORE` |
 | `POST /v1/response` | 不注册 | 单数路径按 workflow v2 视为无效 |
 | `GET /v1/response/{response_id}` | 不注册 | 单数路径按 workflow v2 视为无效 |
-| `POST /v1/images/generations` | 保留，兼容入口 | 经 `ImageGateway.generate_image()` 按账号套餐分流；Free 走 `/backend-api/f/conversation` |
-| `POST /v1/images/edits` | 新增，兼容入口 | multipart 图片转单张输入图后经 `ImageGateway.generate_image()`；Free 走 `/backend-api/f/conversation`，付费账号走 Responses inline input_image |
-| `GET /v1/models` | 保留 | 当前仍返回 `gpt-image-2` |
+| `POST /v1/images/generations` | 保留，第三方客户端兼容入口 | JSON 请求进入 `generate_image_payload`；`response_format=url` 会保存生成图并返回 HTTP 图片 URL |
+| `POST /v1/images/edits` | 保留，第三方客户端兼容入口 | multipart 图片转单张 `input_image` 后进入 `generate_image_payload`；`response_format=url` 同样返回 HTTP 图片 URL |
+| `GET /v1/models` | 保留 | 当前返回 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K` |
 | `POST /backend-api/files/process_upload_stream` | 保留 | 本地上传登记与后续 `file_id` 输入图继续使用 |
 | `GET /backend-api/my/recent/uploaded_images` | 保留 | 上传记录仍按 Bearer Token 和会话隔离 |
 | `GET /backend-api/files/{file_id}/content` | 保留 | 继续读取当前 Bearer Token 的本地上传原图 |
 | `GET /api/accounts` / `POST /api/accounts` | 保留 | `POST` 会先规范化单账号或 `accounts[]` 载体 |
 | `GET /api/quota` | 保留 | 额度计算不变 |
-| `GET /api/image-queue/me` | 保留 | 队列状态不变 |
+| `GET /api/image-queue/me` | 保留 | 继续返回当前请求位置，并带 60 次/60 秒窗口状态 |
 | user key / redeem code APIs | 保留 | 当前不改 |
 
-当前 gateway 已接入账号套餐分流。`services/chat_image/account_import.py` 支持单账号 JSON 和 `sub2api` 的 `accounts[]` 载体；`services/chat_image/route_selector.py` 负责 Free 走 Images、Plus/Pro/Team 走 Responses 的判断；`services/chat_image/gateway.py` 会把 route 继续传给 `services/image_service.py`。`IMAGE_ROUTE_POLICY=legacy` 仍可作为回退开关，但默认策略已经是 `plan_type`。
+当前 gateway 已接入账号套餐分流。`services/chat_image/account_import.py` 支持单账号 JSON 和 `sub2api` 的 `accounts[]` 载体；`services/chat_image/route_selector.py` 负责 Free 走 `images` 或 `images_edit`、Plus/Pro/Team 走 `responses` 的判断；`services/chat_image/gateway.py` 会把 route 继续传给 `services/image_service.py`。公开 Images 入口只做协议兼容，不改变内部账号路线。`IMAGE_ROUTE_POLICY=legacy` 仍可作为回退开关，但默认策略已经是 `plan_type`。

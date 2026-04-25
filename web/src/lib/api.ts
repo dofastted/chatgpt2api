@@ -1,16 +1,17 @@
-import { httpRequest } from "@/lib/request";
+import { httpRequest, httpStreamRequest } from "@/lib/request";
 
 export type AccountType = "Free" | "Plus" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type AccountCategory = "普通" | "捐赠";
-export type ImageModel = "gpt-image-1" | "gpt-image-2";
+export type ImageModel = "gpt-image-2" | "gpt-image-2-2K" | "gpt-image-2-4K";
 export type AuthRole = "user" | "admin";
 export type AuthType = "auth_key" | "admin_auth_key" | "user_key";
 export type ProxyProtocol = "http" | "socks5";
 export type UserKeyStatus = "启用" | "停用";
 export type UserKeyPricing = {
-  "gpt-image-1": number;
   "gpt-image-2": number;
+  "gpt-image-2-2K": number;
+  "gpt-image-2-4K": number;
 };
 
 export type ImageBilling = {
@@ -215,7 +216,8 @@ type ImageQueueStatusResponse = {
 export type ImageGenerationResponse = {
   id?: string;
   created: number;
-  data: Array<{ b64_json: string; revised_prompt?: string; mime_type?: string }>;
+  data: Array<{ b64_json: string; revised_prompt?: string; mime_type?: string; index?: number }>;
+  partial_errors?: Array<{ index?: number; error?: string }>;
   billing?: ImageBilling;
   copied_text?: string;
   text_content?: string;
@@ -250,7 +252,9 @@ type ResponsesImageGenerationResponse = {
     type?: string;
     status?: string;
     result?: string;
+    index?: number;
   }>;
+  partial_errors?: Array<{ index?: number; error?: string }>;
   billing?: ImageBilling;
   copied_text?: string;
   text_content?: string;
@@ -487,12 +491,19 @@ function normalizeResponsesImageGenerationResponse(
         .filter((item) => item?.type === "image_generation_call" && String(item.result || "").trim())
         .map((item) => ({
           b64_json: String(item?.result || "").trim(),
+          ...(Number.isFinite(Number(item?.index)) ? { index: Number(item?.index) } : {}),
         }))
     : [];
   return {
     created: Math.max(0, Number(payload.created_at || 0)) || Math.floor(Date.now() / 1000),
     id: String(payload.id || "").trim() || undefined,
     data,
+    partial_errors: Array.isArray(payload.partial_errors)
+      ? payload.partial_errors.map((item) => ({
+          ...(Number.isFinite(Number(item?.index)) ? { index: Number(item?.index) } : {}),
+          error: String(item?.error || "").trim() || undefined,
+        }))
+      : undefined,
     billing: payload.billing,
     copied_text: String(payload.copied_text || "").trim() || undefined,
     text_content: String(payload.text_content || "").trim() || undefined,
@@ -509,6 +520,71 @@ function normalizeResponsesImageGenerationResponse(
   };
 }
 
+function parseResponsesStreamEvent(rawEvent: string) {
+  let event = "";
+  const dataLines: string[] = [];
+  for (const line of rawEvent.split(/\r?\n/)) {
+    if (line.startsWith("event:")) {
+      event = line.slice("event:".length).trim();
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trim());
+    }
+  }
+  const dataText = dataLines.join("\n").trim();
+  if (!dataText || dataText === "[DONE]") {
+    return { event, data: dataText };
+  }
+  return { event, data: JSON.parse(dataText) as Record<string, unknown> };
+}
+
+async function readResponsesImageGenerationStream(response: Response) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error("响应流不可用");
+  }
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let completedPayload: ResponsesImageGenerationResponse | null = null;
+
+  const processRawEvent = (rawEvent: string) => {
+    if (!rawEvent.trim()) {
+      return;
+    }
+    const parsed = parseResponsesStreamEvent(rawEvent);
+    if (parsed.event === "response.completed" && typeof parsed.data === "object" && parsed.data) {
+      completedPayload = parsed.data.response as ResponsesImageGenerationResponse;
+    }
+    if (parsed.event === "response.failed" && typeof parsed.data === "object" && parsed.data) {
+      const failedResponse = parsed.data.response as { error?: { message?: string } };
+      throw new Error(String(failedResponse?.error?.message || "").trim() || "生成图片失败");
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+      buffer = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const events = buffer.split(/\n\n/);
+      buffer = events.pop() || "";
+      for (const rawEvent of events) {
+        processRawEvent(rawEvent);
+      }
+    }
+    if (done) {
+      break;
+    }
+  }
+  processRawEvent(buffer);
+
+  if (!completedPayload) {
+    throw new Error("生成响应没有结束信号");
+  }
+  return completedPayload;
+}
+
 export async function generateImage(
   prompt: string,
   model: ImageModel = "gpt-image-2",
@@ -520,6 +596,7 @@ export async function generateImage(
     clientConversationId?: string | null;
     previousResponseId?: string | null;
     size?: string | null;
+    headers?: Record<string, string>;
   } = {},
 ) {
   const inputImageUrl = String(options.inputImageUrl || "").trim();
@@ -540,21 +617,29 @@ export async function generateImage(
     inputItems.push({ type: "input_image", image_url: inputImageUrl });
   }
 
-  const payload = await httpRequest<ResponsesImageGenerationResponse>("/v1/responses", {
-    method: "POST",
-    body: {
+  const body = {
       model: "gpt-5",
       input: inputItems,
       tools: [{ type: "image_generation", model, size }],
       tool_choice: { type: "image_generation" },
       ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
       n,
+      stream: true,
       metadata: clientConversationId
         ? { client_conversation_id: clientConversationId }
         : undefined,
-    },
-    headers: queueHeaders,
+  };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(queueHeaders || {}),
+    ...(options.headers || {}),
+  };
+  const response = await httpStreamRequest("/v1/responses", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
   });
+  const payload = await readResponsesImageGenerationStream(response);
   return normalizeResponsesImageGenerationResponse(payload);
 }
 

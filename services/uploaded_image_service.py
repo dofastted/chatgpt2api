@@ -19,6 +19,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {
     "image/bmp": ".bmp",
     "image/avif": ".avif",
 }
+MIN_INPUT_IMAGE_SIDE = 64
 
 
 def detect_image_mime_type(image_bytes: bytes, response_content_type: str | None = None) -> str:
@@ -52,12 +53,60 @@ def detect_image_dimensions(image_bytes: bytes) -> tuple[int | None, int | None]
         from io import BytesIO
         from PIL import Image
     except Exception:
-        return None, None
+        return detect_image_dimensions_from_bytes(image_bytes)
     try:
         image = Image.open(BytesIO(image_bytes))
         return int(image.width), int(image.height)
     except Exception:
-        return None, None
+        return detect_image_dimensions_from_bytes(image_bytes)
+
+
+def detect_image_dimensions_from_bytes(image_bytes: bytes) -> tuple[int | None, int | None]:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n") and len(image_bytes) >= 24:
+        return int.from_bytes(image_bytes[16:20], "big"), int.from_bytes(image_bytes[20:24], "big")
+    if (image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a")) and len(image_bytes) >= 10:
+        return int.from_bytes(image_bytes[6:8], "little"), int.from_bytes(image_bytes[8:10], "little")
+    if image_bytes.startswith(b"BM") and len(image_bytes) >= 26:
+        return abs(int.from_bytes(image_bytes[18:22], "little", signed=True)), abs(
+            int.from_bytes(image_bytes[22:26], "little", signed=True)
+        )
+    if image_bytes.startswith(b"\xff\xd8"):
+        index = 2
+        length = len(image_bytes)
+        while index + 9 < length:
+            if image_bytes[index] != 0xFF:
+                index += 1
+                continue
+            marker = image_bytes[index + 1]
+            index += 2
+            if marker in {0xD8, 0xD9}:
+                continue
+            if index + 2 > length:
+                break
+            segment_length = int.from_bytes(image_bytes[index : index + 2], "big")
+            if segment_length < 2 or index + segment_length > length:
+                break
+            if marker in {
+                0xC0,
+                0xC1,
+                0xC2,
+                0xC3,
+                0xC5,
+                0xC6,
+                0xC7,
+                0xC9,
+                0xCA,
+                0xCB,
+                0xCD,
+                0xCE,
+                0xCF,
+            }:
+                return (
+                    int.from_bytes(image_bytes[index + 5 : index + 7], "big"),
+                    int.from_bytes(image_bytes[index + 3 : index + 5], "big"),
+                )
+            index += segment_length
+    return None, None
 
 
 class UploadedImageService:
@@ -166,6 +215,8 @@ class UploadedImageService:
             raise ValueError("image is empty")
         mime_type = normalize_uploaded_image_mime_type(image_bytes, content_type)
         width, height = detect_image_dimensions(image_bytes)
+        if width is not None and height is not None and (width < MIN_INPUT_IMAGE_SIDE or height < MIN_INPUT_IMAGE_SIDE):
+            raise ValueError(f"image width and height must be at least {MIN_INPUT_IMAGE_SIDE}px")
         file_ext = SUPPORTED_IMAGE_EXTENSIONS.get(mime_type, ".png")
         file_id = f"upload_{uuid.uuid4().hex}"
         stored_name = f"{file_id}{file_ext}"

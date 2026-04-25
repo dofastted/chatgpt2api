@@ -245,10 +245,11 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), "failed to fetch input image")
 
     def test_gpt_image_2_uses_real_upstream_model(self) -> None:
-        upstream_model, reasoning_effort = image_service._resolve_upstream_target("token-123", "gpt-image-2")
+        for model in ("gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K"):
+            upstream_model, reasoning_effort = image_service._resolve_upstream_target("token-123", model)
 
-        self.assertEqual(upstream_model, "gpt-image-2")
-        self.assertIsNone(reasoning_effort)
+            self.assertEqual(upstream_model, "gpt-image-2")
+            self.assertIsNone(reasoning_effort)
 
     def test_needs_text_render_retry_detects_oversized_or_unbalanced_text(self) -> None:
         good = Image.new("RGB", (512, 512), "black")
@@ -344,7 +345,7 @@ class ImageServiceAttachmentTests(unittest.TestCase):
                 ],
             ),
         ):
-            payload = image_service.generate_image_result("token-123", "draw two apples", model="gpt-image-1", n=1)
+            payload = image_service.generate_image_result("token-123", "draw two apples", model="gpt-image-2", n=1)
 
         self.assertEqual(len(payload["data"]), 2)
         self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtMQ==")
@@ -375,7 +376,7 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             patch.object(image_service, "_fetch_download_url", return_value="https://example.com/3"),
             patch.object(image_service, "_download_image_payload", return_value=("aW1hZ2UtMw==", "image/png")),
         ):
-            payload = image_service.generate_image_result("token-123", "draw ABCD", model="gpt-image-1", n=1)
+            payload = image_service.generate_image_result("token-123", "draw ABCD", model="gpt-image-2", n=1)
 
         self.assertEqual(parse_calls["count"], 2)
         self.assertEqual(len(payload["data"]), 1)
@@ -448,7 +449,7 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             "token-123",
             "account-123",
             "draw",
-            "gpt-image-2",
+            "gpt-image-2-4K",
             None,
         )
 
@@ -508,7 +509,7 @@ class ImageServiceAttachmentTests(unittest.TestCase):
                 ],
             ) as download_mock,
         ):
-            payload = image_service.generate_image_result("token-123", "draw white letters ABCD", model="gpt-image-1", n=1)
+            payload = image_service.generate_image_result("token-123", "draw white letters ABCD", model="gpt-image-2", n=1)
 
         self.assertEqual(download_mock.call_count, 2)
         self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtNA==")

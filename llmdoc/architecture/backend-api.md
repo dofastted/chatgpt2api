@@ -13,7 +13,7 @@
 - 普通鉴权在 `services/api.py:192`。
 - 管理员鉴权在 `services/api.py:199`。
 - `user_key` 的模型单价解析在 `services/api.py:142`，图片模型名校验在 `services/api.py:169`。
-- 当前默认单价是 `gpt-image-1=0`、`gpt-image-2=2`，来源在 `services/user_key_service.py:17` 和 `services/api.py:31`。
+- 当前默认单价是 `gpt-image-2=2`、`gpt-image-2-2K=2`、`gpt-image-2-4K=2`，来源在 `services/user_key_service.py` 和 `services/api.py`。
 - 图片请求如果走 `user_key`，实际扣费不再是全局固定倍率，而是 `pricing[model] * n`，预扣与回退逻辑在 `services/api.py:481`。
 - 图片协议转换也在这一层完成：`build_images_response_payload`、`iter_images_stream`、`build_responses_payload`、`iter_responses_stream` 会把内部结果包成对外接口需要的 JSON 或 SSE。
 
@@ -33,7 +33,7 @@
 协议约定：
 
 - `/v1/responses` 对外按 OpenAI Responses 风格返回 `response.output[]`，图片项类型是 `image_generation_call`。
-- Responses 生图的顶层 `model` 应是文本模型，真实图片模型放在 `tools[].model`。API 层会把内部图片结果挂到 `response.output[]`，并保持 `billing.requested_model` 是真实生图模型。当前如果没传图片模型，默认会落到 `gpt-image-2`，逻辑在 `services/api.py:376`。
+- Responses 生图的顶层 `model` 应是文本模型，公开图片模型放在 `tools[].model`。API 层会把内部图片结果挂到 `response.output[]`，并保持 `billing.requested_model` 是请求的公开模型。当前如果没传图片模型，默认会落到 `gpt-image-2`，逻辑在 `services/api.py` 的 `resolve_requested_response_image_model`。
 - Responses 生图第一版现在支持 `input_text + 单张 input_image`。API 层会校验 `image_url` 只能是 `http(s)` 或 `data:image/*`；如果传的是 `file_id`，会在 `services/api.py:813` 到 `services/api.py:821` 注入当前请求的 `owner_auth_token`，供后续读取本地上传文件。
 - 本地上传元数据和文件由 `services/uploaded_image_service.py:63` 到 `services/uploaded_image_service.py:228` 管理，上传记录按 Bearer Token 哈希隔离。
 - 上传接口只接收单张图片文件，大小上限 8 MB，返回值里会带 `file_id`、尺寸、大小和 `/backend-api/files/{file_id}/content` 下载地址，逻辑在 `services/api.py:859` 到 `services/api.py:913`。

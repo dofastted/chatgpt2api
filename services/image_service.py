@@ -32,6 +32,7 @@ USER_AGENT = (
 DEFAULT_MODEL = "gpt-4o"
 GPT_IMAGE_2_UPSTREAM_MODEL = "gpt-image-2"
 GPT_IMAGE_2_REASONING_EFFORT = None
+PUBLIC_GPT_IMAGE_2_MODELS = {"gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K"}
 CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_RESPONSES_MODEL = "gpt-5.4-mini"
 CODEX_RESPONSES_USER_AGENT = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
@@ -1088,9 +1089,9 @@ def _resolve_chatgpt_account_id(access_token: str) -> str:
 
 def _normalize_responses_image_tool_model(value: str) -> str:
     normalized = str(value or "").strip()
-    if normalized in {"gpt-image-1", "gpt-image-2"}:
-        return normalized
-    return "gpt-image-2"
+    if normalized in PUBLIC_GPT_IMAGE_2_MODELS:
+        return GPT_IMAGE_2_UPSTREAM_MODEL
+    return GPT_IMAGE_2_UPSTREAM_MODEL
 
 
 def _encode_image_data_url(image_bytes: bytes, mime_type: str) -> str:
@@ -1315,11 +1316,9 @@ def generate_image_result_via_responses(
 
 
 def _resolve_upstream_target(access_token: str, requested_model: str) -> tuple[str, Optional[str]]:
-    requested_model = str(requested_model or "").strip() or "gpt-image-1"
+    requested_model = str(requested_model or "").strip() or GPT_IMAGE_2_UPSTREAM_MODEL
 
-    if requested_model == "gpt-image-1":
-        return "auto", None
-    if requested_model == "gpt-image-2":
+    if requested_model in PUBLIC_GPT_IMAGE_2_MODELS:
         return GPT_IMAGE_2_UPSTREAM_MODEL, GPT_IMAGE_2_REASONING_EFFORT
     return str(requested_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL, None
 

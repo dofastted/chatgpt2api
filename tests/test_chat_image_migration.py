@@ -37,9 +37,10 @@ class FakeRouteAccountService:
 
 
 class RecordingGateway:
-    def __init__(self, fail_routes: set[str] | None = None) -> None:
+    def __init__(self, fail_routes: set[str] | None = None, route_errors: dict[str, str] | None = None) -> None:
         self.routes: list[str] = []
         self.fail_routes = fail_routes or set()
+        self.route_errors = route_errors or {}
 
     def generate_image(
         self,
@@ -54,6 +55,8 @@ class RecordingGateway:
     ) -> dict:
         del access_token, prompt, model, n, input_images, size
         self.routes.append(route)
+        if route in self.route_errors:
+            raise ImageGenerationError(self.route_errors[route])
         if route in self.fail_routes:
             raise ImageGenerationError("responses failed: 429")
         return {"created": 1, "data": [{"b64_json": "ok"}]}
@@ -157,6 +160,29 @@ class ChatImageMigrationTests(unittest.TestCase):
 
         self.assertEqual(payload["data"][0]["b64_json"], "ok")
         self.assertEqual(gateway.routes, ["responses", "images"])
+
+    def test_backend_service_does_not_fallback_to_images_edit_for_paid_input_images(self) -> None:
+        self.assertIsNone(
+            BackendService._fallback_route_for(
+                "responses",
+                [{"image_url": "data:image/png;base64,aW1n"}],
+            )
+        )
+        self.assertEqual(BackendService._fallback_route_for("responses", None), "images")
+
+    def test_backend_service_treats_responses_input_image_400_as_next_account_retry(self) -> None:
+        self.assertTrue(
+            BackendService._is_responses_input_image_rejection(
+                ImageGenerationError("responses failed: 400"),
+                [{"file_id": "upload-1"}],
+            )
+        )
+        self.assertFalse(
+            BackendService._is_responses_input_image_rejection(
+                ImageGenerationError("responses failed: 400"),
+                None,
+            )
+        )
 
     def test_image_gateway_forwards_route_to_executor(self) -> None:
         calls: list[dict[str, object]] = []

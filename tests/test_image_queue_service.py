@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from services.image_queue_service import ImageQueueService
 
@@ -53,6 +54,32 @@ class ImageQueueServiceTests(unittest.TestCase):
         finished_snapshot = self.service.snapshot("user-1", request_id="req-1")
         self.assertEqual(finished_snapshot["user"], {"waiting": 0, "running": 0})
         self.assertEqual(finished_snapshot["request"]["status"], "finished")
+
+    def test_global_start_limit_keeps_extra_requests_waiting(self) -> None:
+        self.service.GLOBAL_START_LIMIT = 1
+        self.service.GLOBAL_START_WINDOW_SECONDS = 60.0
+        self.service.create_ticket("user-1", "req-1")
+        self.service.create_ticket("user-2", "req-2")
+
+        with patch("services.image_queue_service.time", side_effect=[100.0, 100.0, 100.0, 100.0, 100.0]):
+            self.service.wait_for_turn("req-1")
+            snapshot = self.service.snapshot("user-2", request_id="req-2")
+
+        self.assertEqual(snapshot["request"]["status"], "waiting")
+        self.assertEqual(snapshot["request"]["position"], 1)
+        self.assertEqual(snapshot["global"]["starts_in_window"], 1)
+        self.assertGreater(snapshot["global"]["start_wait_seconds"], 0)
+
+    def test_snapshot_expires_old_start_timestamps_before_reporting_stats(self) -> None:
+        self.service.GLOBAL_START_LIMIT = 1
+        self.service.GLOBAL_START_WINDOW_SECONDS = 60.0
+        self.service._start_timestamps.append(100.0)
+
+        with patch("services.image_queue_service.time", return_value=161.0):
+            snapshot = self.service.snapshot("user-1")
+
+        self.assertEqual(snapshot["global"]["starts_in_window"], 0)
+        self.assertEqual(snapshot["global"]["start_wait_seconds"], 0)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-import base64
 import json
 from pathlib import Path
 from threading import Lock
@@ -10,7 +12,7 @@ from threading import Event, Thread
 from time import time
 from typing import Any
 from uuid import uuid4
-from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -18,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from services.account_service import account_service
-from services.config import config
+from services.config import DATA_DIR, config
 from services.backend_service import BackendService
 from services.chat_image.account_import import normalize_account_carrier
 from services.image_service import ImageGenerationError
@@ -26,7 +28,12 @@ from services.image_size import normalize_image_size
 from services.image_queue_service import image_queue_service
 from services.proxy_service import proxy_service
 from services.redeem_code_service import redeem_code_service
-from services.uploaded_image_service import uploaded_image_service
+from services.uploaded_image_service import (
+    MIN_INPUT_IMAGE_SIDE,
+    detect_image_dimensions,
+    normalize_uploaded_image_mime_type,
+    uploaded_image_service,
+)
 from services.user_key_service import user_key_service
 from services.version import get_app_version
 
@@ -34,12 +41,12 @@ from services.version import get_app_version
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
 WEB_OUT_DIR = BASE_DIR / "web" / "out"
+GENERATED_IMAGE_DIR = DATA_DIR / "generated_images"
 FREE_DONATION_REWARD_LDC = 20
 PURCHASE_QUOTA_PER_ORDER = 20
 PURCHASE_LDC_COST_PER_ORDER = 20
 DEFAULT_USER_KEY_PRICING = dict(user_key_service.DEFAULT_PRICING)
-ALL_IMAGE_MODELS = tuple(user_key_service.SUPPORTED_MODELS)
-ENABLED_IMAGE_MODELS = ("gpt-image-2",)
+ENABLED_IMAGE_MODELS = ("gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K")
 MAX_IMAGES_PER_REQUEST = 2
 DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
@@ -49,15 +56,17 @@ RESPONSES_STORE_LOCK = Lock()
 
 
 class UserKeyPricingRequest(BaseModel):
-    gpt_image_1: int = Field(default=0, ge=0, alias="gpt-image-1")
     gpt_image_2: int = Field(default=2, ge=0, alias="gpt-image-2")
+    gpt_image_2_2k: int = Field(default=2, ge=0, alias="gpt-image-2-2K")
+    gpt_image_2_4k: int = Field(default=2, ge=0, alias="gpt-image-2-4K")
 
     model_config = {"populate_by_name": True}
 
     def to_pricing_dict(self) -> dict[str, int]:
         return {
-            "gpt-image-1": int(self.gpt_image_1),
             "gpt-image-2": int(self.gpt_image_2),
+            "gpt-image-2-2K": int(self.gpt_image_2_2k),
+            "gpt-image-2-4K": int(self.gpt_image_2_4k),
         }
 
 
@@ -251,13 +260,23 @@ def build_billing_payload(
         unit_cost: int,
         charged_quota: int,
         remaining_quota: int,
+        requested_count: int | None = None,
+        succeeded_count: int | None = None,
+        failed_count: int | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "requested_model": requested_model,
         "unit_cost": unit_cost,
         "charged_quota": charged_quota,
         "remaining_quota": remaining_quota,
     }
+    if requested_count is not None:
+        payload["requested_count"] = max(0, int(requested_count))
+    if succeeded_count is not None:
+        payload["succeeded_count"] = max(0, int(succeeded_count))
+    if failed_count is not None:
+        payload["failed_count"] = max(0, int(failed_count))
+    return payload
 
 
 def normalize_requested_image_model(model: str) -> str:
@@ -308,6 +327,31 @@ def fail_queue_request(request_id: str, error: str | None = None) -> None:
     image_queue_service.finish_ticket(request_id, error=error)
 
 
+def extract_image_result_items(result: dict[str, object], *, request_index: int | None = None) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for item in list(result.get("data") or []):
+        if not isinstance(item, dict):
+            continue
+        b64_json = str(item.get("b64_json") or "").strip()
+        if not b64_json:
+            continue
+        next_item = dict(item)
+        next_item["b64_json"] = b64_json
+        if request_index is not None:
+            next_item["index"] = int(request_index)
+        items.append(next_item)
+    return items
+
+
+def generation_error_to_text(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            return str(detail.get("error") or detail.get("message") or detail).strip()
+        return str(detail).strip()
+    return str(exc).strip() or exc.__class__.__name__
+
+
 async def generate_image_payload(
         *,
         service: BackendService,
@@ -321,32 +365,92 @@ async def generate_image_payload(
         size: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     settled_user_key = ""
-    request_cost = 0
+    requested_count = max(1, int(n or 1))
     unit_cost = 0
     remaining_quota_after_charge = max(0, int(context.remaining_quota or 0))
     if context.auth_type == "user_key":
         settled_user_key = extract_bearer_token(authorization)
         pricing = resolve_user_key_pricing(context.pricing)
         unit_cost = max(0, int(pricing.get(model) or 0))
-        request_cost = max(1, int(n or 1)) * unit_cost
+        request_cost = requested_count * unit_cost
         if remaining_quota_after_charge < request_cost:
             raise HTTPException(
                 status_code=403,
                 detail={"error": f"quota is insufficient for this request, required={request_cost}"},
             )
     try:
-        result = await run_in_threadpool(
-            service.generate_with_pool,
-            prompt,
-            model,
-            n,
-            input_images,
-            queue_request_id,
-            size,
-        )
+        result: dict[str, object]
+        partial_errors: list[dict[str, object]] = []
+        if requested_count == 1:
+            result = await run_in_threadpool(
+                service.generate_with_pool,
+                prompt,
+                model,
+                1,
+                input_images,
+                queue_request_id,
+                size,
+            )
+            success_items = extract_image_result_items(result, request_index=0)[:1]
+            if not success_items:
+                raise ImageGenerationError("image generation returned no image data")
+            result = {
+                **result,
+                "data": success_items,
+            }
+        else:
+            created = int(time())
+            success_items: list[dict[str, object]] = []
+            copied_text = ""
+            first_error: Exception | None = None
+            for request_index in range(requested_count):
+                try:
+                    current_result = await run_in_threadpool(
+                        service.generate_with_pool,
+                        prompt,
+                        model,
+                        1,
+                        input_images,
+                        queue_request_id,
+                        size,
+                    )
+                    current_items = extract_image_result_items(current_result, request_index=request_index)[:1]
+                    if not current_items:
+                        raise ImageGenerationError("image generation returned no image data")
+                    success_items.extend(current_items)
+                    if not copied_text:
+                        copied_text = str(current_result.get("copied_text") or "").strip()
+                    created = int(current_result.get("created") or created)
+                except (ImageGenerationError, HTTPException) as exc:
+                    if first_error is None:
+                        first_error = exc
+                    partial_errors.append(
+                        {
+                            "index": request_index,
+                            "error": generation_error_to_text(exc),
+                        }
+                    )
+                    continue
+            if not success_items:
+                if isinstance(first_error, HTTPException):
+                    raise first_error
+                if isinstance(first_error, ImageGenerationError):
+                    raise first_error
+                raise ImageGenerationError("image generation failed")
+            result = {
+                "created": created,
+                "data": success_items,
+            }
+            if copied_text:
+                result["copied_text"] = copied_text
+            if partial_errors:
+                result["partial_errors"] = partial_errors
+        succeeded_count = len(success_items)
+        failed_count = max(0, requested_count - succeeded_count)
+        charged_quota = succeeded_count * unit_cost
         billing_payload = None
         if settled_user_key:
-            charged_item = user_key_service.consume_quota(settled_user_key, request_cost)
+            charged_item = user_key_service.consume_quota(settled_user_key, charged_quota)
             if charged_item is not None:
                 remaining_quota_after_charge = max(0, int(charged_item.get("quota") or 0))
             latest_item = user_key_service.mark_used(settled_user_key)
@@ -356,8 +460,11 @@ async def generate_image_payload(
             billing_payload = build_billing_payload(
                 requested_model=model,
                 unit_cost=unit_cost,
-                charged_quota=request_cost if charged_item is not None else 0,
+                charged_quota=charged_quota if charged_item is not None else 0,
                 remaining_quota=remaining_quota_after_charge,
+                requested_count=requested_count,
+                succeeded_count=succeeded_count,
+                failed_count=failed_count,
             )
             result = {
                 **result,
@@ -640,28 +747,72 @@ def normalize_output_format(output_format: str | None, mime_type: str | None) ->
     return "png"
 
 
+def image_mime_type_to_extension(mime_type: str | None) -> str:
+    normalized = str(mime_type or "").split(";", 1)[0].strip().lower()
+    if normalized == "image/jpeg":
+        return ".jpg"
+    if normalized == "image/webp":
+        return ".webp"
+    if normalized == "image/gif":
+        return ".gif"
+    if normalized == "image/bmp":
+        return ".bmp"
+    if normalized == "image/avif":
+        return ".avif"
+    return ".png"
+
+
+def save_generated_image_url(image_b64: str, mime_type: str | None, base_url: str | None) -> str:
+    normalized_base_url = str(base_url or "").strip().rstrip("/")
+    if not normalized_base_url:
+        return f"data:{str(mime_type or 'image/png').strip() or 'image/png'};base64,{image_b64}"
+    GENERATED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    extension = image_mime_type_to_extension(mime_type)
+    image_id = f"img_{uuid4().hex}{extension}"
+    try:
+        image_bytes = base64.b64decode(image_b64, validate=False)
+    except binascii.Error as exc:
+        raise HTTPException(status_code=502, detail={"error": "generated image base64 is invalid"}) from exc
+    (GENERATED_IMAGE_DIR / image_id).write_bytes(image_bytes)
+    return f"{normalized_base_url}/v1/images/generated/{image_id}"
+
+
 def build_images_response_payload(
         image_result: dict[str, object],
         billing: dict[str, object] | None,
+        response_format: str | None = None,
+        base_url: str | None = None,
 ) -> dict[str, object]:
+    requested_response_format = str(response_format or "b64_json").strip().lower()
+    wants_url = requested_response_format == "url"
+    data_items: list[dict[str, object]] = []
+    for item in list(image_result.get("data") or []):
+        if not isinstance(item, dict):
+            continue
+        image_b64 = str(item.get("b64_json") or "").strip()
+        if not image_b64:
+            continue
+        response_item: dict[str, object] = {}
+        if wants_url:
+            mime_type = str(item.get("mime_type") or "image/png").strip() or "image/png"
+            response_item["url"] = save_generated_image_url(image_b64, mime_type, base_url)
+        else:
+            response_item["b64_json"] = image_b64
+        if item.get("revised_prompt") is not None:
+            response_item["revised_prompt"] = item.get("revised_prompt")
+        if item.get("index") is not None:
+            response_item["index"] = int(item.get("index"))
+        data_items.append(response_item)
     payload = {
         "created": int(image_result.get("created") or time()),
-        "data": [
-            {
-                "b64_json": str((item or {}).get("b64_json") or "").strip(),
-                **(
-                    {"revised_prompt": (item or {}).get("revised_prompt")}
-                    if (item or {}).get("revised_prompt") is not None
-                    else {}
-                ),
-            }
-            for item in list(image_result.get("data") or [])
-            if str((item or {}).get("b64_json") or "").strip()
-        ],
+        "data": data_items,
     }
     copied_text = str(image_result.get("copied_text") or "").strip()
     if copied_text:
         payload["copied_text"] = copied_text
+    partial_errors = list(image_result.get("partial_errors") or [])
+    if partial_errors:
+        payload["partial_errors"] = partial_errors
     if billing is not None:
         payload["billing"] = billing
     return payload
@@ -688,6 +839,11 @@ def build_responses_payload(
                 "type": "image_generation_call",
                 "status": "completed",
                 "result": result,
+                **(
+                    {"index": int((item or {}).get("index"))}
+                    if (item or {}).get("index") is not None
+                    else {}
+                ),
             }
         )
     copied_text = str(image_result.get("copied_text") or "").strip()
@@ -710,6 +866,9 @@ def build_responses_payload(
     }
     if copied_text:
         payload["copied_text"] = copied_text
+    partial_errors = list(image_result.get("partial_errors") or [])
+    if partial_errors:
+        payload["partial_errors"] = partial_errors
     if billing is not None:
         payload["billing"] = billing
     return payload
@@ -790,7 +949,7 @@ def format_sse_event(event_type: str | None, payload: Any) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def iter_responses_stream(payload: dict[str, object]):
+def iter_responses_stream(payload: dict[str, object], *, include_start: bool = True):
     sequence_number = 0
 
     def emit(event_type: str, **extra: Any):
@@ -805,8 +964,9 @@ def iter_responses_stream(payload: dict[str, object]):
 
     response_id = str(payload.get("id") or "").strip()
     created_snapshot = build_responses_stream_snapshot(payload, "in_progress")
-    yield emit("response.created", response=created_snapshot)
-    yield emit("response.in_progress", response=created_snapshot)
+    if include_start:
+        yield emit("response.created", response=created_snapshot)
+        yield emit("response.in_progress", response=created_snapshot)
 
     for output_index, item in enumerate(list(payload.get("output") or [])):
         output_item = clone_json_value(item)
@@ -821,12 +981,84 @@ def iter_responses_stream(payload: dict[str, object]):
             item_id = str(output_item.get("id") or "")
             yield emit("response.image_generation_call.in_progress", output_index=output_index, item_id=item_id)
             yield emit("response.image_generation_call.generating", output_index=output_index, item_id=item_id)
-            yield emit("response.image_generation_call.completed", output_index=output_index, item_id=item_id)
+            yield emit(
+                "response.image_generation_call.completed",
+                output_index=output_index,
+                item_id=item_id,
+                result=str(output_item.get("result") or ""),
+                item=clone_json_value(output_item),
+            )
 
         yield emit("response.output_item.done", output_index=output_index, item=output_item)
 
     yield emit("response.completed", response=clone_json_value(payload))
     yield format_sse_event(None, "[DONE]")
+
+
+async def iter_live_responses_generation_stream(
+        *,
+        build_payload,
+        queue_request_id: str,
+        response_id: str,
+        response_model: str,
+):
+    sequence_number = 0
+    started_at = int(time())
+    pending_payload = {
+        "id": response_id,
+        "object": "response",
+        "created_at": started_at,
+        "status": "in_progress",
+        "error": None,
+        "incomplete_details": None,
+        "instructions": None,
+        "max_output_tokens": None,
+        "model": response_model,
+        "output": [],
+        "parallel_tool_calls": False,
+        "previous_response_id": None,
+        "metadata": {},
+        "text": {"format": {"type": "text"}},
+        "usage": None,
+    }
+
+    def emit(event_type: str, **extra: Any) -> bytes:
+        nonlocal sequence_number
+        event_payload = {
+            "type": event_type,
+            "sequence_number": sequence_number,
+            **extra,
+        }
+        sequence_number += 1
+        return format_sse_event(event_type, event_payload)
+
+    yield emit("response.created", response=clone_json_value(pending_payload))
+    yield emit("response.in_progress", response=clone_json_value(pending_payload))
+
+    task = asyncio.create_task(build_payload())
+    try:
+        while not task.done():
+            await asyncio.sleep(10)
+            if not task.done():
+                yield emit("response.in_progress", response=clone_json_value(pending_payload), heartbeat=True)
+        payload = await task
+    except Exception as exc:
+        fail_queue_request(queue_request_id, str(exc))
+        failed_payload = {
+            **pending_payload,
+            "status": "failed",
+            "error": {
+                "message": generation_error_to_text(exc),
+                "type": exc.__class__.__name__,
+            },
+        }
+        yield emit("response.failed", response=failed_payload)
+        yield format_sse_event(None, "[DONE]")
+        return
+
+    for chunk in iter_responses_stream(payload, include_start=False):
+        yield chunk
+    image_queue_service.finish_ticket(queue_request_id)
 
 
 def iter_images_stream(
@@ -875,13 +1107,51 @@ def iter_images_stream(
     yield format_sse_event(None, "[DONE]")
 
 
-def build_model_item(model_id: str) -> dict[str, object]:
-    return {
+def iter_images_stream_with_finish(
+        payload: dict[str, object],
+        *,
+        output_format: str | None,
+        background: str | None,
+        quality: str | None,
+        size: str | None,
+        partial_images: int,
+        queue_request_id: str,
+):
+    try:
+        yield from iter_images_stream(
+            payload,
+            output_format=output_format,
+            background=background,
+            quality=quality,
+            size=size,
+            partial_images=partial_images,
+        )
+    finally:
+        image_queue_service.finish_ticket(queue_request_id)
+
+
+def build_model_item(model_id: str, *, image_tool_model: str | None = None) -> dict[str, object]:
+    item: dict[str, object] = {
         "id": model_id,
         "object": "model",
         "created": 0,
-        "owned_by": "chatgpt2api",
+        "owned_by": "openai",
+        "endpoint": "/v1/responses",
+        "type": "responses",
+        "capabilities": {
+            "responses": True,
+            "streaming": True,
+            "tools": True,
+            "image_generation": True,
+            "input_image": True,
+        },
     }
+    if image_tool_model:
+        item["default_image_tool"] = {
+            "type": "image_generation",
+            "model": image_tool_model,
+        }
+    return item
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -996,7 +1266,8 @@ def create_app() -> FastAPI:
         return {
             "object": "list",
             "data": [
-                build_model_item("gpt-image-2"),
+                build_model_item(model, image_tool_model=model)
+                for model in ENABLED_IMAGE_MODELS
             ],
         }
 
@@ -1066,6 +1337,160 @@ def create_app() -> FastAPI:
             },
         }
 
+    @router.post("/v1/images/generations")
+    async def create_image_generation(
+            request: Request,
+            body: ImageGenerationRequest,
+            authorization: str | None = Header(default=None),
+            image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
+    ):
+        context = require_auth_key(authorization)
+        request_auth_token = extract_bearer_token(authorization)
+        requested_model = normalize_requested_image_model(body.model)
+        requested_size = resolve_requested_image_size(body.size)
+        queue_request_id = resolve_queue_request_id(image_queue_request_id)
+
+        async def build_generation_payload() -> dict[str, object]:
+            await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(body.prompt))
+            try:
+                await wait_for_image_request_turn(queue_request_id)
+            except Exception as exc:
+                fail_queue_request(queue_request_id, str(exc))
+                raise
+            image_result, billing_payload = await generate_image_payload(
+                service=service,
+                context=context,
+                authorization=authorization,
+                prompt=body.prompt,
+                model=requested_model,
+                n=body.n,
+                queue_request_id=queue_request_id,
+                size=requested_size,
+            )
+            return build_images_response_payload(
+                image_result,
+                billing_payload,
+                response_format=body.response_format,
+                base_url=str(request.base_url),
+            )
+
+        try:
+            payload = await build_generation_payload()
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
+        if body.stream:
+            return StreamingResponse(
+                iter_images_stream_with_finish(
+                    payload,
+                    output_format=body.output_format,
+                    background=body.background,
+                    quality=body.quality,
+                    size=requested_size,
+                    partial_images=body.partial_images,
+                    queue_request_id=queue_request_id,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
+
+    @router.post("/v1/images/edits")
+    async def create_image_edit(
+            request: Request,
+            prompt: str = Form(..., min_length=1),
+            image: UploadFile = File(...),
+            model: str = Form(default=DEFAULT_IMAGE_MODEL),
+            n: int = Form(default=1, ge=1, le=MAX_IMAGES_PER_REQUEST),
+            response_format: str = Form(default="b64_json"),
+            output_format: str | None = Form(default=None),
+            background: str | None = Form(default=None),
+            quality: str | None = Form(default=None),
+            size: str | None = Form(default=None),
+            partial_images: int = Form(default=0, ge=0, le=3),
+            stream: bool = Form(default=False),
+            authorization: str | None = Header(default=None),
+            image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
+    ):
+        context = require_auth_key(authorization)
+        image_bytes = await image.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail={"error": "image file is required"})
+        if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
+            raise HTTPException(status_code=400, detail={"error": "image file must be <= 8 MB"})
+        try:
+            mime_type = normalize_uploaded_image_mime_type(image_bytes, image.content_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        width, height = detect_image_dimensions(image_bytes)
+        if width is not None and width < MIN_INPUT_IMAGE_SIDE:
+            raise HTTPException(status_code=400, detail={"error": "image width is too small"})
+        if height is not None and height < MIN_INPUT_IMAGE_SIDE:
+            raise HTTPException(status_code=400, detail={"error": "image height is too small"})
+
+        request_auth_token = extract_bearer_token(authorization)
+        requested_model = normalize_requested_image_model(model)
+        requested_size = resolve_requested_image_size(size)
+        queue_request_id = resolve_queue_request_id(image_queue_request_id)
+        input_images = [
+            {
+                "type": "input_image",
+                "image_url": f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
+            }
+        ]
+
+        async def build_generation_payload() -> dict[str, object]:
+            await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
+            try:
+                await wait_for_image_request_turn(queue_request_id)
+            except Exception as exc:
+                fail_queue_request(queue_request_id, str(exc))
+                raise
+            image_result, billing_payload = await generate_image_payload(
+                service=service,
+                context=context,
+                authorization=authorization,
+                prompt=prompt,
+                model=requested_model,
+                n=n,
+                input_images=input_images,
+                queue_request_id=queue_request_id,
+                size=requested_size,
+            )
+            return build_images_response_payload(
+                image_result,
+                billing_payload,
+                response_format=response_format,
+                base_url=str(request.base_url),
+            )
+
+        try:
+            payload = await build_generation_payload()
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
+        if stream:
+            return StreamingResponse(
+                iter_images_stream_with_finish(
+                    payload,
+                    output_format=output_format,
+                    background=background,
+                    quality=quality,
+                    size=requested_size,
+                    partial_images=partial_images,
+                    queue_request_id=queue_request_id,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
+
     @router.post("/v1/responses")
     async def create_response(
             body: ResponsesCreateRequest,
@@ -1111,18 +1536,17 @@ def create_app() -> FastAPI:
         previous_payload, context_mode = build_previous_response_context(body.previous_response_id)
         generation_prompt = merge_prompt_with_previous_context(prompt, previous_payload)
         queue_request_id = resolve_queue_request_id(image_queue_request_id)
-        await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
-        try:
-            await wait_for_image_request_turn(queue_request_id)
-        except Exception as exc:
-            fail_queue_request(queue_request_id, str(exc))
-            raise
-
         response_model = str(body.model or "").strip() or DEFAULT_RESPONSES_MODEL
-        if response_model in ALL_IMAGE_MODELS:
-            response_model = DEFAULT_RESPONSES_MODEL
         requested_model = resolve_requested_response_image_model(body)
-        try:
+        response_id = f"resp_{uuid4().hex}"
+
+        async def build_generation_payload() -> dict[str, object]:
+            await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
+            try:
+                await wait_for_image_request_turn(queue_request_id)
+            except Exception as exc:
+                fail_queue_request(queue_request_id, str(exc))
+                raise
             image_result, billing_payload = await generate_image_payload(
                 service=service,
                 context=context,
@@ -1134,49 +1558,56 @@ def create_app() -> FastAPI:
                 queue_request_id=queue_request_id,
                 size=requested_size,
             )
-        except Exception as exc:
-            fail_queue_request(queue_request_id, str(exc))
-            raise
-        response_id = f"resp_{uuid4().hex}"
-        payload = build_responses_payload(
-            response_id=response_id,
-            response_model=response_model,
-            image_result=image_result,
-            billing=billing_payload,
-            metadata={
-                **(body.metadata or {}),
-                "size": requested_size,
-                "context_mode": context_mode,
-            },
-            previous_response_id=body.previous_response_id,
-        )
-        previous_history = []
-        if isinstance(previous_payload, dict) and isinstance(previous_payload.get("_history"), list):
-            previous_history = list(previous_payload.get("_history") or [])
-        stored_payload = {
-            **payload,
-            "_history": [
-                *previous_history,
-                build_response_history_entry(
-                    response_id=response_id,
-                    prompt=prompt,
-                    size=requested_size,
-                    input_images=input_images,
-                    image_result=image_result,
-                ),
-            ],
-        }
-        response_store_set(response_id, stored_payload)
+            payload = build_responses_payload(
+                response_id=response_id,
+                response_model=response_model,
+                image_result=image_result,
+                billing=billing_payload,
+                metadata={
+                    **(body.metadata or {}),
+                    "size": requested_size,
+                    "context_mode": context_mode,
+                },
+                previous_response_id=body.previous_response_id,
+            )
+            previous_history = []
+            if isinstance(previous_payload, dict) and isinstance(previous_payload.get("_history"), list):
+                previous_history = list(previous_payload.get("_history") or [])
+            stored_payload = {
+                **payload,
+                "_history": [
+                    *previous_history,
+                    build_response_history_entry(
+                        response_id=response_id,
+                        prompt=prompt,
+                        size=requested_size,
+                        input_images=input_images,
+                        image_result=image_result,
+                    ),
+                ],
+            }
+            response_store_set(response_id, stored_payload)
+            return payload
+
         if body.stream:
             return StreamingResponse(
-                iter_responses_stream(payload),
+                iter_live_responses_generation_stream(
+                    build_payload=build_generation_payload,
+                    queue_request_id=queue_request_id,
+                    response_id=response_id,
+                    response_model=response_model,
+                ),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "X-Accel-Buffering": "no",
                 },
-                background=build_queue_background_task(queue_request_id),
             )
+        try:
+            payload = await build_generation_payload()
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
         return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
 
     @router.post("/backend-api/files/process_upload_stream")
@@ -1246,6 +1677,25 @@ def create_app() -> FastAPI:
         if payload is None:
             raise HTTPException(status_code=404, detail={"error": "response not found"})
         return {key: value for key, value in payload.items() if not str(key).startswith("_")}
+
+    @router.get("/v1/images/generated/{image_id}")
+    async def get_generated_image(image_id: str):
+        normalized_id = Path(str(image_id or "").strip()).name
+        if not normalized_id or normalized_id != str(image_id or "").strip():
+            raise HTTPException(status_code=404, detail={"error": "generated image not found"})
+        file_path = GENERATED_IMAGE_DIR / normalized_id
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail={"error": "generated image not found"})
+        suffix = file_path.suffix.lower()
+        media_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+            ".avif": "image/avif",
+        }.get(suffix, "image/png")
+        return FileResponse(file_path, media_type=media_type, filename=file_path.name)
 
     @router.get("/version")
     async def get_version():
@@ -1589,129 +2039,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail={"error": "user key not found"})
         return {"item": user_key, "items": user_key_service.list_public_user_keys()}
 
-    @router.post("/v1/images/generations")
-    async def generate_images(
-            body: ImageGenerationRequest,
-            authorization: str | None = Header(default=None),
-            image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
-    ):
-        context = require_auth_key(authorization)
-        requested_model = normalize_requested_image_model(body.model)
-        requested_size = resolve_requested_image_size(body.size)
-        request_auth_token = extract_bearer_token(authorization)
-        queue_request_id = resolve_queue_request_id(image_queue_request_id)
-        await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(body.prompt))
-        try:
-            await wait_for_image_request_turn(queue_request_id)
-        except Exception as exc:
-            fail_queue_request(queue_request_id, str(exc))
-            raise
-        try:
-            result, billing_payload = await generate_image_payload(
-                service=service,
-                context=context,
-                authorization=authorization,
-                prompt=body.prompt,
-                model=requested_model,
-                n=body.n,
-                queue_request_id=queue_request_id,
-                size=requested_size,
-            )
-        except Exception as exc:
-            fail_queue_request(queue_request_id, str(exc))
-            raise
-        payload = build_images_response_payload(result, billing_payload)
-        if body.stream:
-            return StreamingResponse(
-                iter_images_stream(
-                    payload,
-                    output_format=body.output_format or body.response_format,
-                    background=body.background,
-                    quality=body.quality,
-                    size=requested_size,
-                    partial_images=body.partial_images,
-                ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-                background=build_queue_background_task(queue_request_id),
-            )
-        return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
-
-    @router.post("/v1/images/edits")
-    async def edit_images(
-            prompt: str = Form(...),
-            image: UploadFile = File(...),
-            model: str = Form(default=DEFAULT_IMAGE_MODEL),
-            n: int = Form(default=1),
-            response_format: str = Form(default="b64_json"),
-            size: str | None = Form(default=None),
-            stream: bool = Form(default=False),
-            authorization: str | None = Header(default=None),
-            image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
-    ):
-        context = require_auth_key(authorization)
-        requested_model = normalize_requested_image_model(model)
-        requested_size = resolve_requested_image_size(size)
-        normalized_n = max(1, min(MAX_IMAGES_PER_REQUEST, int(n or 1)))
-        image_bytes = await image.read()
-        if not image_bytes:
-            raise HTTPException(status_code=400, detail={"error": "image file is required"})
-        if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
-            raise HTTPException(status_code=400, detail={"error": "image file must be <= 8 MB"})
-        content_type = str(image.content_type or "image/png").split(";", 1)[0].strip().lower() or "image/png"
-        if not content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail={"error": "image file must use an image mime type"})
-        input_images = [
-            {
-                "type": "input_image",
-                "image_url": f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
-            }
-        ]
-        request_auth_token = extract_bearer_token(authorization)
-        queue_request_id = resolve_queue_request_id(image_queue_request_id)
-        await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
-        try:
-            await wait_for_image_request_turn(queue_request_id)
-        except Exception as exc:
-            fail_queue_request(queue_request_id, str(exc))
-            raise
-        try:
-            result, billing_payload = await generate_image_payload(
-                service=service,
-                context=context,
-                authorization=authorization,
-                prompt=prompt,
-                model=requested_model,
-                n=normalized_n,
-                input_images=input_images,
-                queue_request_id=queue_request_id,
-                size=requested_size,
-            )
-        except Exception as exc:
-            fail_queue_request(queue_request_id, str(exc))
-            raise
-        payload = build_images_response_payload(result, billing_payload)
-        if stream:
-            return StreamingResponse(
-                iter_images_stream(
-                    payload,
-                    output_format=response_format,
-                    background=None,
-                    quality=None,
-                    size=requested_size,
-                ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-                background=build_queue_background_task(queue_request_id),
-            )
-        return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
-
     app.include_router(router)
 
     @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
@@ -1724,5 +2051,10 @@ def create_app() -> FastAPI:
         if fallback is None:
             raise HTTPException(status_code=404, detail="Not Found")
         return FileResponse(fallback)
+
+    @app.api_route("/{full_path:path}", methods=["POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
+    async def serve_missing_non_get(full_path: str):
+        del full_path
+        raise HTTPException(status_code=404, detail="Not Found")
 
     return app

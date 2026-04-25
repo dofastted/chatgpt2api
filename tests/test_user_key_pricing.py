@@ -25,6 +25,14 @@ from services.uploaded_image_service import uploaded_image_service  # noqa: E402
 from services.user_key_service import UserKeyService  # noqa: E402
 
 
+TEST_UPLOAD_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAl0lEQVR4nO2SwQkAMBCD3H9pO0QfchDIACpBOD1yAidAXtFdiLsjJ3AC5BXdhbg7cgInQF7RXYi7IydwAuQV3YW4O3ICJ0Be0V2IuyMncALkFd2FuDtyAidAXtFdiLsjJ3AC5BXdhbg7cgInQF7RXYi7IydwAuQV3YW4O3ICJ0Be0V2IuyMncALkFd2FuDtyAidAXvHnQg+p3PDiuUoi2QAAAABJRU5ErkJggg=="
+)
+TOO_SMALL_UPLOAD_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+)
+
+
 class FakeThread:
     def join(self, timeout: float | None = None) -> None:
         return None
@@ -93,8 +101,10 @@ class FakeBackendService:
         "created": 123,
         "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
     }
+    responses: list[dict | Exception] = []
     error: Exception | None = None
     last_call: dict[str, object] | None = None
+    calls: list[dict[str, object]] = []
 
     def __init__(self, account_service: FakeAccountService):
         self.account_service = account_service
@@ -109,15 +119,30 @@ class FakeBackendService:
         size: str | None = None,
     ) -> dict:
         del queue_request_id
-        self.__class__.last_call = {
+        call = {
             "prompt": prompt,
             "model": model,
             "n": n,
             "input_images": [dict(item) for item in list(input_images or [])],
             "size": size,
         }
+        self.__class__.last_call = call
+        self.__class__.calls.append(call)
         if self.error is not None:
             raise self.error
+        if self.responses:
+            next_response = self.responses.pop(0)
+            if isinstance(next_response, Exception):
+                raise next_response
+            return {
+                "created": next_response.get("created", 123),
+                "data": [dict(item) for item in list(next_response.get("data") or [])],
+                **(
+                    {"copied_text": next_response.get("copied_text")}
+                    if next_response.get("copied_text") is not None
+                    else {}
+                ),
+            }
         return {
             "created": self.response["created"],
             "data": [dict(item) for item in self.response["data"]],
@@ -145,6 +170,8 @@ class UserKeyPricingTests(unittest.TestCase):
             self.user_keys_file.unlink()
         FakeBackendService.error = None
         FakeBackendService.last_call = None
+        FakeBackendService.calls = []
+        FakeBackendService.responses = []
         FakeBackendService.response = {
             "created": 123,
             "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
@@ -211,15 +238,21 @@ class UserKeyPricingTests(unittest.TestCase):
 
         item = service.get_user_key("legacy-key")
         self.assertIsNotNone(item)
-        self.assertEqual(item["pricing"], {"gpt-image-1": 0, "gpt-image-2": 2})
-        self.assertEqual(service.list_public_user_keys()[0]["pricing"], {"gpt-image-1": 0, "gpt-image-2": 2})
+        self.assertEqual(
+            item["pricing"],
+            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 2},
+        )
+        self.assertEqual(
+            service.list_public_user_keys()[0]["pricing"],
+            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 2},
+        )
 
     def test_user_key_session_quota_and_billing_use_custom_pricing(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,
             quota=30,
             prefix="uk",
-            pricing={"gpt-image-1": 2, "gpt-image-2": 7},
+            pricing={"gpt-image-2": 7, "gpt-image-2-2K": 8, "gpt-image-2-4K": 9},
         )
         user_key = created["created_items"][0]["key"]
 
@@ -228,7 +261,7 @@ class UserKeyPricingTests(unittest.TestCase):
             self.assertEqual(session_response.status_code, 200)
             self.assertEqual(
                 session_response.json()["pricing"],
-                {"gpt-image-1": 2, "gpt-image-2": 7},
+                {"gpt-image-2": 7, "gpt-image-2-2K": 8, "gpt-image-2-4K": 9},
             )
 
             quota_response = client.get("/api/quota", headers={"Authorization": f"Bearer {user_key}"})
@@ -236,13 +269,18 @@ class UserKeyPricingTests(unittest.TestCase):
             self.assertEqual(quota_response.json()["remaining_quota"], 30)
             self.assertEqual(
                 quota_response.json()["pricing"],
-                {"gpt-image-1": 2, "gpt-image-2": 7},
+                {"gpt-image-2": 7, "gpt-image-2-2K": 8, "gpt-image-2-4K": 9},
             )
 
             image_response = client.post(
-                "/v1/images/generations",
+                "/v1/responses",
                 headers={"Authorization": f"Bearer {user_key}"},
-                json={"prompt": "a test image", "model": "gpt-image-2", "n": 2},
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "a test image"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 2,
+                },
             )
             self.assertEqual(image_response.status_code, 200)
             body = image_response.json()
@@ -261,16 +299,21 @@ class UserKeyPricingTests(unittest.TestCase):
             count=1,
             quota=15,
             prefix="uk",
-            pricing={"gpt-image-1": 3, "gpt-image-2": 6},
+            pricing={"gpt-image-2": 6, "gpt-image-2-2K": 6, "gpt-image-2-4K": 6},
         )
         user_key = created["created_items"][0]["key"]
         FakeBackendService.error = ImageGenerationError("upstream failed")
 
         with self.make_client() as client:
             response = client.post(
-                "/v1/images/generations",
+                "/v1/responses",
                 headers={"Authorization": f"Bearer {user_key}"},
-                json={"prompt": "a failed image", "model": "gpt-image-2", "n": 2},
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "a failed image"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 2,
+                },
             )
 
         self.assertEqual(response.status_code, 502)
@@ -279,12 +322,56 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertIsNotNone(current_item)
         self.assertEqual(current_item["quota"], 15)
 
+    def test_batched_response_generation_splits_requests_and_charges_successes(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=30,
+            prefix="uk",
+            pricing={"gpt-image-2": 7, "gpt-image-2-2K": 7, "gpt-image-2-4K": 7},
+        )
+        user_key = created["created_items"][0]["key"]
+        FakeBackendService.responses = [
+            {
+                "created": 123,
+                "data": [{"b64_json": "Zmlyc3Q=", "mime_type": "image/png"}],
+            },
+            ImageGenerationError("conversation failed: 524"),
+        ]
+
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "two images"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 2,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual([call["n"] for call in FakeBackendService.calls], [1, 1])
+        self.assertEqual(len(body["output"]), 1)
+        self.assertEqual(body["output"][0]["result"], "Zmlyc3Q=")
+        self.assertEqual(body["output"][0]["index"], 0)
+        self.assertEqual(body["partial_errors"], [{"index": 1, "error": "conversation failed: 524"}])
+        self.assertEqual(body["billing"]["charged_quota"], 7)
+        self.assertEqual(body["billing"]["remaining_quota"], 23)
+        self.assertEqual(body["billing"]["requested_count"], 2)
+        self.assertEqual(body["billing"]["succeeded_count"], 1)
+        self.assertEqual(body["billing"]["failed_count"], 1)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        self.assertEqual(current_item["quota"], 23)
+
     def test_quota_is_not_deducted_before_backend_returns_success(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,
             quota=18,
             prefix="uk",
-            pricing={"gpt-image-1": 0, "gpt-image-2": 6},
+            pricing={"gpt-image-2": 6, "gpt-image-2-2K": 6, "gpt-image-2-4K": 6},
         )
         user_key = created["created_items"][0]["key"]
         context = api.resolve_auth_context(f"Bearer {user_key}")
@@ -486,9 +573,7 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(current_item["ldc_balance"], 20)
 
     def test_process_upload_stream_and_recent_uploaded_images(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
         client_conversation_id = "conv-upload-1"
 
         with self.make_client() as client:
@@ -512,11 +597,25 @@ class UserKeyPricingTests(unittest.TestCase):
             items = list_response.json()["items"]
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["file_id"], uploaded["file_id"])
+            self.assertEqual(items[0]["width"], 64)
+            self.assertEqual(items[0]["height"], 64)
+
+    def test_process_upload_stream_rejects_too_small_image(self) -> None:
+        png_bytes = base64.b64decode(TOO_SMALL_UPLOAD_PNG_B64)
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": "conv-too-small"},
+                files={"file": ("pixel.png", png_bytes, "image/png")},
+            )
+
+        self.assertEqual(upload_response.status_code, 400)
+        self.assertIn("at least 64px", upload_response.text)
 
     def test_responses_accepts_uploaded_image_file_id(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
         client_conversation_id = "conv-response-1"
 
         with self.make_client() as client:
@@ -558,9 +657,7 @@ class UserKeyPricingTests(unittest.TestCase):
         )
 
     def test_responses_rejects_uploaded_image_file_id_from_other_conversation(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
 
         with self.make_client() as client:
             upload_response = client.post(
@@ -591,9 +688,7 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertIn("input image file_id was not found", response.text)
 
     def test_responses_rejects_uploaded_image_file_id_from_other_owner(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
         created = api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
         user_key = created["created_items"][0]["key"]
 
@@ -626,9 +721,7 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertIn("input image file_id was not found", response.text)
 
     def test_responses_rejects_consumed_uploaded_image_file_id_for_new_conversation(self) -> None:
-        png_bytes = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
-        )
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
 
         with self.make_client() as client:
             upload_response = client.post(
@@ -674,6 +767,140 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(second_response.status_code, 404)
         self.assertIn("input image file_id was not found", second_response.text)
 
+    def test_images_generations_and_edits_use_shared_generation_payload(self) -> None:
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
+
+        with self.make_client() as client:
+            route_paths = {getattr(route, "path", "") for route in client.app.routes}
+            self.assertIn("/v1/images/generations", route_paths)
+            self.assertIn("/v1/images/edits", route_paths)
+            generations_response = client.post(
+                "/v1/images/generations",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "prompt": "a test image",
+                    "model": "gpt-image-2",
+                    "n": 1,
+                    "size": "1025x1351",
+                    "response_format": "url",
+                },
+            )
+            edits_response = client.post(
+                "/v1/images/edits",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"prompt": "edit this image", "model": "gpt-image-2", "n": "1"},
+                files={"image": ("input.png", png_bytes, "image/png")},
+            )
+
+        self.assertEqual(generations_response.status_code, 200)
+        generated_url = generations_response.json()["data"][0]["url"]
+        self.assertTrue(generated_url.startswith("http://testserver/v1/images/generated/img_"))
+        self.assertNotIn("b64_json", generations_response.json()["data"][0])
+        generated_image_response = client.get(generated_url)
+        self.assertEqual(generated_image_response.status_code, 200)
+        self.assertEqual(generated_image_response.content, b"fake")
+        self.assertEqual(generations_response.json()["data"][0]["index"], 0)
+        self.assertEqual(edits_response.status_code, 200)
+        self.assertIsNotNone(FakeBackendService.last_call)
+        assert FakeBackendService.last_call is not None
+        self.assertEqual(FakeBackendService.calls[0]["prompt"], "a test image")
+        self.assertEqual(FakeBackendService.calls[0]["model"], "gpt-image-2")
+        self.assertEqual(FakeBackendService.calls[0]["n"], 1)
+        self.assertEqual(FakeBackendService.calls[0]["size"], "1024x1344")
+        self.assertEqual(FakeBackendService.calls[1]["prompt"], "edit this image")
+        self.assertEqual(FakeBackendService.calls[1]["model"], "gpt-image-2")
+        edit_images = FakeBackendService.calls[1]["input_images"]
+        self.assertIsInstance(edit_images, list)
+        self.assertTrue(edit_images[0]["image_url"].startswith("data:image/png;base64,"))
+
+    def test_images_generations_partial_success_only_charges_succeeded_images(self) -> None:
+        created = api.user_key_service.create_user_keys(count=1, quota=20, prefix="uk")
+        user_key = created["created_items"][0]["key"]
+        api.user_key_service.update_user_key(
+            user_key,
+            {"pricing": {"gpt-image-2": 5, "gpt-image-2-2K": 5, "gpt-image-2-4K": 5}},
+        )
+        FakeBackendService.responses = [
+            {"created": 123, "data": [{"b64_json": "Zmlyc3Q=", "mime_type": "image/png"}]},
+            ImageGenerationError("conversation failed: 524"),
+        ]
+
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/images/generations",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={"prompt": "two images", "model": "gpt-image-2", "n": 2},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload["data"]), 1)
+        self.assertEqual(payload["data"][0]["index"], 0)
+        self.assertEqual(payload["billing"]["charged_quota"], 5)
+        self.assertEqual(payload["billing"]["requested_count"], 2)
+        self.assertEqual(payload["billing"]["succeeded_count"], 1)
+        self.assertEqual(payload["billing"]["failed_count"], 1)
+        self.assertEqual(payload["partial_errors"][0]["index"], 1)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        assert current_item is not None
+        self.assertEqual(current_item["quota"], 15)
+
+    def test_images_generations_failure_does_not_charge_user_key(self) -> None:
+        created = api.user_key_service.create_user_keys(count=1, quota=20, prefix="uk")
+        user_key = created["created_items"][0]["key"]
+        api.user_key_service.update_user_key(
+            user_key,
+            {"pricing": {"gpt-image-2": 5, "gpt-image-2-2K": 5, "gpt-image-2-4K": 5}},
+        )
+        FakeBackendService.error = ImageGenerationError("conversation failed: 524")
+
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/images/generations",
+                headers={"Authorization": f"Bearer {user_key}"},
+                json={"prompt": "fail image", "model": "gpt-image-2", "n": 1},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        assert current_item is not None
+        self.assertEqual(current_item["quota"], 20)
+
+    def test_responses_accepts_uploaded_input_image_file_id(self) -> None:
+        png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
+
+        with self.make_client() as client:
+            upload_response = client.post(
+                "/backend-api/files/process_upload_stream",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                data={"client_conversation_id": "conv-input"},
+                files={"file": ("input.png", png_bytes, "image/png")},
+            )
+            self.assertEqual(upload_response.status_code, 200)
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "model": "gpt-5",
+                    "input": [
+                        {"type": "input_text", "text": "edit this image"},
+                        {"type": "input_image", "file_id": upload_response.json()["file_id"]},
+                    ],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 1,
+                    "metadata": {"client_conversation_id": "conv-input"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(FakeBackendService.last_call)
+        assert FakeBackendService.last_call is not None
+        input_images = FakeBackendService.last_call["input_images"]
+        self.assertIsInstance(input_images, list)
+        self.assertEqual(input_images[0]["file_id"], upload_response.json()["file_id"])
+
     def test_image_generation_rejects_more_than_two_images(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,
@@ -684,22 +911,34 @@ class UserKeyPricingTests(unittest.TestCase):
 
         with self.make_client() as client:
             response = client.post(
-                "/v1/images/generations",
+                "/v1/responses",
                 headers={"Authorization": f"Bearer {user_key}"},
-                json={"prompt": "a test image", "model": "gpt-image-2", "n": 3},
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "a test image"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "n": 3,
+                },
             )
 
         self.assertEqual(response.status_code, 422)
 
-    def test_models_endpoint_only_exposes_gpt_image_2(self) -> None:
+    def test_models_endpoint_exposes_public_gpt_image_2_models_with_responses_metadata(self) -> None:
         with self.make_client() as client:
             response = client.get("/v1/models", headers={"Authorization": f"Bearer {api.config.auth_key}"})
 
         self.assertEqual(response.status_code, 200)
+        items = response.json()["data"]
         self.assertEqual(
-            [item["id"] for item in response.json()["data"]],
-            ["gpt-image-2"],
+            [item["id"] for item in items],
+            ["gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K"],
         )
+        for item in items:
+            self.assertEqual(item["endpoint"], "/v1/responses")
+            self.assertEqual(item["type"], "responses")
+            self.assertTrue(item["capabilities"]["responses"])
+            self.assertTrue(item["capabilities"]["image_generation"])
+            self.assertEqual(item["default_image_tool"]["model"], item["id"])
 
     def test_image_generation_rejects_gpt_image_1(self) -> None:
         created = api.user_key_service.create_user_keys(
@@ -711,9 +950,14 @@ class UserKeyPricingTests(unittest.TestCase):
 
         with self.make_client() as client:
             response = client.post(
-                "/v1/images/generations",
+                "/v1/responses",
                 headers={"Authorization": f"Bearer {user_key}"},
-                json={"prompt": "a test image", "model": "gpt-image-1", "n": 1},
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "a test image"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-1"}],
+                    "n": 1,
+                },
             )
 
         self.assertEqual(response.status_code, 400)
@@ -735,6 +979,48 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(FakeBackendService.last_call)
         assert FakeBackendService.last_call is not None
+        self.assertEqual(FakeBackendService.last_call["model"], "gpt-image-2")
+
+    def test_responses_accepts_public_gpt_image_2_variants(self) -> None:
+        created = api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
+        user_key = created["created_items"][0]["key"]
+
+        for model in ("gpt-image-2-2K", "gpt-image-2-4K"):
+            FakeBackendService.calls = []
+            with self.make_client() as client:
+                response = client.post(
+                    "/v1/responses",
+                    headers={"Authorization": f"Bearer {user_key}"},
+                    json={
+                        "model": "gpt-5",
+                        "input": [{"type": "input_text", "text": f"draw {model}"}],
+                        "tools": [{"type": "image_generation", "model": model}],
+                        "n": 1,
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body["billing"]["requested_model"], model)
+            self.assertEqual(body["billing"]["unit_cost"], 2)
+            self.assertEqual(FakeBackendService.last_call["model"], model)
+
+    def test_responses_top_level_gpt_image_2_keeps_response_model(self) -> None:
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/responses",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json={
+                    "model": "gpt-image-2",
+                    "input": [{"type": "input_text", "text": "draw a test image"}],
+                    "tools": [{"type": "image_generation"}],
+                    "n": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["model"], "gpt-image-2")
         self.assertEqual(FakeBackendService.last_call["model"], "gpt-image-2")
 
     def test_image_queue_status_reports_current_request(self) -> None:
@@ -775,25 +1061,28 @@ class UserKeyPricingTests(unittest.TestCase):
                     "count": 1,
                     "quota": 18,
                     "prefix": "uk",
-                    "pricing": {"gpt-image-1": 5, "gpt-image-2": 11},
+                    "pricing": {"gpt-image-2": 11, "gpt-image-2-2K": 12, "gpt-image-2-4K": 13},
                 },
             )
             self.assertEqual(create_response.status_code, 200)
             created_item = create_response.json()["created_items"][0]
-            self.assertEqual(created_item["pricing"], {"gpt-image-1": 5, "gpt-image-2": 11})
+            self.assertEqual(
+                created_item["pricing"],
+                {"gpt-image-2": 11, "gpt-image-2-2K": 12, "gpt-image-2-4K": 13},
+            )
 
             update_response = client.post(
                 "/api/user-keys/update",
                 headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
                 json={
                     "key": created_item["key"],
-                    "pricing": {"gpt-image-1": 6, "gpt-image-2": 9},
+                    "pricing": {"gpt-image-2": 9, "gpt-image-2-2K": 10, "gpt-image-2-4K": 11},
                 },
             )
             self.assertEqual(update_response.status_code, 200)
             self.assertEqual(
                 update_response.json()["item"]["pricing"],
-                {"gpt-image-1": 6, "gpt-image-2": 9},
+                {"gpt-image-2": 9, "gpt-image-2-2K": 10, "gpt-image-2-4K": 11},
             )
 
     def test_response_api_uses_requested_image_model_and_can_be_read_back(self) -> None:
@@ -947,7 +1236,7 @@ class UserKeyPricingTests(unittest.TestCase):
             count=1,
             quota=10,
             prefix="uk",
-            pricing={"gpt-image-1": 2, "gpt-image-2": 6},
+            pricing={"gpt-image-2": 6, "gpt-image-2-2K": 6, "gpt-image-2-4K": 6},
         )
         user_key = created["created_items"][0]["key"]
         context = api.resolve_auth_context(f"Bearer {user_key}")
@@ -990,7 +1279,7 @@ class UserKeyPricingTests(unittest.TestCase):
             count=1,
             quota=15,
             prefix="uk",
-            pricing={"gpt-image-1": 3, "gpt-image-2": 6},
+            pricing={"gpt-image-2": 6, "gpt-image-2-2K": 6, "gpt-image-2-4K": 6},
         )
         user_key = created["created_items"][0]["key"]
         context = api.resolve_auth_context(f"Bearer {user_key}")
@@ -1078,6 +1367,9 @@ class UserKeyPricingTests(unittest.TestCase):
         image_completed_events = [payload for event, payload in events if event == "response.image_generation_call.completed"]
         self.assertEqual(len(image_completed_events), 1)
         self.assertEqual(image_completed_events[0]["item_id"], payload["output"][0]["id"])
+        self.assertEqual(image_completed_events[0]["result"], "ZmFrZQ==")
+        self.assertEqual(image_completed_events[0]["item"]["type"], "image_generation_call")
+        self.assertEqual(image_completed_events[0]["item"]["result"], "ZmFrZQ==")
 
         output_item_done_events = [payload for event, payload in events if event == "response.output_item.done"]
         self.assertEqual(len(output_item_done_events), 1)
@@ -1153,6 +1445,19 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(events[0][1]["quality"], "high")
         self.assertEqual(events[0][1]["size"], "1024x1024")
         self.assertEqual(events[-1], (None, "[DONE]"))
+
+    def test_images_response_payload_supports_url_response_format(self) -> None:
+        payload = api.build_images_response_payload(
+            {
+                "created": 123,
+                "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
+            },
+            billing=None,
+            response_format="url",
+        )
+
+        self.assertEqual(payload["data"][0]["url"], "data:image/png;base64,ZmFrZQ==")
+        self.assertNotIn("b64_json", payload["data"][0])
 
     def test_admin_login_role_and_accounts_access(self) -> None:
         with self.make_client() as client:

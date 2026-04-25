@@ -4,6 +4,11 @@ import localforage from "localforage";
 
 import { detectImageMimeType } from "@/lib/image-data";
 import type { ImageModel } from "@/lib/api";
+import {
+  DEFAULT_IMAGE_GENERATION_PREFERENCE,
+  normalizeImageGenerationPreference,
+  type ImageGenerationPreference,
+} from "@/lib/image-size";
 
 export type StoredImage = {
   id: string;
@@ -72,8 +77,19 @@ const imageConversationStorage = localforage.createInstance({
 });
 
 const IMAGE_CONVERSATIONS_KEY_PREFIX = "items";
+const IMAGE_PREFERENCE_KEY_PREFIX = "generation_preference";
 const IMAGE_CONVERSATIONS_DEFAULT_SCOPE = "__anonymous__";
 const conversationWriteQueues = new Map<string, Promise<void>>();
+const VALID_IMAGE_MODELS = new Set<ImageModel>([
+  "gpt-image-2",
+  "gpt-image-2-2K",
+  "gpt-image-2-4K",
+]);
+
+function normalizeImageModel(value: unknown): ImageModel {
+  const normalized = String(value || "").trim() as ImageModel;
+  return VALID_IMAGE_MODELS.has(normalized) ? normalized : "gpt-image-2";
+}
 
 function normalizeConversationScope(scope: string): string {
   const normalized = String(scope || "").trim();
@@ -82,6 +98,10 @@ function normalizeConversationScope(scope: string): string {
 
 function buildConversationStorageKey(scope: string): string {
   return `${IMAGE_CONVERSATIONS_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
+}
+
+function buildPreferenceStorageKey(scope: string): string {
+  return `${IMAGE_PREFERENCE_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
 }
 
 function enqueueConversationWrite<T>(scope: string, operation: () => Promise<T>): Promise<T> {
@@ -151,7 +171,7 @@ function normalizeTurn(turn: ImageConversationTurn, fallbackId: string): ImageCo
     ...turn,
     id: String(turn.id || fallbackId || "").trim() || `turn-${Date.now()}`,
     prompt: String(turn.prompt || "").trim(),
-    model: (turn.model || "gpt-image-2") as ImageModel,
+    model: normalizeImageModel(turn.model),
     count: Math.max(1, Number(turn.count || 1)),
     size: String(turn.size || "auto").trim() || "auto",
     copiedText: String(turn.copiedText || "").trim() || undefined,
@@ -172,7 +192,7 @@ function legacyConversationToTurn(conversation: ImageConversation): ImageConvers
     {
       id: `${conversation.id}-turn-1`,
       prompt: String(conversation.prompt || "").trim(),
-      model: (conversation.model || "gpt-image-2") as ImageModel,
+      model: normalizeImageModel(conversation.model),
       count: Math.max(1, Number(conversation.count || 1)),
       size: String(conversation.size || "auto").trim() || "auto",
       copiedText: conversation.copiedText,
@@ -257,4 +277,23 @@ export async function clearImageConversations(scope: string): Promise<void> {
   await enqueueConversationWrite(scope, async () => {
     await imageConversationStorage.removeItem(buildConversationStorageKey(scope));
   });
+}
+
+export async function getImageGenerationPreference(
+  scope: string,
+): Promise<ImageGenerationPreference> {
+  const stored = await imageConversationStorage.getItem<Partial<ImageGenerationPreference>>(
+    buildPreferenceStorageKey(scope),
+  );
+  return normalizeImageGenerationPreference(stored || DEFAULT_IMAGE_GENERATION_PREFERENCE);
+}
+
+export async function saveImageGenerationPreference(
+  scope: string,
+  preference: ImageGenerationPreference,
+): Promise<void> {
+  await imageConversationStorage.setItem(
+    buildPreferenceStorageKey(scope),
+    normalizeImageGenerationPreference(preference),
+  );
 }
