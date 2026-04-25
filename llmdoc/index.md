@@ -24,6 +24,7 @@
 
 - `llmdoc/reference/runtime-config.md`
 - `llmdoc/reference/http-endpoints.md`
+- `llmdoc/reference/chat-image-compatibility-matrix.md`
 
 ## 指南
 

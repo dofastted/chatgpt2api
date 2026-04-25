@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import base64
 import json
 from pathlib import Path
 from threading import Lock
@@ -19,6 +20,7 @@ from starlette.background import BackgroundTask
 from services.account_service import account_service
 from services.config import config
 from services.backend_service import BackendService
+from services.chat_image.account_import import normalize_account_carrier
 from services.image_service import ImageGenerationError
 from services.image_queue_service import image_queue_service
 from services.redeem_code_service import redeem_code_service
@@ -753,6 +755,15 @@ def require_user_key_auth_context(authorization: str | None) -> AuthContext:
     return context
 
 
+def normalize_account_request_items(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not accounts:
+        return []
+    try:
+        return normalize_account_carrier({"accounts": accounts})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     def worker() -> None:
         while not stop_event.is_set():
@@ -851,7 +862,6 @@ def create_app() -> FastAPI:
         auth_token = extract_bearer_token(authorization)
         return image_queue_service.snapshot(auth_token, request_id=request_id)
 
-    @router.post("/v1/response")
     @router.post("/v1/responses")
     async def create_response(
             body: ResponsesCreateRequest,
@@ -996,7 +1006,6 @@ def create_app() -> FastAPI:
             filename=str(item.get("file_name") or file_path.name),
         )
 
-    @router.get("/v1/response/{response_id}")
     @router.get("/v1/responses/{response_id}")
     async def get_response(response_id: str, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
@@ -1030,7 +1039,7 @@ def create_app() -> FastAPI:
             authorization: str | None = Header(default=None),
     ):
         require_admin_auth_key(authorization)
-        imported_accounts = [dict(item) for item in body.accounts if isinstance(item, dict)]
+        imported_accounts = normalize_account_request_items([dict(item) for item in body.accounts if isinstance(item, dict)])
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not imported_accounts and not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
@@ -1058,7 +1067,7 @@ def create_app() -> FastAPI:
             authorization: str | None = Header(default=None),
     ):
         context = require_auth_key(authorization)
-        imported_accounts = [dict(item) for item in body.accounts if isinstance(item, dict)]
+        imported_accounts = normalize_account_request_items([dict(item) for item in body.accounts if isinstance(item, dict)])
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not imported_accounts and not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
@@ -1347,6 +1356,75 @@ def create_app() -> FastAPI:
                     quality=body.quality,
                     size=body.size,
                     partial_images=body.partial_images,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+                background=build_queue_background_task(queue_request_id),
+            )
+        return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
+
+    @router.post("/v1/images/edits")
+    async def edit_images(
+            prompt: str = Form(...),
+            image: UploadFile = File(...),
+            model: str = Form(default=DEFAULT_IMAGE_MODEL),
+            n: int = Form(default=1),
+            response_format: str = Form(default="b64_json"),
+            stream: bool = Form(default=False),
+            authorization: str | None = Header(default=None),
+            image_queue_request_id: str | None = Header(default=None, alias="X-Image-Queue-Request-Id"),
+    ):
+        context = require_auth_key(authorization)
+        requested_model = normalize_requested_image_model(model)
+        normalized_n = max(1, min(MAX_IMAGES_PER_REQUEST, int(n or 1)))
+        image_bytes = await image.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail={"error": "image file is required"})
+        if len(image_bytes) > MAX_INPUT_IMAGE_BYTES:
+            raise HTTPException(status_code=400, detail={"error": "image file must be <= 8 MB"})
+        content_type = str(image.content_type or "image/png").split(";", 1)[0].strip().lower() or "image/png"
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail={"error": "image file must use an image mime type"})
+        input_images = [
+            {
+                "type": "input_image",
+                "image_url": f"data:{content_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
+            }
+        ]
+        request_auth_token = extract_bearer_token(authorization)
+        queue_request_id = resolve_queue_request_id(image_queue_request_id)
+        await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
+        try:
+            await wait_for_image_request_turn(queue_request_id)
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
+        try:
+            result, billing_payload = await generate_image_payload(
+                service=service,
+                context=context,
+                authorization=authorization,
+                prompt=prompt,
+                model=requested_model,
+                n=normalized_n,
+                input_images=input_images,
+                queue_request_id=queue_request_id,
+            )
+        except Exception as exc:
+            fail_queue_request(queue_request_id, str(exc))
+            raise
+        payload = build_images_response_payload(result, billing_payload)
+        if stream:
+            return StreamingResponse(
+                iter_images_stream(
+                    payload,
+                    output_format=response_format,
+                    background=None,
+                    quality=None,
+                    size=None,
                 ),
                 media_type="text/event-stream",
                 headers={

@@ -80,12 +80,12 @@ POST /v1/images/generations
 ### Response 生图兼容
 
 ```http
-POST /v1/response
+POST /v1/responses
 ```
 
 当前支持范围：
 
-- 主入口是 `POST /v1/response`，同时兼容 `POST /v1/responses`
+- 主入口是 `POST /v1/responses`
 - 走 `tools: [{ "type": "image_generation" }]` 的生图请求
 - 支持文本输入生图，也支持文本加 1 张 `input_image`
 - 顶层 `model` 按 OpenAI 官方格式应传文本模型，比如 `gpt-5`、`gpt-5.4`
@@ -100,6 +100,19 @@ POST /v1/response
 - 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
 - 支持 `stream: true`。流式时会依次返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后返回 `data: [DONE]`
+- 单数 `/v1/response` 不是有效接口。
+
+### 图片编辑兼容
+
+```http
+POST /v1/images/edits
+```
+
+说明：
+
+- 接收 `multipart/form-data`，字段包含 `prompt`、`image`，可选 `model`、`n`、`response_format` 和 `stream`
+- `model` 当前只支持 `gpt-image-2`
+- 当前实现会把上传图片转为输入图，再走同一套队列、账号池、上游请求和用户 key 计费规则
 
 前端图片页现在会先把参考图上传到本地接口，再在 `/v1/responses` 里提交 `input_image.file_id`。本地历史仍保留缩略图预览和 `fileId`，刷新页面后还能区分输入图和生成结果。同一页面里切到别的会话时，正在生成的结果也会继续写回原会话。如果上游页面返回了可复制文本，前端会把这段文本保存到当前会话，并提供复制按钮。
 

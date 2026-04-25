@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path(os.getenv("CHATGPT2API_DATA_DIR") or BASE_DIR / "data")
 CONFIG_FILE = BASE_DIR / "config.json"
 
 
@@ -21,6 +21,12 @@ class AppSettings:
     user_keys_file: Path
     redeem_codes_file: Path
     tls_verify: bool
+    image_engine: str
+    image_route_policy: str
+    image_dev_port: int
+    image_enable_free_images_fallback: bool
+    image_enable_responses_primary: bool
+    image_log_requests: bool
 
 
 def _parse_bool(value: object, *, default: bool) -> bool:
@@ -34,6 +40,23 @@ def _parse_bool(value: object, *, default: bool) -> bool:
     if text in {"0", "false", "no", "off"}:
         return False
     raise ValueError("config 'tls-verify' must be a boolean")
+
+
+def _parse_int(value: object, *, default: int, name: str) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except ValueError as exc:
+        raise ValueError(f"config '{name}' must be an integer") from exc
+
+
+def _parse_choice(value: object, *, default: str, choices: set[str], name: str) -> str:
+    normalized = str(value or default).strip().lower()
+    if normalized not in choices:
+        allowed = ", ".join(sorted(choices))
+        raise ValueError(f"config '{name}' must be one of: {allowed}")
+    return normalized
 
 
 def _load_settings() -> AppSettings:
@@ -65,12 +88,28 @@ def _load_settings() -> AppSettings:
         os.getenv("CHATGPT2API_TLS_VERIFY", raw_config.get("tls-verify")),
         default=True,
     )
+    image_engine = _parse_choice(
+        os.getenv("IMAGE_ENGINE", raw_config.get("image-engine")),
+        default="legacy",
+        choices={"legacy", "chat_image"},
+        name="image-engine",
+    )
+    image_route_policy = _parse_choice(
+        os.getenv("IMAGE_ROUTE_POLICY", raw_config.get("image-route-policy")),
+        default="legacy",
+        choices={"plan_type", "force_responses", "force_images", "legacy"},
+        name="image-route-policy",
+    )
 
     return AppSettings(
         auth_key=auth_key,
         admin_auth_key=admin_auth_key,
         host="0.0.0.0",
-        port=8000,
+        port=_parse_int(
+            os.getenv("CHATGPT2API_PORT", raw_config.get("port")),
+            default=8000,
+            name="port",
+        ),
         accounts_file=DATA_DIR / "accounts.json",
         user_keys_file=Path(
             str(os.getenv("CHATGPT2API_USER_KEYS_FILE") or raw_config.get("user-keys-file") or DATA_DIR / "user_keys.json")
@@ -83,6 +122,25 @@ def _load_settings() -> AppSettings:
             )
         ),
         tls_verify=tls_verify,
+        image_engine=image_engine,
+        image_route_policy=image_route_policy,
+        image_dev_port=_parse_int(
+            os.getenv("IMAGE_DEV_PORT", raw_config.get("image-dev-port")),
+            default=18201,
+            name="image-dev-port",
+        ),
+        image_enable_free_images_fallback=_parse_bool(
+            os.getenv("IMAGE_ENABLE_FREE_IMAGES_FALLBACK", raw_config.get("image-enable-free-images-fallback")),
+            default=True,
+        ),
+        image_enable_responses_primary=_parse_bool(
+            os.getenv("IMAGE_ENABLE_RESPONSES_PRIMARY", raw_config.get("image-enable-responses-primary")),
+            default=True,
+        ),
+        image_log_requests=_parse_bool(
+            os.getenv("IMAGE_LOG_REQUESTS", raw_config.get("image-log-requests")),
+            default=False,
+        ),
     )
 
 

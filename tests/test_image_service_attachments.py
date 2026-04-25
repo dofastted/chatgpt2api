@@ -174,6 +174,10 @@ class ImageServiceAttachmentTests(unittest.TestCase):
                 png_bytes,
                 {"mime_type": "image/png"},
             ),
+        ), patch.object(
+            uploaded_image_service,
+            "consume_upload",
+            return_value={"file_id": "upload-local-1"},
         ):
             uploaded = image_service._build_uploaded_input_image(
                 session,

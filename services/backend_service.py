@@ -11,11 +11,23 @@ from services.image_service import (
     is_token_invalid_error,
 )
 from services.image_queue_service import image_queue_service
+from services.config import config
+from services.chat_image.gateway import ImageGateway
+from services.chat_image.route_selector import select_image_route
 
 
 class BackendService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
+        self.image_gateway = ImageGateway(
+            lambda access_token, prompt, model, n, input_images: generate_image_result(
+                access_token,
+                prompt,
+                model,
+                n,
+                input_images=input_images,
+            )
+        )
 
     @staticmethod
     def _is_transient_refresh_error(message: str) -> bool:
@@ -100,13 +112,22 @@ class BackendService:
 
                 if queue_request_id:
                     image_queue_service.mark_status(queue_request_id, "running")
-                print(f"[image-generate] start pooled token={request_token[:12]}... model={model} n={n}")
-                result = generate_image_result(
+                route = select_image_route(
+                    account=refreshed_account,
+                    has_input_image=bool(input_images),
+                    policy=config.image_route_policy,
+                )
+                print(
+                    f"[image-generate] start pooled token={request_token[:12]}... "
+                    f"model={model} n={n} route={route}"
+                )
+                result = self.image_gateway.generate_image(
                     request_token,
                     prompt,
                     model,
                     n,
                     input_images=input_images,
+                    route=route,
                 )
                 account = self.account_service.mark_image_result(request_token, success=True)
                 print(

@@ -295,12 +295,15 @@ export default function ImagePage() {
     if (!prompt) {
       return;
     }
-    setImagePrompt(prompt);
-    textareaRef.current?.focus();
-    params.delete("prompt");
-    const nextQuery = params.toString();
-    const nextUrl = nextQuery ? `/image?${nextQuery}` : "/image";
-    window.history.replaceState({}, "", nextUrl);
+    const timer = window.setTimeout(() => {
+      setImagePrompt(prompt);
+      textareaRef.current?.focus();
+      params.delete("prompt");
+      const nextQuery = params.toString();
+      const nextUrl = nextQuery ? `/image?${nextQuery}` : "/image";
+      window.history.replaceState({}, "", nextUrl);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {

@@ -443,29 +443,22 @@ export async function generateImage(
   const queueRequestId = String(options.queueRequestId || "").trim();
   const clientConversationId = String(options.clientConversationId || "").trim();
   const queueHeaders = queueRequestId ? {"X-Image-Queue-Request-Id": queueRequestId} : undefined;
-  if (!inputImageUrl && !inputImageFileId) {
-    return httpRequest<ImageGenerationResponse>("/v1/images/generations", {
-      method: "POST",
-      body: {
-        prompt,
-        model,
-        n,
-        response_format: "b64_json",
-      },
-      headers: queueHeaders,
-    });
+  const inputItems: Array<
+    | { type: "input_text"; text: string }
+    | { type: "input_image"; file_id: string }
+    | { type: "input_image"; image_url: string }
+  > = [{ type: "input_text", text: prompt }];
+  if (inputImageFileId) {
+    inputItems.push({ type: "input_image", file_id: inputImageFileId });
+  } else if (inputImageUrl) {
+    inputItems.push({ type: "input_image", image_url: inputImageUrl });
   }
 
   const payload = await httpRequest<ResponsesImageGenerationResponse>("/v1/responses", {
     method: "POST",
     body: {
       model: "gpt-5",
-      input: [
-        { type: "input_text", text: prompt },
-        inputImageFileId
-          ? { type: "input_image", file_id: inputImageFileId }
-          : { type: "input_image", image_url: inputImageUrl },
-      ],
+      input: inputItems,
       tools: [{ type: "image_generation", model }],
       n,
       metadata: clientConversationId

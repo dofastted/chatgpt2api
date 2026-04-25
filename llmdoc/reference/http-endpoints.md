@@ -5,8 +5,8 @@
 公开接口：
 
 - `GET /v1/models`，返回支持的模型列表，位置在 `services/api.py:273`。
-- `POST /v1/response`，主 Response 生图入口；`POST /v1/responses` 保留兼容，位置在 `services/api.py` 的 Responses 路由段。
-- `GET /v1/response/{response_id}`，读取刚创建过的 Response 结果；`GET /v1/responses/{response_id}` 保留兼容，位置在 `services/api.py` 的 Responses 路由段。
+- `POST /v1/responses`，主 Response 生图入口，位置在 `services/api.py` 的 Responses 路由段。
+- `GET /v1/responses/{response_id}`，读取刚创建过的 Response 结果，位置在 `services/api.py` 的 Responses 路由段。
 - `GET /version`，返回当前版本，位置在 `services/api.py:293`。
 
 登录与会话：
@@ -24,8 +24,9 @@
 - `GET /backend-api/files/{file_id}/content`，读取当前 Bearer Token 自己的已上传原图，位置在 `services/api.py:898` 到 `services/api.py:913`。
 - `GET /api/image-queue/me`，返回当前 Bearer Token 的队列状态。可选查询参数 `request_id` 会带回那一条请求的 `status`、`position`、`ahead`、`started_at`、`finished_at` 和错误信息。接口同时返回当前 Bearer Token 的等待数、运行数，以及全局等待数、运行数。
 - `POST /v1/images/generations`，请求体是 `prompt`、`model`、`n`，也兼容 `stream`、`background`、`quality`、`size`、`output_format`、`partial_images`、`output_compression`。`model` 当前只接受 `gpt-image-2`。用户 key 会按自己 `pricing[model] * n` 扣费；成功响应里还会带 `billing`。如果上游页面正文里带了可复制文本，响应顶层还会多一个 `copied_text`。这条接口支持可选请求头 `X-Image-Queue-Request-Id`，会先进入三层队列：单个账号最多 2 并发、单个 Bearer Token 最多 10 个等待请求、全局等待超过 2000 时返回 `503`。若上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试；当前账号会暂停 3 分钟后再参与下一轮选号。流式时会先给可选的 `image_generation.partial_image`，最后给 `image_generation.completed` 和 `data: [DONE]`。
-- `POST /v1/response`，当前支持 `input_text` 加 `tools: [{ "type": "image_generation" }]` 的生图请求，也支持再附带 1 张 `input_image`。`input_image.image_url` 只接受 `http(s)` 或 `data:image/*`；`input_image.file_id` 对应本地上传接口返回的文件标识。顶层 `model` 按官方格式应传文本模型，图片模型放在 `tools[].model`，当前只支持 `gpt-image-2`；如果没传图片模型，默认 `gpt-image-2`。请求体还支持 `n`，最多 2。结果放在 `response.output[]` 里的 `image_generation_call`，图片 base64 在 `result`。如果上游页面正文里带了可复制文本，响应顶层还会多一个 `copied_text`。这条接口也支持 `X-Image-Queue-Request-Id`，并走同一套三层队列。流式时会返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后给 `data: [DONE]`。
-- `GET /v1/response/{response_id}`，可读回本进程内刚生成过的 Response 结果；当前不做持久化。复数路径保留兼容。
+- `POST /v1/responses`，当前支持 `input_text` 加 `tools: [{ "type": "image_generation" }]` 的生图请求，也支持再附带 1 张 `input_image`。`input_image.image_url` 只接受 `http(s)` 或 `data:image/*`；`input_image.file_id` 对应本地上传接口返回的文件标识。顶层 `model` 按官方格式应传文本模型，图片模型放在 `tools[].model`，当前只支持 `gpt-image-2`；如果没传图片模型，默认 `gpt-image-2`。请求体还支持 `n`，最多 2。结果放在 `response.output[]` 里的 `image_generation_call`，图片 base64 在 `result`。如果上游页面正文里带了可复制文本，响应顶层还会多一个 `copied_text`。这条接口也支持 `X-Image-Queue-Request-Id`，并走同一套三层队列。流式时会返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后给 `data: [DONE]`。
+- `POST /v1/images/edits`，兼容 multipart 图片编辑。字段包含 `prompt`、`image`，可选 `model`、`n`、`response_format` 和 `stream`；当前会把上传图片转成单张输入图，再走同一套队列、账号池和计费规则。
+- `GET /v1/responses/{response_id}`，可读回本进程内刚生成过的 Response 结果；当前不做持久化。单数路径不注册。
 - 当前 `gpt-image-2` 直接走真实上游 `gpt-image-2`，不再转 `gpt-5.4-thinking`。
 
 管理员可用：

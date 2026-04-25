@@ -3,15 +3,19 @@
 配置来源：
 
 - 主配置类是 `services/config.py:15` 的 `AppSettings`。
-- `auth_key`、`admin_auth_key`、`accounts_file`、`user_keys_file`、`tls_verify` 都在这里定义，见 `services/config.py:16` 到 `services/config.py:22`。
+- `auth_key`、`admin_auth_key`、`accounts_file`、`user_keys_file`、`tls_verify` 和图片迁移开关都在这里定义，见 `services/config.py`。
 
 配置加载规则：
 
 - `auth-key` 从环境变量 `CHATGPT2API_AUTH_KEY` 或 `config.json` 读取，见 `services/config.py:49`。
 - `admin-auth-key` 从环境变量 `CHATGPT2API_ADMIN_AUTH_KEY` 或 `config.json` 读取，见 `services/config.py:54`。
 - `tls-verify` 走布尔解析，见 `services/config.py:62`。
-- 账号文件固定写到 `data/accounts.json`，见 `services/config.py:74`。
+- 账号文件默认写到 `data/accounts.json`，也可用 `CHATGPT2API_DATA_DIR` 改整组数据目录。
 - 用户 key 文件默认写到 `data/user_keys.json`，也可用 `CHATGPT2API_USER_KEYS_FILE` 或 `user-keys-file` 覆盖，见 `services/config.py:75`。
+- `IMAGE_ENGINE` 只允许 `legacy` 或 `chat_image`，当前默认 `legacy`。
+- `IMAGE_ROUTE_POLICY` 只允许 `plan_type`、`force_responses`、`force_images` 或 `legacy`，当前默认 `legacy`。
+- `IMAGE_DEV_PORT` 默认 `18201`，用于隔离迁移环境记录。
+- `IMAGE_ENABLE_FREE_IMAGES_FALLBACK`、`IMAGE_ENABLE_RESPONSES_PRIMARY`、`IMAGE_LOG_REQUESTS` 都走布尔解析。
 
 样例文件：
 
@@ -20,7 +24,7 @@
 
 端口与入口：
 
-- 直接跑 `main.py` 时，默认用 `services/config.py:72` 和 `main.py:10` 的 `0.0.0.0:8000`。
+- 直接跑 `main.py` 时，默认用 `main.py:10` 的 `0.0.0.0:8000`，可用 `CHATGPT2API_PORT` 覆盖端口。
 - 容器模式由 `Dockerfile:33` 覆盖成 `0.0.0.0:80`。
 - 本地 compose 对外暴露 `3002`，默认 compose 对外暴露 `3000`，见 `docker-compose-local.yml:9` 与 `docker-compose.yml:7`。
 
