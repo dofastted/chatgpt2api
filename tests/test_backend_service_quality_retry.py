@@ -69,8 +69,9 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
             model: str,
             n: int,
             input_images: list[dict[str, str]] | None = None,
+            route: str = "legacy",
         ) -> dict:
-            del prompt, model, n, input_images
+            del prompt, model, n, input_images, route
             if access_token == "bad-token":
                 raise ImageGenerationError("low quality text render for file: file-1")
             return {"created": 1, "data": [{"b64_json": "ok"}]}
@@ -89,8 +90,9 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
             model: str,
             n: int,
             input_images: list[dict[str, str]] | None = None,
+            route: str = "legacy",
         ) -> dict:
-            del prompt, model, n, input_images
+            del prompt, model, n, input_images, route
             if access_token == "bad-token":
                 raise ImageGenerationError("download image failed")
             return {"created": 1, "data": [{"b64_json": "ok"}]}
@@ -109,8 +111,9 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
             model: str,
             n: int,
             input_images: list[dict[str, str]] | None = None,
+            route: str = "legacy",
         ) -> dict:
-            del prompt, model, n, input_images
+            del prompt, model, n, input_images, route
             if access_token == "bad-token":
                 raise ImageGenerationError("conversation failed: 524")
             return {"created": 1, "data": [{"b64_json": "ok"}]}
@@ -129,8 +132,9 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
             model: str,
             n: int,
             input_images: list[dict[str, str]] | None = None,
+            route: str = "legacy",
         ) -> dict:
-            del prompt, model, n, input_images
+            del prompt, model, n, input_images, route
             if access_token == "bad-token":
                 raise ImageGenerationError('{"detail":{"message":"rate limited","status_code":429}}')
             return {"created": 1, "data": [{"b64_json": "ok"}]}

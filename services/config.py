@@ -97,7 +97,7 @@ def _load_settings() -> AppSettings:
     )
     image_route_policy = _parse_choice(
         os.getenv("IMAGE_ROUTE_POLICY", raw_config.get("image-route-policy")),
-        default="legacy",
+        default="plan_type",
         choices={"plan_type", "force_responses", "force_images", "legacy"},
         name="image-route-policy",
     )

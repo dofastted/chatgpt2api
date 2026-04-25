@@ -38,6 +38,15 @@ class FakeSseResponse:
             yield line
 
 
+class FakeOkResponse:
+    ok = True
+    status_code = 200
+    text = ""
+
+    def iter_lines(self):
+        return iter([])
+
+
 class ImageServiceAttachmentTests(unittest.TestCase):
     def test_build_uploaded_input_image_supports_data_url(self) -> None:
         png_bytes = base64.b64decode(
@@ -371,6 +380,69 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertEqual(parsed["conversation_id"], "conv-fast")
         self.assertEqual(parsed["file_ids"], ["file-ready"])
         self.assertEqual(response.read_count, 2)
+
+    def test_send_conversation_uses_f_conversation_for_images_route(self) -> None:
+        class Session(FakeSession):
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+
+            def post(self, url: str, **kwargs):
+                self.calls.append((url, kwargs.get("json") or {}))
+                return FakeOkResponse()
+
+        session = Session()
+        with patch.object(
+            image_service,
+            "_build_conversation_message",
+            return_value={
+                "id": "msg-1",
+                "author": {"role": "user"},
+                "content": {"content_type": "text", "parts": ["draw"]},
+                "metadata": {"attachments": []},
+            },
+        ):
+            image_service._send_conversation(
+                session,
+                "token-123",
+                "device-1",
+                "chat-token",
+                None,
+                "parent-1",
+                "draw",
+                "auto",
+                route="images",
+            )
+
+        self.assertEqual(session.calls[0][0], "https://chatgpt.com/backend-api/f/conversation")
+        self.assertEqual(session.calls[0][1]["client_prepare_state"], "none")
+        self.assertEqual(session.calls[0][1]["supported_encodings"], ["v1"])
+
+    def test_send_responses_request_uses_codex_responses_endpoint(self) -> None:
+        class Session(FakeSession):
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict, dict]] = []
+
+            def post(self, url: str, **kwargs):
+                self.calls.append((url, kwargs.get("headers") or {}, kwargs.get("json") or {}))
+                return FakeOkResponse()
+
+        session = Session()
+        image_service._send_responses_request(
+            session,
+            "token-123",
+            "account-123",
+            "draw",
+            "gpt-image-2",
+            None,
+        )
+
+        url, headers, body = session.calls[0]
+        self.assertEqual(url, "https://chatgpt.com/backend-api/codex/responses")
+        self.assertEqual(headers["Chatgpt-Account-Id"], "account-123")
+        self.assertEqual(body["model"], "gpt-5.4-mini")
+        self.assertEqual(body["tools"][0]["type"], "image_generation")
+        self.assertEqual(body["tools"][0]["model"], "gpt-image-2")
+        self.assertEqual(body["tools"][0]["action"], "generate")
 
     def test_is_transient_image_error_treats_conversation_422_as_retryable(self) -> None:
         self.assertTrue(image_service.is_transient_image_error("conversation failed: 422"))

@@ -1,13 +1,57 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from services import api
+from services.backend_service import BackendService
 from services.chat_image.account_import import normalize_account_carrier
+from services.chat_image.gateway import ImageGateway
 from services.chat_image.route_selector import select_image_route
+
+
+class FakeRouteAccountService:
+    def __init__(self, account_type: str) -> None:
+        self.account_type = account_type
+
+    def next_token(self, excluded_tokens: set[str] | None = None) -> str:
+        del excluded_tokens
+        return "token-1"
+
+    def get_account(self, access_token: str) -> dict | None:
+        return {"access_token": access_token, "quota": 5, "status": "正常", "type": self.account_type}
+
+    def fetch_remote_info(self, access_token: str) -> dict:
+        return self.get_account(access_token) or {}
+
+    def update_account(self, access_token: str, updates: dict) -> dict:
+        return {**(self.get_account(access_token) or {}), **updates}
+
+    def mark_image_result(self, access_token: str, success: bool) -> dict:
+        return {**(self.get_account(access_token) or {}), "success": success}
+
+
+class RecordingGateway:
+    def __init__(self) -> None:
+        self.routes: list[str] = []
+
+    def generate_image(
+        self,
+        access_token: str,
+        prompt: str,
+        model: str,
+        n: int,
+        *,
+        input_images: list[dict[str, str]] | None = None,
+        route: str = "legacy",
+    ) -> dict:
+        del access_token, prompt, model, n, input_images
+        self.routes.append(route)
+        return {"created": 1, "data": [{"b64_json": "ok"}]}
 
 
 class ChatImageMigrationTests(unittest.TestCase):
@@ -80,6 +124,49 @@ class ChatImageMigrationTests(unittest.TestCase):
             "responses",
         )
         self.assertEqual(select_image_route(account={"type": "Plus"}, policy="legacy"), "legacy")
+
+    def test_backend_service_passes_plan_route_to_gateway(self) -> None:
+        cases = [
+            ("Free", None, "images"),
+            ("Free", [{"image_url": "data:image/png;base64,aW1n"}], "images_edit"),
+            ("Plus", None, "responses"),
+            ("Pro", None, "responses"),
+            ("Team", [{"image_url": "data:image/png;base64,aW1n"}], "responses"),
+        ]
+
+        for account_type, input_images, expected_route in cases:
+            service = BackendService(FakeRouteAccountService(account_type))
+            gateway = RecordingGateway()
+            service.image_gateway = gateway
+            with patch("services.backend_service.config", SimpleNamespace(image_route_policy="plan_type")):
+                service.generate_with_pool("draw", "gpt-image-2", 1, input_images=input_images)
+            self.assertEqual(gateway.routes, [expected_route])
+
+    def test_image_gateway_forwards_route_to_executor(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_executor(
+            access_token: str,
+            prompt: str,
+            model: str,
+            n: int,
+            input_images: list[dict[str, str]] | None,
+            route: str,
+        ) -> dict:
+            calls.append({"route": route, "input_images": input_images})
+            return {"created": 1, "data": [{"b64_json": "ok"}]}
+
+        gateway = ImageGateway(fake_executor)
+        gateway.generate_image(
+            "token",
+            "draw",
+            "gpt-image-2",
+            1,
+            input_images=[{"image_url": "data:image/png;base64,aW1n"}],
+            route="responses",
+        )
+
+        self.assertEqual(calls, [{"route": "responses", "input_images": [{"image_url": "data:image/png;base64,aW1n"}]}])
 
     def test_singular_response_endpoint_is_not_registered(self) -> None:
         client = TestClient(api.create_app())

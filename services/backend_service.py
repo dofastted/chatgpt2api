@@ -22,12 +22,13 @@ class BackendService:
     def __init__(self, account_service: AccountService):
         self.account_service = account_service
         self.image_gateway = ImageGateway(
-            lambda access_token, prompt, model, n, input_images: generate_image_result(
+            lambda access_token, prompt, model, n, input_images, route: generate_image_result(
                 access_token,
                 prompt,
                 model,
                 n,
                 input_images=input_images,
+                route=route,
             )
         )
 

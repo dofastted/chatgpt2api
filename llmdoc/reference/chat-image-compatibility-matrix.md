@@ -4,12 +4,12 @@
 
 | Endpoint | 当前状态 | 迁移路径 |
 |---|---|---|
-| `POST /v1/responses` | 保留，Responses 主入口 | 现阶段仍走旧引擎 gateway；后续接 official Responses client |
+| `POST /v1/responses` | 保留，Responses 主入口 | 经 `BackendService` 选号后按账号套餐分流；Plus/Pro/Team 走 upstream `/backend-api/codex/responses` |
 | `GET /v1/responses/{response_id}` | 保留，读取进程内结果 | 继续读 `RESPONSES_STORE` |
 | `POST /v1/response` | 不注册 | 单数路径按 workflow v2 视为无效 |
 | `GET /v1/response/{response_id}` | 不注册 | 单数路径按 workflow v2 视为无效 |
-| `POST /v1/images/generations` | 保留，兼容入口 | 现阶段经 `ImageGateway.generate_image()` 走旧引擎 |
-| `POST /v1/images/edits` | 新增，兼容入口 | multipart 图片转单张输入图后经 `ImageGateway.generate_image()` |
+| `POST /v1/images/generations` | 保留，兼容入口 | 经 `ImageGateway.generate_image()` 按账号套餐分流；Free 走 `/backend-api/f/conversation` |
+| `POST /v1/images/edits` | 新增，兼容入口 | multipart 图片转单张输入图后经 `ImageGateway.generate_image()`；Free 走 `/backend-api/f/conversation`，付费账号走 Responses inline input_image |
 | `GET /v1/models` | 保留 | 当前仍返回 `gpt-image-2` |
 | `POST /backend-api/files/process_upload_stream` | 保留 | 本地上传登记与后续 `file_id` 输入图继续使用 |
 | `GET /backend-api/my/recent/uploaded_images` | 保留 | 上传记录仍按 Bearer Token 和会话隔离 |
@@ -19,4 +19,4 @@
 | `GET /api/image-queue/me` | 保留 | 队列状态不变 |
 | user key / redeem code APIs | 保留 | 当前不改 |
 
-当前 gateway 只是 Phase 1 入口收束。`services/chat_image/account_import.py` 已支持单账号 JSON 和 `sub2api` 的 `accounts[]` 载体；`services/chat_image/route_selector.py` 已提供 Free 走 Images、Plus/Pro/Team 走 Responses 的判断，但默认策略仍是 `legacy`，避免隔离 worktree 以外行为变化。
+当前 gateway 已接入账号套餐分流。`services/chat_image/account_import.py` 支持单账号 JSON 和 `sub2api` 的 `accounts[]` 载体；`services/chat_image/route_selector.py` 负责 Free 走 Images、Plus/Pro/Team 走 Responses 的判断；`services/chat_image/gateway.py` 会把 route 继续传给 `services/image_service.py`。`IMAGE_ROUTE_POLICY=legacy` 仍可作为回退开关，但默认策略已经是 `plan_type`。

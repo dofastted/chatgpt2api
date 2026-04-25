@@ -9,12 +9,13 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import unquote_to_bytes
 
 from curl_cffi.requests import Session
 
 from services.account_service import account_service
+from services.chat_image.account_plan import decode_jwt_payload
 from services.config import config
 from services import proof_of_work
 from services.proxy_service import proxy_service
@@ -30,6 +31,9 @@ USER_AGENT = (
 DEFAULT_MODEL = "gpt-4o"
 GPT_IMAGE_2_UPSTREAM_MODEL = "gpt-image-2"
 GPT_IMAGE_2_REASONING_EFFORT = None
+CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
+CODEX_RESPONSES_MODEL = "gpt-5.4-mini"
+CODEX_RESPONSES_USER_AGENT = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
 MAX_POW_ATTEMPTS = 500000
 UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS = 45
 UPSTREAM_CONVERSATION_TIMEOUT_SECONDS = 90
@@ -484,6 +488,7 @@ def _send_conversation(
     model: str,
     reasoning_effort: Optional[str] = None,
     input_images: list[dict[str, str]] | None = None,
+    route: str = "legacy",
 ):
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -541,10 +546,15 @@ def _send_conversation(
     }
     if reasoning_effort:
         request_body["reasoning"] = {"effort": reasoning_effort}
+    endpoint_path = "/backend-api/conversation"
+    if route in {"images", "images_edit"}:
+        endpoint_path = "/backend-api/f/conversation"
+        request_body["client_prepare_state"] = "none"
+        request_body["supported_encodings"] = ["v1"]
 
     response = _retry(
         lambda: session.post(
-            BASE_URL + "/backend-api/conversation",
+            BASE_URL + endpoint_path,
             headers=headers,
             json=request_body,
             stream=True,
@@ -554,7 +564,8 @@ def _send_conversation(
         retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not response.ok:
-        raise ImageGenerationError(response.text[:400] or f"conversation failed: {response.status_code}")
+        label = "f conversation" if endpoint_path.endswith("/f/conversation") else "conversation"
+        raise ImageGenerationError(response.text[:400] or f"{label} failed: {response.status_code}")
     return response
 
 
@@ -1018,6 +1029,262 @@ def _download_generated_images(
     return images
 
 
+def _first_string(value: dict[str, Any] | None, *keys: str) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in keys:
+        item = value.get(key)
+        if item is not None and str(item).strip():
+            return str(item).strip()
+    return ""
+
+
+def _resolve_chatgpt_account_id(access_token: str) -> str:
+    account = account_service.get_account(access_token) or {}
+    account_id = _first_string(account, "account_id", "chatgpt_account_id")
+    if account_id:
+        return account_id
+
+    auth_data = account.get("auth_data")
+    if isinstance(auth_data, dict):
+        account_id = _first_string(auth_data, "account_id", "chatgpt_account_id")
+        if account_id:
+            return account_id
+        nested_auth = auth_data.get("https://api.openai.com/auth")
+        if isinstance(nested_auth, dict):
+            account_id = _first_string(nested_auth, "account_id", "chatgpt_account_id")
+            if account_id:
+                return account_id
+
+    token_payload = decode_jwt_payload(access_token)
+    nested_auth = token_payload.get("https://api.openai.com/auth")
+    if isinstance(nested_auth, dict):
+        return _first_string(nested_auth, "account_id", "chatgpt_account_id")
+    return ""
+
+
+def _normalize_responses_image_tool_model(value: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized in {"gpt-image-1", "gpt-image-2"}:
+        return normalized
+    return "gpt-image-2"
+
+
+def _encode_image_data_url(image_bytes: bytes, mime_type: str) -> str:
+    normalized_mime = str(mime_type or "").strip() or "image/png"
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{normalized_mime};base64,{encoded}"
+
+
+def _build_responses_request_content(
+    session: Session,
+    prompt: str,
+    input_images: list[dict[str, str]] | None,
+) -> list[dict[str, str]]:
+    content = [{"type": "input_text", "text": str(prompt or "").strip()}]
+    for input_image in input_images or []:
+        image_bytes, mime_type = _load_input_image_bytes(session, input_image)
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": _encode_image_data_url(image_bytes, mime_type),
+            }
+        )
+    return content
+
+
+def _parse_responses_sse(response, prompt: str) -> list[GeneratedImage]:
+    data_lines: list[str] = []
+    final_images: list[GeneratedImage] = []
+    partial_images: dict[str, str] = {}
+    seen: set[str] = set()
+
+    def emit_image(b64_json: str, output_format: str = "png") -> None:
+        normalized_b64 = str(b64_json or "").strip()
+        if not normalized_b64:
+            return
+        digest = hashlib.sha256(normalized_b64.encode("utf-8")).hexdigest()
+        if digest in seen:
+            return
+        seen.add(digest)
+        normalized_format = str(output_format or "").strip().lower()
+        mime_type = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "webp": "image/webp",
+        }.get(normalized_format, "image/png")
+        final_images.append(
+            GeneratedImage(
+                b64_json=normalized_b64,
+                revised_prompt=prompt,
+                url=f"data:{mime_type};base64,{normalized_b64}",
+                mime_type=mime_type,
+            )
+        )
+
+    def process_frame(frame: str) -> None:
+        frame = str(frame or "").strip()
+        if not frame or frame == "[DONE]":
+            return
+        try:
+            payload = json.loads(frame)
+        except Exception:
+            return
+        event_type = str(payload.get("type") or "")
+        if event_type == "error":
+            error_payload = payload.get("error")
+            message = _extract_sse_error_text(error_payload) or "responses stream returned an error"
+            raise ImageGenerationError(message)
+        if event_type == "response.image_generation_call.partial_image":
+            item_id = str(payload.get("item_id") or "").strip()
+            partial = str(payload.get("partial_image_b64") or "").strip()
+            if item_id and partial:
+                partial_images[item_id] = partial
+            return
+        if event_type == "response.output_item.done":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                emit_image(str(item.get("result") or ""), str(item.get("output_format") or "png"))
+            return
+        if event_type == "response.completed":
+            response_payload = payload.get("response")
+            if not isinstance(response_payload, dict):
+                return
+            output = response_payload.get("output")
+            if not isinstance(output, list):
+                return
+            for item in output:
+                if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                    emit_image(str(item.get("result") or ""), str(item.get("output_format") or "png"))
+
+    for raw_line in response.iter_lines():
+        if isinstance(raw_line, bytes):
+            line = raw_line.decode("utf-8", errors="ignore")
+        else:
+            line = str(raw_line or "")
+        if line == "":
+            process_frame("\n".join(data_lines))
+            data_lines = []
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").strip())
+    process_frame("\n".join(data_lines))
+
+    if not final_images:
+        for b64_json in partial_images.values():
+            emit_image(b64_json, "png")
+    if not final_images:
+        raise ImageGenerationError("no images generated")
+    return final_images
+
+
+def _send_responses_request(
+    session: Session,
+    access_token: str,
+    account_id: str,
+    prompt: str,
+    model: str,
+    input_images: list[dict[str, str]] | None,
+):
+    content = _build_responses_request_content(session, prompt, input_images)
+    tool = {
+        "type": "image_generation",
+        "model": _normalize_responses_image_tool_model(model),
+        "action": "edit" if input_images else "generate",
+        "output_format": "png",
+    }
+    body = {
+        "model": CODEX_RESPONSES_MODEL,
+        "input": [{"role": "user", "content": content}],
+        "tools": [tool],
+        "tool_choice": {"type": "image_generation"},
+        "instructions": "You generate and edit images for the user.",
+        "stream": True,
+        "store": False,
+        "parallel_tool_calls": True,
+        "include": ["reasoning.encrypted_content"],
+    }
+    response = _retry(
+        lambda: session.post(
+            CODEX_RESPONSES_BASE_URL + "/responses",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Chatgpt-Account-Id": account_id,
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "User-Agent": CODEX_RESPONSES_USER_AGENT,
+                "Originator": "codex-tui",
+                "Session_id": str(uuid.uuid4()),
+                "Connection": "Keep-Alive",
+            },
+            json=body,
+            stream=True,
+            timeout=UPSTREAM_CONVERSATION_TIMEOUT_SECONDS + 30,
+        ),
+        retries=3,
+        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
+    )
+    if not response.ok:
+        raise ImageGenerationError(response.text[:400] or f"responses failed: {response.status_code}")
+    return response
+
+
+def generate_image_result_via_responses(
+    access_token: str,
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    n: int = 1,
+    input_images: list[dict[str, str]] | None = None,
+) -> dict:
+    if not input_images:
+        prompt = _refine_prompt_for_text_rendering(prompt)
+    access_token = str(access_token or "").strip()
+    if not prompt:
+        raise ImageGenerationError("prompt is required")
+    if not access_token:
+        raise ImageGenerationError("token is required")
+    if n < 1:
+        raise ImageGenerationError("n must be >= 1")
+    account_id = _resolve_chatgpt_account_id(access_token)
+    if not account_id:
+        raise ImageGenerationError("chatgpt account id is required")
+
+    session, _fp = _new_session(access_token)
+    try:
+        print(
+            f"[image-upstream] start token={_token_label(access_token)} "
+            f"route=responses text_model={CODEX_RESPONSES_MODEL} image_model={model} n={n}"
+        )
+        results: list[GeneratedImage] = []
+        for _ in range(n):
+            response = _send_responses_request(
+                session,
+                access_token,
+                account_id,
+                prompt,
+                model,
+                input_images,
+            )
+            results.extend(_parse_responses_sse(response, prompt))
+        print(f"[image-upstream] success token={_token_label(access_token)} route=responses images={len(results)}")
+        return {
+            "created": time.time_ns() // 1_000_000_000,
+            "data": [
+                {
+                    "b64_json": item.b64_json,
+                    "revised_prompt": item.revised_prompt,
+                    "mime_type": item.mime_type,
+                }
+                for item in results
+            ],
+        }
+    except Exception as exc:
+        print(f"[image-upstream] fail token={_token_label(access_token)} route=responses error={exc}")
+        raise
+    finally:
+        session.close()
+
+
 def _resolve_upstream_target(access_token: str, requested_model: str) -> tuple[str, Optional[str]]:
     requested_model = str(requested_model or "").strip() or "gpt-image-1"
 
@@ -1034,7 +1301,18 @@ def generate_image_result(
     model: str = DEFAULT_MODEL,
     n: int = 1,
     input_images: list[dict[str, str]] | None = None,
+    route: str = "legacy",
 ) -> dict:
+    normalized_route = str(route or "legacy").strip().lower()
+    if normalized_route == "responses":
+        return generate_image_result_via_responses(
+            access_token,
+            prompt,
+            model=model,
+            n=n,
+            input_images=input_images,
+        )
+
     if not input_images:
         prompt = _refine_prompt_for_text_rendering(prompt)
     access_token = str(access_token or "").strip()
@@ -1050,7 +1328,8 @@ def generate_image_result(
         upstream_model, reasoning_effort = _resolve_upstream_target(access_token, model)
         print(
             f"[image-upstream] start token={_token_label(access_token)} "
-            f"requested_model={model} upstream_model={upstream_model} reasoning_effort={reasoning_effort or 'none'} n={n}"
+            f"route={normalized_route} requested_model={model} upstream_model={upstream_model} "
+            f"reasoning_effort={reasoning_effort or 'none'} n={n}"
         )
         results: list[GeneratedImage] = []
         copied_text = ""
@@ -1079,6 +1358,7 @@ def generate_image_result(
                     upstream_model,
                     reasoning_effort,
                     input_images=input_images,
+                    route=normalized_route,
                 )
                 try:
                     parsed = _parse_sse(response)

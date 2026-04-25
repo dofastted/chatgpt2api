@@ -14,7 +14,8 @@
 - 先从账号池选一个当前可用的 token，逻辑在 `services/backend_service.py:38`。
 - 再用 `services/backend_service.py:21` 先刷新这个 token 的远端信息，确认它还有额度、状态也可用。
 - 刷新结果不满足条件时会跳过这个 token，继续尝试下一个。
-- 真正的远端图片请求交给 `services/image_service.py:446`。
+- 选号后会按账号套餐选择执行路线：Free 账号走 Images 路线，Plus/Pro/Team 账号走 Responses 路线，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
+- 真正的远端图片请求交给 `services/image_service.py`。
 
 远端请求过程：
 
@@ -24,7 +25,10 @@
 - 本地上传入口是 `services/api.py:859` 到 `services/api.py:913`。前端图片页会先调用 `web/src/lib/api.ts:350` 到 `web/src/lib/api.ts:364` 上传图片，再在 `web/src/app/image/page.tsx:545` 到 `web/src/app/image/page.tsx:558` 把 `fileId` 保存到当前输入图状态。
 - 上传到 ChatGPT 上游的过程在 `services/image_service.py:760` 到 `services/image_service.py:840`。这里仍然使用上游的 `/backend-api/files` 和上传确认接口。
 - 组装会话消息时，文本只保留在 `services/image_service.py:843` 到 `services/image_service.py:884` 的 `content.parts`，图片只放在 `metadata.attachments`，不再把图片指针塞进 `content.parts`。
-- 会话流请求在 `services/image_service.py:215` 发出。
+- Free 账号的 Images 路线优先请求上游 `/backend-api/f/conversation`，并带 `client_prepare_state=none` 与 `supported_encodings=["v1"]`。
+- Plus/Pro/Team 账号的 Responses 路线请求上游 `/backend-api/codex/responses`，顶层文本模型使用 `gpt-5.4-mini`，图片工具模型使用调用方请求的 `gpt-image-2`。
+- legacy 回退路线仍请求上游 `/backend-api/conversation`，可通过 `IMAGE_ROUTE_POLICY=legacy` 开启。
+- 会话流请求在 `services/image_service.py` 发出。
 - SSE 解析在 `services/image_service.py:295`，会从流里提取文件标识和文字结果。
 - 当前公开模型只保留 `gpt-image-2`。API 层会在 `services/api.py:217` 拒绝 `gpt-image-1`，默认模型也改成 `gpt-image-2`。
 - `gpt-image-2` 直接走真实上游模型 `gpt-image-2`，转换逻辑在 `services/image_service.py` 的 `_resolve_upstream_target`。
