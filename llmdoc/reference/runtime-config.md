@@ -13,7 +13,7 @@
 - 账号文件默认写到 `data/accounts.json`，也可用 `CHATGPT2API_DATA_DIR` 改整组数据目录。
 - 用户 key 文件默认写到 `data/user_keys.json`，也可用 `CHATGPT2API_USER_KEYS_FILE` 或 `user-keys-file` 覆盖，见 `services/config.py:75`。
 - 代理文件默认写到 `data/proxies.json`，也可用 `CHATGPT2API_PROXIES_FILE` 或 `proxies-file` 覆盖。
-- `IMAGE_ENGINE` 只允许 `legacy` 或 `chat_image`，当前默认 `legacy`。
+- `IMAGE_ENGINE` 只允许 `legacy` 或 `chat_image`，当前默认 `chat_image`。旧值只保留给手工回退，不作为主容器默认路线。
 - `IMAGE_ROUTE_POLICY` 只允许 `plan_type`、`force_responses`、`force_images` 或 `legacy`，当前默认 `plan_type`。默认情况下 Free 账号走 Images 路线，Plus/Pro/Team 走 Responses 路线。
 - `IMAGE_DEV_PORT` 默认 `18201`，用于隔离迁移环境记录。
 - `IMAGE_ENABLE_FREE_IMAGES_FALLBACK`、`IMAGE_ENABLE_RESPONSES_PRIMARY`、`IMAGE_LOG_REQUESTS` 都走布尔解析。

@@ -91,7 +91,7 @@ def _load_settings() -> AppSettings:
     )
     image_engine = _parse_choice(
         os.getenv("IMAGE_ENGINE", raw_config.get("image-engine")),
-        default="legacy",
+        default="chat_image",
         choices={"legacy", "chat_image"},
         name="image-engine",
     )

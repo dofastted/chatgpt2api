@@ -30,8 +30,8 @@ AUTH_KEY="$(tr -d '\r\n' < .llmdoc-tmp/image-acceptance/worktree-test-key.txt)"
 CHATGPT2API_AUTH_KEY=worktree-auth \
 CHATGPT2API_ADMIN_AUTH_KEY=worktree-admin \
 CHATGPT2API_DATA_DIR="$PWD/data-migration" \
-IMAGE_ENGINE=legacy \
-IMAGE_ROUTE_POLICY=legacy \
+IMAGE_ENGINE=chat_image \
+IMAGE_ROUTE_POLICY=plan_type \
 python -m uvicorn main:app --host 127.0.0.1 --port 18201
 ```
 
