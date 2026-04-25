@@ -105,7 +105,7 @@ POST /v1/responses
 - 可选请求头 `X-Image-Queue-Request-Id` 可配合 `GET /api/image-queue/me` 查看当前 Bearer Token 的排队状态
 - 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
-- 支持 `stream: true`。流式时会依次返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后返回 `data: [DONE]`
+- 支持 `stream: true`。流式时会依次返回 `response.created`、`response.in_progress`、`response.output_item.added`、`response.image_generation_call.completed`、`response.output_item.done`、`response.completed`，最后返回 `data: [DONE]`；其中 `response.image_generation_call.completed` 会带上本次图片 `result`，便于客户端收到图片后立即结束当前消息
 - 单数 `/v1/response` 不是有效接口。
 
 ### 图片编辑兼容

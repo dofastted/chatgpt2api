@@ -44,7 +44,7 @@
 - 对外协议转换都在 `services/api.py`。`build_responses_payload` 和 `iter_responses_stream` 负责 Responses 风格输出；`build_images_response_payload` 和 `iter_images_stream` 负责图片接口风格输出。
 - 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
 - `/v1/images/generations` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
-- `/v1/responses` 流式时，最后一定会给 `response.completed` 和 `data: [DONE]`。
+- `/v1/responses` 流式时，`response.image_generation_call.completed` 会带图片 `result` 和完整 `item`，最后一定会给 `response.completed` 和 `data: [DONE]`。
 - 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。
 - 前端图片页现在会把本地 session 存成多轮 `turns[]`。每轮保存 prompt、模型、张数、尺寸、参考图、结果图、队列 id、`responseId` 和 `copied_text`；旧单轮记录读取时会映射成一个 turn，实现见 `web/src/store/image-conversations.ts`。
 - 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。

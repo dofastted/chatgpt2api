@@ -821,7 +821,13 @@ def iter_responses_stream(payload: dict[str, object]):
             item_id = str(output_item.get("id") or "")
             yield emit("response.image_generation_call.in_progress", output_index=output_index, item_id=item_id)
             yield emit("response.image_generation_call.generating", output_index=output_index, item_id=item_id)
-            yield emit("response.image_generation_call.completed", output_index=output_index, item_id=item_id)
+            yield emit(
+                "response.image_generation_call.completed",
+                output_index=output_index,
+                item_id=item_id,
+                result=str(output_item.get("result") or ""),
+                item=clone_json_value(output_item),
+            )
 
         yield emit("response.output_item.done", output_index=output_index, item=output_item)
 

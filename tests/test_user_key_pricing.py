@@ -1078,6 +1078,9 @@ class UserKeyPricingTests(unittest.TestCase):
         image_completed_events = [payload for event, payload in events if event == "response.image_generation_call.completed"]
         self.assertEqual(len(image_completed_events), 1)
         self.assertEqual(image_completed_events[0]["item_id"], payload["output"][0]["id"])
+        self.assertEqual(image_completed_events[0]["result"], "ZmFrZQ==")
+        self.assertEqual(image_completed_events[0]["item"]["type"], "image_generation_call")
+        self.assertEqual(image_completed_events[0]["item"]["result"], "ZmFrZQ==")
 
         output_item_done_events = [payload for event, payload in events if event == "response.output_item.done"]
         self.assertEqual(len(output_item_done_events), 1)
