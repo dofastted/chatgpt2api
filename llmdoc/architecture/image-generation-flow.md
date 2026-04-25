@@ -7,6 +7,7 @@
 - 图片编辑兼容入口是 `POST /v1/images/edits`，接收 multipart 图片并转成单张 `input_image`，再进入同一套队列和账号池路径。
 - 三条入口都接受图片尺寸。`auto` 是默认值，不传给上游；`WIDTHxHEIGHT` 会先按 16 的倍数向下规整，再进入后端路径。
 - `POST /v1/chat/completions` 只作为 API key 健康检查兼容入口，不进入图片生成链路。
+- `POST /v1/responses` 如果没有 `image_generation` tool，也只作为第三方客户端健康检查入口，返回 `output_text=ok` 和 `metadata.health_check=true`，不进入图片生成链路。
 
 两条路最终都会交给 `BackendService.generate_with_pool`，位置在 `services/backend_service.py:37`。
 

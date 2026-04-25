@@ -715,6 +715,54 @@ def build_responses_payload(
     return payload
 
 
+def build_responses_health_payload(
+        *,
+        response_model: str,
+        auth_type: str,
+) -> dict[str, object]:
+    created_at = int(time())
+    message_id = f"msg_{uuid4().hex}"
+    return {
+        "id": f"resp_{uuid4().hex}",
+        "object": "response",
+        "created_at": created_at,
+        "status": "completed",
+        "error": None,
+        "incomplete_details": None,
+        "instructions": None,
+        "max_output_tokens": None,
+        "model": str(response_model or "").strip() or DEFAULT_RESPONSES_MODEL,
+        "output": [
+            {
+                "id": message_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "ok",
+                        "annotations": [],
+                    }
+                ],
+            }
+        ],
+        "output_text": "ok",
+        "parallel_tool_calls": False,
+        "previous_response_id": None,
+        "metadata": {
+            "auth_type": auth_type,
+            "health_check": True,
+        },
+        "text": {"format": {"type": "text"}},
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        },
+    }
+
+
 def clone_json_value(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False))
 
@@ -1026,10 +1074,20 @@ def create_app() -> FastAPI:
     ):
         context = require_auth_key(authorization)
         if not has_image_generation_tool(body.tools):
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "responses request must include an image_generation tool"},
+            payload = build_responses_health_payload(
+                response_model=body.model,
+                auth_type=context.auth_type,
             )
+            if body.stream:
+                return StreamingResponse(
+                    iter_responses_stream(payload),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "X-Accel-Buffering": "no",
+                    },
+                )
+            return payload
         validate_responses_tool_choice(body.tool_choice)
         input_images = validate_responses_input_images(body.input)
         request_auth_token = extract_bearer_token(authorization)

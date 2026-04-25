@@ -90,6 +90,7 @@ POST /v1/responses
 
 - 主入口是 `POST /v1/responses`
 - 走 `tools: [{ "type": "image_generation" }]` 的生图请求
+- 如果没有传 `image_generation` tool，会当作第三方客户端健康检查处理，只校验 Bearer Token 并返回 `output_text=ok`、`metadata.health_check=true`，不进上游、不扣费
 - 支持文本输入生图，也支持文本加 1 张 `input_image`
 - 顶层 `model` 按 OpenAI 官方格式应传文本模型，比如 `gpt-5`、`gpt-5.4`
 - `input_image` 支持两种写法：`image_url` 只接受 `http(s)` 或 `data:image/*`，`file_id` 对应本地上传接口返回的文件标识

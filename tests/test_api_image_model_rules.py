@@ -149,6 +149,30 @@ class ApiImageModelRuleTests(unittest.TestCase):
         self.assertEqual(payload["metadata"]["auth_type"], "user_key")
         self.assertTrue(payload["metadata"]["health_check"])
 
+    def test_responses_post_without_image_tool_returns_health_payload(self) -> None:
+        created = api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
+        user_key = created["created_items"][0]["key"]
+        service = FakeBackendService()
+        with patch.object(api, "BackendService", return_value=service):
+            with patch.object(api, "start_limited_account_watcher", side_effect=lambda stop_event: FakeThread()):
+                with TestClient(api.create_app()) as client:
+                    response = client.post(
+                        "/v1/responses",
+                        headers={"Authorization": f"Bearer {user_key}"},
+                        json={
+                            "model": "gpt-5",
+                            "input": "ping",
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["output_text"], "ok")
+        self.assertEqual(payload["metadata"]["auth_type"], "user_key")
+        self.assertTrue(payload["metadata"]["health_check"])
+        self.assertEqual(service.last_call, {})
+
     def test_user_key_takes_precedence_over_plain_auth_key(self) -> None:
         api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
         user_key = api.user_key_service.list_user_keys()[0]["key"]
