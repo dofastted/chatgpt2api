@@ -19,6 +19,7 @@ import {
   ImagePlus,
   LoaderCircle,
   MessageSquarePlus,
+  RotateCcw,
   Ruler,
   Trash2,
   X,
@@ -227,6 +228,23 @@ function getConversationTurns(conversation: ImageConversation | null | undefined
 function getLatestTurn(conversation: ImageConversation | null | undefined) {
   const turns = getConversationTurns(conversation);
   return turns[turns.length - 1] || null;
+}
+
+function getPreviousResponseIdForTurn(
+  conversation: ImageConversation | null | undefined,
+  turnId?: string,
+) {
+  const turns = getConversationTurns(conversation);
+  const endIndex = turnId
+    ? turns.findIndex((turn) => turn.id === turnId)
+    : turns.length;
+  const candidates = turns.slice(0, endIndex >= 0 ? endIndex : turns.length);
+  return (
+    [...candidates]
+      .reverse()
+      .map((turn) => String(turn.responseId || "").trim())
+      .find(Boolean) || undefined
+  );
 }
 
 function updateConversationTurn(
@@ -783,25 +801,40 @@ export default function ImagePage() {
     }
   };
 
-  const handleGenerateImage = async () => {
+  const handleGenerateImage = async (
+    retry?: {
+      conversation: ImageConversation;
+      turn: ImageConversationTurn;
+    },
+  ) => {
     if (!conversationScope) {
       toast.error("当前登录信息还在初始化，请稍后再试");
       return;
     }
-    const prompt = imagePrompt.trim();
-    const currentInputImage = inputImage;
+    const prompt = String(retry?.turn.prompt || imagePrompt).trim();
+    const currentInputImage = retry?.turn.inputImage || inputImage;
+    const targetModel = retry?.turn.model || imageModel;
+    const targetCount = Math.max(
+      1,
+      Math.min(MAX_IMAGES_PER_REQUEST, Number(retry?.turn.count || parsedCount) || 1),
+    );
+    const targetSize = String(retry?.turn.size || imageSize || "auto").trim() || "auto";
+    const targetUnitCost = Math.max(0, Number(effectivePricing[targetModel] || 0));
+    const targetRequestCost = targetCount * targetUnitCost;
     if (!prompt) {
       toast.error("请输入提示词");
       return;
     }
-    if (isQuotaInsufficient) {
-      toast.error(`当前额度不足，本次需要 ${requestCost} 额度`);
+    if (availableQuota !== null && targetRequestCost > Math.max(0, availableQuota)) {
+      toast.error(`当前额度不足，本次需要 ${targetRequestCost} 额度`);
       return;
     }
 
     const now = new Date().toISOString();
-    const existingConversation = selectedConversation;
-    const latestTurn = getLatestTurn(existingConversation);
+    const existingConversation = retry?.conversation || selectedConversation;
+    const previousResponseId = retry
+      ? getPreviousResponseIdForTurn(existingConversation, retry.turn.id)
+      : getLatestTurn(existingConversation)?.responseId;
     const conversationId =
       existingConversation?.clientConversationId ||
       currentInputImage?.clientConversationId ||
@@ -826,12 +859,12 @@ export default function ImagePage() {
     const draftTurn: ImageConversationTurn = {
       id: turnId,
       prompt,
-      model: imageModel,
-      count: parsedCount,
-      size: imageSize,
+      model: targetModel,
+      count: targetCount,
+      size: targetSize,
       copiedText: undefined,
       inputImage: draftInputImage,
-      images: Array.from({ length: parsedCount }, (_, index) => ({
+      images: Array.from({ length: targetCount }, (_, index) => ({
         id: `${turnId}-${index}`,
         status: "loading" as const,
       })),
@@ -859,20 +892,22 @@ export default function ImagePage() {
     }));
 
     setSelectedConversationId(conversationRecordId);
-    setImagePrompt("");
-    setInputImage(null);
+    if (!retry) {
+      setImagePrompt("");
+      setInputImage(null);
+    }
 
     try {
       activeGenerationKeys.add(activeGenerationKey);
       await persistConversation(draftConversation);
 
-      const data = await generateImage(prompt, imageModel, parsedCount, {
+      const data = await generateImage(prompt, targetModel, targetCount, {
         inputImageUrl: currentInputImage?.dataUrl,
         inputImageFileId: currentInputImage?.fileId,
         queueRequestId,
         clientConversationId: conversationId,
-        previousResponseId: latestTurn?.responseId,
-        size: imageSize,
+        previousResponseId,
+        size: targetSize,
       });
       const returnedItems = Array.isArray(data.data) ? data.data : [];
       if (data.billing) {
@@ -881,7 +916,7 @@ export default function ImagePage() {
         );
       }
       const nextImages: StoredImage[] = Array.from(
-        { length: parsedCount },
+        { length: targetCount },
         (_, index) => {
           const current = returnedItems[index];
           if (current?.b64_json) {
@@ -1292,8 +1327,28 @@ export default function ImagePage() {
                     ) : null}
 
                     {turn.status === "error" && turn.images.length === 0 ? (
-                      <div className="border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600">
-                        {turn.error || "生成失败"}
+                      <div className="flex flex-col gap-3 border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600 sm:flex-row sm:items-center sm:justify-between">
+                        <span>{turn.error || "生成失败"}</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={isComposerGenerating}
+                          onClick={() =>
+                            void handleGenerateImage({
+                              conversation: selectedConversation,
+                              turn,
+                            })
+                          }
+                          className="h-9 shrink-0 rounded-full border-rose-200 bg-white text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                        >
+                          {isComposerGenerating ? (
+                            <LoaderCircle className="size-4 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-4" />
+                          )}
+                          重试
+                        </Button>
                       </div>
                     ) : null}
 
@@ -1339,8 +1394,28 @@ export default function ImagePage() {
                     ) : null}
 
                     {turn.status === "error" && turn.images.length > 0 ? (
-                      <div className="border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
-                        {turn.error}
+                      <div className="flex flex-col gap-3 border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700 sm:flex-row sm:items-center sm:justify-between">
+                        <span>{turn.error}</span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={isComposerGenerating}
+                          onClick={() =>
+                            void handleGenerateImage({
+                              conversation: selectedConversation,
+                              turn,
+                            })
+                          }
+                          className="h-9 shrink-0 rounded-full border-amber-200 bg-white text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+                        >
+                          {isComposerGenerating ? (
+                            <LoaderCircle className="size-4 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-4" />
+                          )}
+                          重试
+                        </Button>
                       </div>
                     ) : null}
                   </div>
