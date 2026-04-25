@@ -23,8 +23,8 @@
 - Chat requirements token 在 `services/image_service.py:184` 获取。
 - 如果请求里带 `input_image.image_url`，会先抓取或解码图片；如果带 `input_image.file_id`，会先从 `services/uploaded_image_service.py:212` 读取本地已上传文件。
 - 本地上传入口是 `services/api.py:859` 到 `services/api.py:913`。前端图片页会先调用 `web/src/lib/api.ts:350` 到 `web/src/lib/api.ts:364` 上传图片，再在 `web/src/app/image/page.tsx:545` 到 `web/src/app/image/page.tsx:558` 把 `fileId` 保存到当前输入图状态。
-- 上传到 ChatGPT 上游的过程在 `services/image_service.py:760` 到 `services/image_service.py:840`。这里仍然使用上游的 `/backend-api/files` 和上传确认接口。
-- 组装会话消息时，文本只保留在 `services/image_service.py:843` 到 `services/image_service.py:884` 的 `content.parts`，图片只放在 `metadata.attachments`，不再把图片指针塞进 `content.parts`。
+- 上传到 ChatGPT 上游的过程在 `services/image_service.py`。预上传请求会带 `mime_type`，随后上传 blob，再调用上传确认接口。
+- Free/legacy 会话消息有输入图时使用 Studio 同款 `multimodal_text`，`content.parts` 同时包含文本和 `image_asset_pointer`，`metadata.attachments` 只作为附件索引保留。图片指针不能只放在 `metadata.attachments`，否则模型可能识别不到输入图。
 - Free 账号的 Images 路线优先请求上游 `/backend-api/f/conversation`，并带 `client_prepare_state=none` 与 `supported_encodings=["v1"]`。
 - Plus/Pro/Team 账号的 Responses 路线请求上游 `/backend-api/codex/responses`，顶层文本模型使用 `gpt-5.4-mini`，图片工具模型使用调用方请求的 `gpt-image-2`。
 - legacy 回退路线仍请求上游 `/backend-api/conversation`，可通过 `IMAGE_ROUTE_POLICY=legacy` 开启。

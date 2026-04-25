@@ -103,6 +103,7 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertEqual(uploaded.height, 1)
         self.assertEqual(session.post_calls[0][0], "https://chatgpt.com/backend-api/files")
         self.assertEqual(session.post_calls[0][1]["use_case"], "multimodal")
+        self.assertEqual(session.post_calls[0][1]["mime_type"], "image/png")
         self.assertEqual(session.put_calls[0][0], "https://upload.example.com/blob")
         self.assertEqual(session.put_calls[0][1], png_bytes)
         self.assertEqual(session.put_calls[0][2]["content-type"], "image/png")
@@ -129,8 +130,21 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             )
 
         self.assertEqual(message["author"]["role"], "user")
-        self.assertEqual(message["content"]["content_type"], "text")
-        self.assertEqual(message["content"]["parts"], ["edit this image"])
+        self.assertEqual(message["content"]["content_type"], "multimodal_text")
+        self.assertEqual(
+            message["content"]["parts"],
+            [
+                "edit this image",
+                {
+                    "content_type": "image_asset_pointer",
+                    "asset_pointer": "file-service://file-input-1",
+                    "size_bytes": 321,
+                    "mime_type": "image/png",
+                    "width": 512,
+                    "height": 256,
+                },
+            ],
+        )
         self.assertEqual(
             message["metadata"]["attachments"],
             [
@@ -144,6 +158,8 @@ class ImageServiceAttachmentTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(message["metadata"]["system_hints"], ["picture_v2"])
+        self.assertEqual(message["metadata"]["serialization_metadata"], {"custom_symbol_offsets": []})
         self.assertNotIn("attachments", message["content"])
 
     def test_build_uploaded_input_image_supports_local_file_id(self) -> None:

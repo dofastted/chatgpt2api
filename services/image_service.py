@@ -866,6 +866,7 @@ def _build_uploaded_input_image(
                 "file_name": file_name,
                 "file_size": len(image_bytes),
                 "use_case": "multimodal",
+                "mime_type": mime_type,
             },
             timeout=60,
         ),
@@ -941,6 +942,7 @@ def _build_conversation_message(
             "metadata": {"attachments": []},
         }
 
+    parts: list[object] = [prompt]
     attachments: list[dict[str, object]] = []
     for image in normalized_input_images:
         uploaded = _build_uploaded_input_image(
@@ -949,6 +951,18 @@ def _build_conversation_message(
             device_id,
             image,
         )
+        image_part: dict[str, object] = {
+            "content_type": "image_asset_pointer",
+            "asset_pointer": f"file-service://{uploaded.file_id}",
+            "size_bytes": uploaded.size_bytes,
+            "mime_type": uploaded.mime_type,
+        }
+        if uploaded.width is not None:
+            image_part["width"] = uploaded.width
+        if uploaded.height is not None:
+            image_part["height"] = uploaded.height
+        parts.append(image_part)
+
         attachment: dict[str, object] = {
             "id": uploaded.file_id,
             "name": uploaded.file_name,
@@ -964,8 +978,12 @@ def _build_conversation_message(
     return {
         "id": str(uuid.uuid4()),
         "author": {"role": "user"},
-        "content": {"content_type": "text", "parts": [prompt]},
-        "metadata": {"attachments": attachments},
+        "content": {"content_type": "multimodal_text", "parts": parts},
+        "metadata": {
+            "attachments": attachments,
+            "system_hints": ["picture_v2"],
+            "serialization_metadata": {"custom_symbol_offsets": []},
+        },
     }
 
 
