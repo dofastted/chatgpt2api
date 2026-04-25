@@ -70,18 +70,25 @@ import {
   type ImageResolutionPreset,
 } from "@/lib/image-size";
 
-const imageModelMeta: Record<ImageModel, { helperText: string }> = {
-  "gpt-image-1": {
-    helperText: "gpt-image-1 已下架。",
-  },
+const imageModelMeta: Record<ImageModel, { label: string; helperText: string }> = {
   "gpt-image-2": {
-    helperText: "当前直接走真实 gpt-image-2 生图链路。",
+    label: "基础",
+    helperText: "公开模型 gpt-image-2。",
+  },
+  "gpt-image-2-2K": {
+    label: "2K",
+    helperText: "按 gpt-image-2-2K 计费，上游仍走 gpt-image-2。",
+  },
+  "gpt-image-2-4K": {
+    label: "4K",
+    helperText: "按 gpt-image-2-4K 计费，上游仍走 gpt-image-2。",
   },
 };
 
 const DEFAULT_IMAGE_PRICING: Record<ImageModel, number> = {
-  "gpt-image-1": 0,
   "gpt-image-2": 2,
+  "gpt-image-2-2K": 2,
+  "gpt-image-2-4K": 2,
 };
 const MAX_IMAGES_PER_REQUEST = 2;
 const IMAGE_COUNT_OPTIONS = Array.from(
@@ -625,8 +632,15 @@ export default function ImagePage() {
       setAvailableQuota(Math.max(0, Number(data.available_quota || 0)));
       if (data.pricing) {
         setCurrentPricing({
-          "gpt-image-1": Math.max(0, Number(data.pricing["gpt-image-1"] || 0)),
-          "gpt-image-2": Math.max(0, Number(data.pricing["gpt-image-2"] || 0)),
+          "gpt-image-2": Math.max(0, Number(data.pricing["gpt-image-2"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2"])),
+          "gpt-image-2-2K": Math.max(
+            0,
+            Number(data.pricing["gpt-image-2-2K"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2-2K"]),
+          ),
+          "gpt-image-2-4K": Math.max(
+            0,
+            Number(data.pricing["gpt-image-2-4K"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2-4K"]),
+          ),
         });
       } else {
         setCurrentPricing(null);
@@ -964,7 +978,9 @@ export default function ImagePage() {
       const nextImages: StoredImage[] = Array.from(
         { length: targetCount },
         (_, index) => {
-          const current = returnedItems[index];
+          const current =
+            returnedItems.find((item) => item.index === index) ??
+            returnedItems.find((item) => item.index === undefined && returnedItems.indexOf(item) === index);
           if (current?.b64_json) {
             return {
               id: `${turnId}-${index}`,
@@ -975,10 +991,15 @@ export default function ImagePage() {
                 detectImageMimeType(current.b64_json),
             };
           }
+          const partialError = Array.isArray(data.partial_errors)
+            ? data.partial_errors.find((item) => item.index === index)
+            : undefined;
           return {
             id: `${turnId}-${index}`,
             status: "error",
-            error: `第 ${index + 1} 张没有返回图片数据`,
+            error:
+              String(partialError?.error || "").trim() ||
+              `第 ${index + 1} 张没有返回图片数据`,
           };
         },
       );
@@ -1587,15 +1608,14 @@ export default function ImagePage() {
                     Object.entries(imageModelMeta) as Array<
                       [ImageModel, (typeof imageModelMeta)[ImageModel]]
                     >
-                  )
-                    .filter(([model]) => model === "gpt-image-2")
-                    .map(([model]) => {
+                  ).map(([model, meta]) => {
                       const active = imageModel === model;
                       return (
                         <button
                           key={model}
                           type="button"
                           aria-pressed={active}
+                          title={meta.helperText}
                           onClick={() => setImageModel(model)}
                           className={cn(
                             "cursor-pointer rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/40",
@@ -1604,7 +1624,7 @@ export default function ImagePage() {
                               : "border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/18 hover:text-stone-100",
                           )}
                         >
-                          {model}
+                          {meta.label}
                         </button>
                       );
                     })}

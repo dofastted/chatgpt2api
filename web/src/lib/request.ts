@@ -7,15 +7,53 @@ type RequestConfig = AxiosRequestConfig & {
     redirectOnUnauthorized?: boolean;
 };
 
+type RequestOptions = {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+    redirectOnUnauthorized?: boolean;
+};
+
+type StreamRequestOptions = RequestOptions & {
+    body?: BodyInit | null;
+};
+
+type ErrorPayload = {
+    detail?: { error?: string } | Array<{ msg?: string }>;
+    error?: string;
+    message?: string;
+};
+
 const request = axios.create();
+
+function buildRequestHeaders(headers?: Record<string, string>, authKey?: string) {
+    const nextHeaders = {...(headers || {})};
+    if (authKey && !nextHeaders.Authorization) {
+        nextHeaders.Authorization = `Bearer ${authKey}`;
+    }
+    return nextHeaders;
+}
+
+function getPayloadErrorMessage(payload: ErrorPayload | undefined, fallback: string) {
+    const validationMessage = Array.isArray(payload?.detail)
+        ? payload.detail
+              .map((item) => String(item?.msg || "").trim())
+              .filter(Boolean)
+              .join("；")
+        : "";
+    return (
+        (!Array.isArray(payload?.detail) ? payload?.detail?.error : "") ||
+        validationMessage ||
+        payload?.error ||
+        payload?.message ||
+        fallback
+    );
+}
 
 request.interceptors.request.use(async (config) => {
     const nextConfig = {...config};
     const authKey = await getStoredAuthKey();
-    const headers = {...(nextConfig.headers || {})} as Record<string, string>;
-    if (authKey && !headers.Authorization) {
-        headers.Authorization = `Bearer ${authKey}`;
-    }
+    const headers = buildRequestHeaders(nextConfig.headers as Record<string, string> | undefined, authKey);
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-expect-error
     nextConfig.headers = headers;
@@ -39,29 +77,10 @@ request.interceptors.response.use(
         }
 
         const payload = error.response?.data;
-        const validationMessage = Array.isArray(payload?.detail)
-            ? payload.detail
-                  .map((item) => String(item?.msg || "").trim())
-                  .filter(Boolean)
-                  .join("；")
-            : "";
-        const message =
-            (!Array.isArray(payload?.detail) ? payload?.detail?.error : "") ||
-            validationMessage ||
-            payload?.error ||
-            payload?.message ||
-            error.message ||
-            `请求失败 (${status || 500})`;
+        const message = getPayloadErrorMessage(payload, error.message || `请求失败 (${status || 500})`);
         return Promise.reject(new Error(message));
     },
 );
-
-type RequestOptions = {
-    method?: string;
-    body?: unknown;
-    headers?: Record<string, string>;
-    redirectOnUnauthorized?: boolean;
-};
 
 export async function httpRequest<T>(path: string, options: RequestOptions = {}) {
     const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
@@ -75,4 +94,32 @@ export async function httpRequest<T>(path: string, options: RequestOptions = {})
     };
     const response = await request.request<T>(config);
     return response.data;
+}
+
+export async function httpStreamRequest(path: string, options: StreamRequestOptions = {}) {
+    const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
+    const authKey = await getStoredAuthKey();
+    const response = await fetch(`${webConfig.apiUrl.replace(/\/$/, "")}${path}`, {
+        method,
+        headers: buildRequestHeaders(headers, authKey),
+        body,
+    });
+
+    if (response.status === 401 && redirectOnUnauthorized && typeof window !== "undefined") {
+        await clearStoredAuthKey();
+        window.location.href = "/login";
+    }
+
+    if (!response.ok) {
+        const fallback = `请求失败 (${response.status || 500})`;
+        let payload: ErrorPayload | undefined;
+        try {
+            payload = (await response.json()) as ErrorPayload;
+        } catch {
+            throw new Error(fallback);
+        }
+        throw new Error(getPayloadErrorMessage(payload, fallback));
+    }
+
+    return response;
 }

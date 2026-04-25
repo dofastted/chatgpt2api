@@ -121,7 +121,7 @@ class ChatImageMigrationTests(unittest.TestCase):
 
     def test_route_selector_uses_images_for_free_and_responses_for_paid(self) -> None:
         self.assertEqual(select_image_route(account={"type": "Free"}), "images")
-        self.assertEqual(select_image_route(account={"type": "Free"}, has_input_image=True), "responses")
+        self.assertEqual(select_image_route(account={"type": "Free"}, has_input_image=True), "images_edit")
         self.assertEqual(select_image_route(account={"type": "Plus"}), "responses")
         self.assertEqual(select_image_route(account={"type": "Team"}, has_input_image=True), "responses")
 
@@ -136,7 +136,7 @@ class ChatImageMigrationTests(unittest.TestCase):
     def test_backend_service_passes_plan_route_to_gateway(self) -> None:
         cases = [
             ("Free", None, "images"),
-            ("Free", [{"image_url": "data:image/png;base64,aW1n"}], "responses"),
+            ("Free", [{"image_url": "data:image/png;base64,aW1n"}], "images_edit"),
             ("Plus", None, "responses"),
             ("Pro", None, "responses"),
             ("Team", [{"image_url": "data:image/png;base64,aW1n"}], "responses"),

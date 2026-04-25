@@ -12,7 +12,7 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 - 失效 Token 自动剔除
 - 提供 Web 后台管理账号和生成图片
 - 支持 `user key` 直调图片接口，并按每个 key 自己的模型单价扣减次数
-- 当前公开生图模型只保留 `gpt-image-2`
+- 当前公开生图模型为 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`
 - 支持兑换码；管理员可生成 `20` 或 `100` 额度兑换码，用户 key 兑换后会直接增加额度
 - 后台管理页已改成 tab 布局，账号池、用户 key、兑换码分开管理
 - 支持本地参考图上传，上传记录按当前 Bearer Token 隔离保存
@@ -37,7 +37,7 @@ Authorization: Bearer <auth-key>
 
 - `auth-key`：普通使用
 - `admin-auth-key`：后台管理
-- `user key`：普通调用，但有自己独立的剩余次数和模型单价；当前默认是 `gpt-image-1=0`、`gpt-image-2=2`
+- `user key`：普通调用，但有自己独立的剩余次数和模型单价；当前默认是 `gpt-image-2=2`、`gpt-image-2-2K=2`、`gpt-image-2-4K=2`
 
 前端购买与兑换：
 
@@ -66,7 +66,7 @@ POST /v1/images/generations
 
 说明：
 
-- `model` 当前只支持 `gpt-image-2`
+- `model` 当前支持 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`；三个公开模型发往 ChatGPT 上游时都使用 `gpt-image-2`
 - `size` 默认 `auto`；传 `WIDTHxHEIGHT` 时会按 16 的倍数向下规整
 - `user key` 调用时，实际扣费 = 当前 key 的模型单价 × `n`
 - 响应会额外返回 `billing`，包含本次模型、单价、实际扣减次数和剩余次数
@@ -94,7 +94,7 @@ POST /v1/responses
 - 支持文本输入生图，也支持文本加 1 张 `input_image`
 - 顶层 `model` 按 OpenAI 官方格式应传文本模型，比如 `gpt-5`、`gpt-5.4`
 - `input_image` 支持两种写法：`image_url` 只接受 `http(s)` 或 `data:image/*`，`file_id` 对应本地上传接口返回的文件标识
-- 图片模型放在 `tools[].model`，当前只支持 `gpt-image-2`；如果没传，默认按 `gpt-image-2` 处理
+- 图片模型放在 `tools[].model`，当前支持 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`；如果没传，默认按 `gpt-image-2` 处理，三个公开模型发往 ChatGPT 上游时都使用 `gpt-image-2`
 - 图片尺寸放在 `tools[].size`，默认 `auto`；非 `auto` 会规整后传给上游
 - 支持 `previous_response_id` 指向本服务生成过的 response，用于带入最近历史文本上下文；找不到会返回 `404`
 - `n` 最多 2
@@ -117,10 +117,10 @@ POST /v1/images/edits
 说明：
 
 - 接收 `multipart/form-data`，字段包含 `prompt`、`image`，可选 `model`、`n`、`response_format`、`size` 和 `stream`
-- `model` 当前只支持 `gpt-image-2`
+- `model` 当前支持 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`；三个公开模型发往 ChatGPT 上游时都使用 `gpt-image-2`
 - 当前实现会把上传图片转为输入图，再走同一套队列、账号池、上游请求和用户 key 计费规则
 
-前端图片页现在会先把参考图上传到本地接口，再在 `/v1/responses` 里提交 `input_image.file_id`。本地历史仍保留缩略图预览和 `fileId`，刷新页面后还能区分输入图和生成结果。同一页面里切到别的会话时，正在生成的结果也会继续写回原会话。如果上游页面返回了可复制文本，前端会把这段文本保存到当前会话，并提供复制按钮。
+前端图片页现在会先把参考图上传到本地接口，再在 `/v1/responses` 里提交 `input_image.file_id`。本地历史仍保留缩略图预览和 `fileId`，刷新页面后还能区分输入图和生成结果。同一页面里切到别的会话时，正在生成的结果也会继续写回原会话。如果上游页面返回了可复制文本，前端会把这段文本保存到当前会话，并提供复制按钮。前端画图页会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。
 
 当前暂不支持：
 

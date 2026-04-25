@@ -14,10 +14,11 @@ from services.config import config
 class UserKeyService:
     ENABLED_STATUS = "启用"
     DISABLED_STATUS = "停用"
-    SUPPORTED_MODELS = ("gpt-image-1", "gpt-image-2")
+    SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K")
     DEFAULT_PRICING = {
-        "gpt-image-1": 0,
         "gpt-image-2": 2,
+        "gpt-image-2-2K": 2,
+        "gpt-image-2-4K": 2,
     }
 
     def __init__(self, store_file: Path):

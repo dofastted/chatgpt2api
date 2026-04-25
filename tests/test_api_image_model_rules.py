@@ -85,10 +85,15 @@ class ApiImageModelRuleTests(unittest.TestCase):
         item = service.get_user_key("legacy-key")
         self.assertIsNotNone(item)
         assert item is not None
-        self.assertEqual(item["pricing"], {"gpt-image-1": 0, "gpt-image-2": 2})
+        self.assertEqual(
+            item["pricing"],
+            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 2},
+        )
 
-    def test_normalize_requested_image_model_only_allows_image_2(self) -> None:
+    def test_normalize_requested_image_model_allows_public_image_2_variants(self) -> None:
         self.assertEqual(api.normalize_requested_image_model("gpt-image-2"), "gpt-image-2")
+        self.assertEqual(api.normalize_requested_image_model("gpt-image-2-2K"), "gpt-image-2-2K")
+        self.assertEqual(api.normalize_requested_image_model("gpt-image-2-4K"), "gpt-image-2-4K")
         with self.assertRaises(api.HTTPException) as raised:
             api.normalize_requested_image_model("gpt-image-1")
 

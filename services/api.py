@@ -46,7 +46,7 @@ FREE_DONATION_REWARD_LDC = 20
 PURCHASE_QUOTA_PER_ORDER = 20
 PURCHASE_LDC_COST_PER_ORDER = 20
 DEFAULT_USER_KEY_PRICING = dict(user_key_service.DEFAULT_PRICING)
-ENABLED_IMAGE_MODELS = ("gpt-image-2",)
+ENABLED_IMAGE_MODELS = ("gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K")
 MAX_IMAGES_PER_REQUEST = 2
 DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
@@ -56,15 +56,17 @@ RESPONSES_STORE_LOCK = Lock()
 
 
 class UserKeyPricingRequest(BaseModel):
-    gpt_image_1: int = Field(default=0, ge=0, alias="gpt-image-1")
     gpt_image_2: int = Field(default=2, ge=0, alias="gpt-image-2")
+    gpt_image_2_2k: int = Field(default=2, ge=0, alias="gpt-image-2-2K")
+    gpt_image_2_4k: int = Field(default=2, ge=0, alias="gpt-image-2-4K")
 
     model_config = {"populate_by_name": True}
 
     def to_pricing_dict(self) -> dict[str, int]:
         return {
-            "gpt-image-1": int(self.gpt_image_1),
             "gpt-image-2": int(self.gpt_image_2),
+            "gpt-image-2-2K": int(self.gpt_image_2_2k),
+            "gpt-image-2-4K": int(self.gpt_image_2_4k),
         }
 
 
@@ -1264,7 +1266,8 @@ def create_app() -> FastAPI:
         return {
             "object": "list",
             "data": [
-                build_model_item(DEFAULT_IMAGE_MODEL, image_tool_model=DEFAULT_IMAGE_MODEL),
+                build_model_item(model, image_tool_model=model)
+                for model in ENABLED_IMAGE_MODELS
             ],
         }
 

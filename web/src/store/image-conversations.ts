@@ -80,6 +80,16 @@ const IMAGE_CONVERSATIONS_KEY_PREFIX = "items";
 const IMAGE_PREFERENCE_KEY_PREFIX = "generation_preference";
 const IMAGE_CONVERSATIONS_DEFAULT_SCOPE = "__anonymous__";
 const conversationWriteQueues = new Map<string, Promise<void>>();
+const VALID_IMAGE_MODELS = new Set<ImageModel>([
+  "gpt-image-2",
+  "gpt-image-2-2K",
+  "gpt-image-2-4K",
+]);
+
+function normalizeImageModel(value: unknown): ImageModel {
+  const normalized = String(value || "").trim() as ImageModel;
+  return VALID_IMAGE_MODELS.has(normalized) ? normalized : "gpt-image-2";
+}
 
 function normalizeConversationScope(scope: string): string {
   const normalized = String(scope || "").trim();
@@ -161,7 +171,7 @@ function normalizeTurn(turn: ImageConversationTurn, fallbackId: string): ImageCo
     ...turn,
     id: String(turn.id || fallbackId || "").trim() || `turn-${Date.now()}`,
     prompt: String(turn.prompt || "").trim(),
-    model: (turn.model || "gpt-image-2") as ImageModel,
+    model: normalizeImageModel(turn.model),
     count: Math.max(1, Number(turn.count || 1)),
     size: String(turn.size || "auto").trim() || "auto",
     copiedText: String(turn.copiedText || "").trim() || undefined,
@@ -182,7 +192,7 @@ function legacyConversationToTurn(conversation: ImageConversation): ImageConvers
     {
       id: `${conversation.id}-turn-1`,
       prompt: String(conversation.prompt || "").trim(),
-      model: (conversation.model || "gpt-image-2") as ImageModel,
+      model: normalizeImageModel(conversation.model),
       count: Math.max(1, Number(conversation.count || 1)),
       size: String(conversation.size || "auto").trim() || "auto",
       copiedText: conversation.copiedText,

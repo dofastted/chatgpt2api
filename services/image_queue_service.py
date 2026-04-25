@@ -25,11 +25,14 @@ class ImageQueueTicket:
 class ImageQueueService:
     PER_USER_WAIT_LIMIT = 10
     GLOBAL_WAIT_LIMIT = 2000
+    GLOBAL_START_LIMIT = 60
+    GLOBAL_START_WINDOW_SECONDS = 60.0
     RECENT_TTL_SECONDS = 600
 
     def __init__(self) -> None:
         self._condition = Condition()
         self._waiting_order: deque[str] = deque()
+        self._start_timestamps: deque[float] = deque()
         self._tickets: dict[str, ImageQueueTicket] = {}
         self._recent: dict[str, ImageQueueTicket] = {}
         self._user_waiting: dict[str, int] = {}
@@ -59,6 +62,20 @@ class ImageQueueService:
         ]
         for request_id in expired:
             self._recent.pop(request_id, None)
+
+    def _cleanup_start_timestamps_locked(self, now_value: float | None = None) -> None:
+        current_time = time() if now_value is None else now_value
+        cutoff = current_time - float(self.GLOBAL_START_WINDOW_SECONDS)
+        while self._start_timestamps and self._start_timestamps[0] <= cutoff:
+            self._start_timestamps.popleft()
+
+    def _global_start_wait_seconds_locked(self, now_value: float | None = None) -> float:
+        current_time = time() if now_value is None else now_value
+        self._cleanup_start_timestamps_locked(current_time)
+        if len(self._start_timestamps) < int(self.GLOBAL_START_LIMIT):
+            return 0.0
+        earliest = self._start_timestamps[0]
+        return max(0.0, earliest + float(self.GLOBAL_START_WINDOW_SECONDS) - current_time)
 
     def _decrement_user_waiting_locked(self, auth_token: str) -> None:
         current = max(0, int(self._user_waiting.get(auth_token) or 0) - 1)
@@ -106,11 +123,16 @@ class ImageQueueService:
                 if ticket is None:
                     raise RuntimeError("image queue ticket was not found")
                 if self._waiting_order and self._waiting_order[0] == normalized_request_id:
+                    wait_seconds = self._global_start_wait_seconds_locked()
+                    if wait_seconds > 0:
+                        self._condition.wait(timeout=min(wait_seconds, 1.0))
+                        continue
                     self._waiting_order.popleft()
                     self._decrement_user_waiting_locked(ticket.auth_token)
                     ticket.status = "assigning_account"
                     ticket.started_at = time()
                     ticket.updated_at = ticket.started_at
+                    self._start_timestamps.append(ticket.started_at)
                     self._user_running[ticket.auth_token] = int(self._user_running.get(ticket.auth_token) or 0) + 1
                     self._global_running += 1
                     self._condition.notify_all()
@@ -158,6 +180,7 @@ class ImageQueueService:
     def clear(self) -> None:
         with self._condition:
             self._waiting_order.clear()
+            self._start_timestamps.clear()
             self._tickets.clear()
             self._recent.clear()
             self._user_waiting.clear()
@@ -169,7 +192,10 @@ class ImageQueueService:
         normalized_auth_token = self._clean_text(auth_token) or "__anonymous__"
         normalized_request_id = self._clean_text(request_id)
         with self._condition:
+            now_value = time()
             self._cleanup_recent_locked()
+            self._cleanup_start_timestamps_locked(now_value)
+            start_wait_seconds = self._global_start_wait_seconds_locked(now_value)
             waiting_positions = {item_id: index + 1 for index, item_id in enumerate(self._waiting_order)}
             active_items = [
                 ticket
@@ -192,6 +218,8 @@ class ImageQueueService:
                 "limits": {
                     "per_user_waiting": self.PER_USER_WAIT_LIMIT,
                     "global_waiting": self.GLOBAL_WAIT_LIMIT,
+                    "global_starts_per_window": self.GLOBAL_START_LIMIT,
+                    "global_start_window_seconds": self.GLOBAL_START_WINDOW_SECONDS,
                 },
                 "user": {
                     "waiting": int(self._user_waiting.get(normalized_auth_token) or 0),
@@ -200,6 +228,8 @@ class ImageQueueService:
                 "global": {
                     "waiting": len(self._waiting_order),
                     "running": self._global_running,
+                    "starts_in_window": len(self._start_timestamps),
+                    "start_wait_seconds": round(start_wait_seconds, 3),
                 },
                 "request": self._serialize_ticket(request_ticket, waiting_positions),
                 "items": [self._serialize_ticket(ticket, waiting_positions) for ticket in items],

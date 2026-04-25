@@ -145,8 +145,9 @@ const metricCards = [
 ] as const;
 
 const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
-  "gpt-image-1": 0,
   "gpt-image-2": 2,
+  "gpt-image-2-2K": 2,
+  "gpt-image-2-4K": 2,
 };
 
 const ADMIN_SECONDARY_PAGE_SIZE = 10;
@@ -226,19 +227,24 @@ function formatDateTime(value?: string | null) {
 }
 
 function buildUserKeyPricing(
-  gptImage1: string,
   gptImage2: string,
+  gptImage2K: string,
+  gptImage4K: string,
 ): UserKeyPricing {
-  void gptImage1;
   return {
-    "gpt-image-1": 0,
     "gpt-image-2": Math.max(0, Number(gptImage2 || 0)),
+    "gpt-image-2-2K": Math.max(0, Number(gptImage2K || 0)),
+    "gpt-image-2-4K": Math.max(0, Number(gptImage4K || 0)),
   };
 }
 
 function formatUserKeyPricing(pricing?: UserKeyPricing | null) {
-  const resolved = pricing || DEFAULT_USER_KEY_PRICING;
-  return `gpt-image-2: ${formatQuota(resolved["gpt-image-2"])}`;
+  const resolved = { ...DEFAULT_USER_KEY_PRICING, ...(pricing || {}) };
+  return [
+    `gpt-image-2: ${formatQuota(resolved["gpt-image-2"])}`,
+    `2K: ${formatQuota(resolved["gpt-image-2-2K"])}`,
+    `4K: ${formatQuota(resolved["gpt-image-2-4K"])}`,
+  ].join(" / ");
 }
 
 function maskToken(token?: string, visibleStart = 16, visibleEnd = 8) {
@@ -348,22 +354,28 @@ export default function AccountsPage() {
   const [newUserKeyLabelPrefix, setNewUserKeyLabelPrefix] = useState("");
   const [newUserKeyCount, setNewUserKeyCount] = useState("5");
   const [newUserKeyQuota, setNewUserKeyQuota] = useState("20");
-  const [newUserKeyPriceImage1, setNewUserKeyPriceImage1] = useState(
-    String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]),
-  );
   const [newUserKeyPriceImage2, setNewUserKeyPriceImage2] = useState(
     String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]),
+  );
+  const [newUserKeyPriceImage2K, setNewUserKeyPriceImage2K] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-2-2K"]),
+  );
+  const [newUserKeyPriceImage4K, setNewUserKeyPriceImage4K] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-2-4K"]),
   );
   const [editUserKeyLabel, setEditUserKeyLabel] = useState("");
   const [editUserKeyQuota, setEditUserKeyQuota] = useState("0");
   const [editUserKeyLdcBalance, setEditUserKeyLdcBalance] = useState("0");
   const [editUserKeyStatus, setEditUserKeyStatus] =
     useState<UserKeyStatus>("启用");
-  const [editUserKeyPriceImage1, setEditUserKeyPriceImage1] = useState(
-    String(DEFAULT_USER_KEY_PRICING["gpt-image-1"]),
-  );
   const [editUserKeyPriceImage2, setEditUserKeyPriceImage2] = useState(
     String(DEFAULT_USER_KEY_PRICING["gpt-image-2"]),
+  );
+  const [editUserKeyPriceImage2K, setEditUserKeyPriceImage2K] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-2-2K"]),
+  );
+  const [editUserKeyPriceImage4K, setEditUserKeyPriceImage4K] = useState(
+    String(DEFAULT_USER_KEY_PRICING["gpt-image-2-4K"]),
   );
   const [batchEditUserKeyQuota, setBatchEditUserKeyQuota] = useState("");
   const [batchEditUserKeyLdcBalance, setBatchEditUserKeyLdcBalance] =
@@ -372,6 +384,10 @@ export default function AccountsPage() {
     "unchanged" | UserKeyStatus
   >("unchanged");
   const [batchEditUserKeyPriceImage2, setBatchEditUserKeyPriceImage2] =
+    useState("");
+  const [batchEditUserKeyPriceImage2K, setBatchEditUserKeyPriceImage2K] =
+    useState("");
+  const [batchEditUserKeyPriceImage4K, setBatchEditUserKeyPriceImage4K] =
     useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -1039,8 +1055,10 @@ export default function AccountsPage() {
     setEditUserKeyQuota(String(userKey.quota));
     setEditUserKeyLdcBalance(String(userKey.ldcBalance || 0));
     setEditUserKeyStatus(userKey.status);
-    setEditUserKeyPriceImage1(String(userKey.pricing["gpt-image-1"]));
-    setEditUserKeyPriceImage2(String(userKey.pricing["gpt-image-2"]));
+    const pricing = { ...DEFAULT_USER_KEY_PRICING, ...(userKey.pricing || {}) };
+    setEditUserKeyPriceImage2(String(pricing["gpt-image-2"]));
+    setEditUserKeyPriceImage2K(String(pricing["gpt-image-2-2K"]));
+    setEditUserKeyPriceImage4K(String(pricing["gpt-image-2-4K"]));
   };
 
   const openUserKeyExportDialog = (
@@ -1074,8 +1092,9 @@ export default function AccountsPage() {
         prefix: newUserKeyPrefix.trim() || undefined,
         label_prefix: newUserKeyLabelPrefix.trim() || undefined,
         pricing: buildUserKeyPricing(
-          newUserKeyPriceImage1,
           newUserKeyPriceImage2,
+          newUserKeyPriceImage2K,
+          newUserKeyPriceImage4K,
         ),
       });
       setUserKeys(data.items);
@@ -1142,8 +1161,9 @@ export default function AccountsPage() {
         ldc_balance: Math.max(0, Number(editUserKeyLdcBalance || 0)),
         status: editUserKeyStatus,
         pricing: buildUserKeyPricing(
-          editUserKeyPriceImage1,
           editUserKeyPriceImage2,
+          editUserKeyPriceImage2K,
+          editUserKeyPriceImage4K,
         ),
       });
       setUserKeys(data.items);
@@ -1163,6 +1183,8 @@ export default function AccountsPage() {
     setBatchEditUserKeyLdcBalance("");
     setBatchEditUserKeyStatus("unchanged");
     setBatchEditUserKeyPriceImage2("");
+    setBatchEditUserKeyPriceImage2K("");
+    setBatchEditUserKeyPriceImage4K("");
   };
 
   const handleBatchUpdateUserKeys = async () => {
@@ -1175,8 +1197,8 @@ export default function AccountsPage() {
       quota?: number;
       ldc_balance?: number;
       status?: UserKeyStatus;
-      pricing?: UserKeyPricing;
     } = {};
+    const pricingOverrides: Partial<UserKeyPricing> = {};
 
     if (batchEditUserKeyQuota.trim() !== "") {
       updates.quota = Math.max(0, Number(batchEditUserKeyQuota || 0));
@@ -1191,10 +1213,16 @@ export default function AccountsPage() {
       updates.status = batchEditUserKeyStatus;
     }
     if (batchEditUserKeyPriceImage2.trim() !== "") {
-      updates.pricing = buildUserKeyPricing("0", batchEditUserKeyPriceImage2);
+      pricingOverrides["gpt-image-2"] = Math.max(0, Number(batchEditUserKeyPriceImage2 || 0));
+    }
+    if (batchEditUserKeyPriceImage2K.trim() !== "") {
+      pricingOverrides["gpt-image-2-2K"] = Math.max(0, Number(batchEditUserKeyPriceImage2K || 0));
+    }
+    if (batchEditUserKeyPriceImage4K.trim() !== "") {
+      pricingOverrides["gpt-image-2-4K"] = Math.max(0, Number(batchEditUserKeyPriceImage4K || 0));
     }
 
-    if (Object.keys(updates).length === 0) {
+    if (Object.keys(updates).length === 0 && Object.keys(pricingOverrides).length === 0) {
       toast.error("请至少填写一项批量修改内容");
       return;
     }
@@ -1202,7 +1230,20 @@ export default function AccountsPage() {
     setIsUpdatingUserKey(true);
     try {
       await Promise.all(
-        selectedUserKeys.map((item) => updateUserKey(item.key, updates)),
+        selectedUserKeys.map((item) =>
+          updateUserKey(item.key, {
+            ...updates,
+            ...(Object.keys(pricingOverrides).length > 0
+              ? {
+                  pricing: {
+                    ...DEFAULT_USER_KEY_PRICING,
+                    ...(item.pricing || {}),
+                    ...pricingOverrides,
+                  },
+                }
+              : {}),
+          }),
+        ),
       );
       await loadUserKeys(true);
       setBulkEditUserKeysOpen(false);
@@ -1602,21 +1643,7 @@ export default function AccountsPage() {
                 className="h-11 rounded-xl border-stone-200 bg-white"
               />
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">
-                  gpt-image-1
-                </label>
-                <Input
-                  value={editUserKeyPriceImage1}
-                  onChange={(event) =>
-                    setEditUserKeyPriceImage1(event.target.value)
-                  }
-                  disabled
-                  className="h-11 rounded-xl border-stone-200 bg-white"
-                />
-                <p className="text-xs text-stone-400">已下架，固定为 0。</p>
-              </div>
+            <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-stone-700">
                   gpt-image-2 单价
@@ -1625,6 +1652,30 @@ export default function AccountsPage() {
                   value={editUserKeyPriceImage2}
                   onChange={(event) =>
                     setEditUserKeyPriceImage2(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2-2K 单价
+                </label>
+                <Input
+                  value={editUserKeyPriceImage2K}
+                  onChange={(event) =>
+                    setEditUserKeyPriceImage2K(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2-4K 单价
+                </label>
+                <Input
+                  value={editUserKeyPriceImage4K}
+                  onChange={(event) =>
+                    setEditUserKeyPriceImage4K(event.target.value)
                   }
                   className="h-11 rounded-xl border-stone-200 bg-white"
                 />
@@ -1792,6 +1843,32 @@ export default function AccountsPage() {
                   value={batchEditUserKeyPriceImage2}
                   onChange={(event) =>
                     setBatchEditUserKeyPriceImage2(event.target.value)
+                  }
+                  placeholder="留空不改"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2-2K 单价
+                </label>
+                <Input
+                  value={batchEditUserKeyPriceImage2K}
+                  onChange={(event) =>
+                    setBatchEditUserKeyPriceImage2K(event.target.value)
+                  }
+                  placeholder="留空不改"
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2-4K 单价
+                </label>
+                <Input
+                  value={batchEditUserKeyPriceImage4K}
+                  onChange={(event) =>
+                    setBatchEditUserKeyPriceImage4K(event.target.value)
                   }
                   placeholder="留空不改"
                   className="h-11 rounded-xl border-stone-200 bg-white"
@@ -2730,22 +2807,6 @@ export default function AccountsPage() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium text-stone-700">
-                  gpt-image-1
-                </label>
-                <Input
-                  type="number"
-                  min="0"
-                  value={newUserKeyPriceImage1}
-                  onChange={(event) =>
-                    setNewUserKeyPriceImage1(event.target.value)
-                  }
-                  disabled
-                  className="h-11 rounded-xl border-stone-200 bg-white"
-                />
-                <p className="text-xs text-stone-400">已下架，固定为 0。</p>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">
                   gpt-image-2 单价
                 </label>
                 <Input
@@ -2754,6 +2815,34 @@ export default function AccountsPage() {
                   value={newUserKeyPriceImage2}
                   onChange={(event) =>
                     setNewUserKeyPriceImage2(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2-2K 单价
+                </label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={newUserKeyPriceImage2K}
+                  onChange={(event) =>
+                    setNewUserKeyPriceImage2K(event.target.value)
+                  }
+                  className="h-11 rounded-xl border-stone-200 bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-stone-700">
+                  gpt-image-2-4K 单价
+                </label>
+                <Input
+                  type="number"
+                  min="0"
+                  value={newUserKeyPriceImage4K}
+                  onChange={(event) =>
+                    setNewUserKeyPriceImage4K(event.target.value)
                   }
                   className="h-11 rounded-xl border-stone-200 bg-white"
                 />

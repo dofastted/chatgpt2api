@@ -35,6 +35,7 @@
 
 - `llmdoc/memory/decisions/` 留给后续设计决策。
 - `llmdoc/memory/reflections/` 留给后续任务回顾。
+- `llmdoc/memory/reflections/2026-04-26-cherry-image-api-compat.md` 记录 Cherry Studio 图片 API 兼容、`response_format=url` 和 HTTP 图片 URL 的验证要点。
 - `llmdoc/memory/reflections/2026-04-25-main-worktree-data-handoff.md` 记录主工作树接管、运行数据合并和迁移 worktree 归档规则。
 
 ## 临时调查
