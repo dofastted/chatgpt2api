@@ -13,5 +13,6 @@ data
 data-migration
 .llmdoc-tmp
 config.json
+acc/
 
 docker-compose-local.yml
