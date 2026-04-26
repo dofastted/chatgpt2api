@@ -1,6 +1,6 @@
 # account-pool-and-refresh
 
-账号池由 `services/account_service.py:17` 的 `AccountService` 管理，数据常驻内存，修改后再写回文件。
+账号池由 `services/account_service.py:17` 的 `AccountService` 管理，数据常驻内存，修改后写入 SQLite 文档。旧 `data/accounts.json` 只在 SQLite 对应文档为空时导入。
 
 核心规则：
 
@@ -8,7 +8,7 @@
 - 所有账号最终都会规范成统一字段集合，见 `services/account_service.py:117`。
 - 账号现在带 `category`，只接受“普通”和“捐赠”两类，默认是“普通”，规范化逻辑也在 `services/account_service.py:117`。
 - 纯 token 或只带 auth 产物字段的 JSON 导入，会被标成 `needs_refresh=true`。这类账号即使当前 `quota=0`，也允许进入下一轮选号，再由请求前刷新补全真实额度，逻辑在 `services/account_service.py:57`、`services/account_service.py:147`、`services/account_service.py:355`。
-- 写回文件只走 `services/account_service.py:161`，不要绕开它手动改结构。
+- 写回只走 `services/account_service.py` 的保存方法，最终进入 `services/sqlite_store.py`。不要绕开服务手动改结构。
 
 增删改查：
 

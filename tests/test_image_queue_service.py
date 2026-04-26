@@ -24,11 +24,22 @@ class ImageQueueServiceTests(unittest.TestCase):
         self.assertEqual(running.status, "assigning_account")
         snapshot = self.service.snapshot("user-1", request_id="req-2")
         self.assertEqual(snapshot["request"]["position"], 1)
-        self.assertEqual(snapshot["user"], {"waiting": 1, "running": 1})
+        self.assertEqual(snapshot["user"], {"waiting": 1, "running": 1, "active": 2})
 
     def test_per_user_waiting_limit_rejects_extra_request(self) -> None:
+        self.service.PER_USER_ACTIVE_LIMIT = self.service.PER_USER_WAIT_LIMIT + 1
         for index in range(self.service.PER_USER_WAIT_LIMIT):
             self.service.create_ticket("user-1", f"req-{index}")
+
+        with self.assertRaises(ValueError):
+            self.service.create_ticket("user-1", "overflow")
+
+    def test_per_user_active_limit_counts_waiting_and_running(self) -> None:
+        self.service.PER_USER_ACTIVE_LIMIT = 2
+        self.service.PER_USER_WAIT_LIMIT = 10
+        self.service.create_ticket("user-1", "req-1")
+        self.service.wait_for_turn("req-1")
+        self.service.create_ticket("user-1", "req-2")
 
         with self.assertRaises(ValueError):
             self.service.create_ticket("user-1", "overflow")
@@ -47,12 +58,12 @@ class ImageQueueServiceTests(unittest.TestCase):
         self.service.mark_status("req-1", "running")
 
         running_snapshot = self.service.snapshot("user-1", request_id="req-1")
-        self.assertEqual(running_snapshot["user"], {"waiting": 0, "running": 1})
+        self.assertEqual(running_snapshot["user"], {"waiting": 0, "running": 1, "active": 1})
         self.assertEqual(running_snapshot["request"]["status"], "running")
 
         self.service.finish_ticket("req-1")
         finished_snapshot = self.service.snapshot("user-1", request_id="req-1")
-        self.assertEqual(finished_snapshot["user"], {"waiting": 0, "running": 0})
+        self.assertEqual(finished_snapshot["user"], {"waiting": 0, "running": 0, "active": 0})
         self.assertEqual(finished_snapshot["request"]["status"], "finished")
 
     def test_global_start_limit_keeps_extra_requests_waiting(self) -> None:

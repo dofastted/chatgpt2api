@@ -18,9 +18,11 @@ from services.image_service import ImageGenerationError
 class FakeRouteAccountService:
     def __init__(self, account_type: str) -> None:
         self.account_type = account_type
+        self.prefer_input_image_values: list[bool] = []
 
-    def next_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def next_token(self, excluded_tokens: set[str] | None = None, *, prefer_input_image: bool = False) -> str:
         del excluded_tokens
+        self.prefer_input_image_values.append(prefer_input_image)
         return "token-1"
 
     def get_account(self, access_token: str) -> dict | None:
@@ -119,10 +121,10 @@ class ChatImageMigrationTests(unittest.TestCase):
         self.assertEqual(accounts[0]["proxy_key"], "proxy-a")
         self.assertEqual(accounts[0]["model_mapping"], {"x": "y"})
 
-    def test_route_selector_uses_images_for_free_and_responses_for_paid(self) -> None:
+    def test_route_selector_uses_images_for_text_only_and_responses_for_paid_input_images(self) -> None:
         self.assertEqual(select_image_route(account={"type": "Free"}), "images")
         self.assertEqual(select_image_route(account={"type": "Free"}, has_input_image=True), "images_edit")
-        self.assertEqual(select_image_route(account={"type": "Plus"}), "responses")
+        self.assertEqual(select_image_route(account={"type": "Plus"}), "images")
         self.assertEqual(select_image_route(account={"type": "Team"}, has_input_image=True), "responses")
 
     def test_route_selector_policy_overrides_are_available_for_tests(self) -> None:
@@ -137,8 +139,8 @@ class ChatImageMigrationTests(unittest.TestCase):
         cases = [
             ("Free", None, "images"),
             ("Free", [{"image_url": "data:image/png;base64,aW1n"}], "images_edit"),
-            ("Plus", None, "responses"),
-            ("Pro", None, "responses"),
+            ("Plus", None, "images"),
+            ("Pro", None, "images"),
             ("Team", [{"image_url": "data:image/png;base64,aW1n"}], "responses"),
         ]
 
@@ -150,12 +152,27 @@ class ChatImageMigrationTests(unittest.TestCase):
                 service.generate_with_pool("draw", "gpt-image-2", 1, input_images=input_images)
             self.assertEqual(gateway.routes, [expected_route])
 
-    def test_backend_service_falls_back_to_images_when_responses_is_rate_limited(self) -> None:
+    def test_backend_service_prefers_input_image_account_history_for_input_image_requests(self) -> None:
+        account_service = FakeRouteAccountService("Team")
+        service = BackendService(account_service)
+        service.image_gateway = RecordingGateway()
+
+        with patch("services.backend_service.config", SimpleNamespace(image_route_policy="plan_type")):
+            service.generate_with_pool(
+                "draw",
+                "gpt-image-2",
+                1,
+                input_images=[{"image_url": "data:image/png;base64,aW1n"}],
+            )
+
+        self.assertEqual(account_service.prefer_input_image_values, [True])
+
+    def test_backend_service_falls_back_to_images_when_responses_policy_is_rate_limited(self) -> None:
         service = BackendService(FakeRouteAccountService("Team"))
         gateway = RecordingGateway(fail_routes={"responses"})
         service.image_gateway = gateway
 
-        with patch("services.backend_service.config", SimpleNamespace(image_route_policy="plan_type")):
+        with patch("services.backend_service.config", SimpleNamespace(image_route_policy="force_responses")):
             payload = service.generate_with_pool("draw", "gpt-image-2", 1)
 
         self.assertEqual(payload["data"][0]["b64_json"], "ok")

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import base64
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -240,11 +241,11 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertIsNotNone(item)
         self.assertEqual(
             item["pricing"],
-            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 2},
+            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 8},
         )
         self.assertEqual(
             service.list_public_user_keys()[0]["pricing"],
-            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 2},
+            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 8},
         )
 
     def test_user_key_session_quota_and_billing_use_custom_pricing(self) -> None:
@@ -985,7 +986,7 @@ class UserKeyPricingTests(unittest.TestCase):
         created = api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
         user_key = created["created_items"][0]["key"]
 
-        for model in ("gpt-image-2-2K", "gpt-image-2-4K"):
+        for model, expected_unit_cost in (("gpt-image-2-2K", 2), ("gpt-image-2-4K", 8)):
             FakeBackendService.calls = []
             with self.make_client() as client:
                 response = client.post(
@@ -1002,7 +1003,7 @@ class UserKeyPricingTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             body = response.json()
             self.assertEqual(body["billing"]["requested_model"], model)
-            self.assertEqual(body["billing"]["unit_cost"], 2)
+            self.assertEqual(body["billing"]["unit_cost"], expected_unit_cost)
             self.assertEqual(FakeBackendService.last_call["model"], model)
 
     def test_responses_top_level_gpt_image_2_keeps_response_model(self) -> None:
@@ -1037,7 +1038,7 @@ class UserKeyPricingTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["user"], {"waiting": 0, "running": 1})
+        self.assertEqual(body["user"], {"waiting": 0, "running": 1, "active": 1})
         self.assertEqual(body["request"]["status"], "running")
         self.assertEqual(body["request"]["request_id"], "req-1")
 
@@ -1050,7 +1051,166 @@ class UserKeyPricingTests(unittest.TestCase):
             asyncio.run(api.register_image_queue_request(auth_key, "overflow", "draw overflow"))
 
         self.assertEqual(raised.exception.status_code, 429)
-        self.assertIn("max_waiting", raised.exception.detail["error"])
+        self.assertIn("max_active", raised.exception.detail["error"])
+
+    def test_responses_and_images_generation_share_queue_service(self) -> None:
+        created = api.user_key_service.create_user_keys(count=1, quota=30, prefix="uk")
+        user_key = created["created_items"][0]["key"]
+        with patch.object(api, "build_queue_background_task", return_value=None):
+            with self.make_client() as client:
+                responses_result = client.post(
+                    "/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {user_key}",
+                        "X-Image-Queue-Request-Id": "responses-shared-queue",
+                    },
+                    json={
+                        "model": "gpt-5",
+                        "input": [{"type": "input_text", "text": "draw response path"}],
+                        "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    },
+                )
+                images_result = client.post(
+                    "/v1/images/generations",
+                    headers={
+                        "Authorization": f"Bearer {user_key}",
+                        "X-Image-Queue-Request-Id": "images-shared-queue",
+                    },
+                    json={"prompt": "draw images path", "model": "gpt-image-2-2K", "n": 1},
+                )
+                queue_result = client.get(
+                    "/api/image-queue/me",
+                    headers={"Authorization": f"Bearer {user_key}"},
+                )
+
+        self.assertEqual(responses_result.status_code, 200)
+        self.assertEqual(images_result.status_code, 200)
+        self.assertEqual(queue_result.status_code, 200)
+        queue_body = queue_result.json()
+        self.assertEqual(queue_body["global"]["running"], 2)
+        self.assertEqual(queue_body["user"]["running"], 2)
+        self.assertEqual(queue_body["global"]["active"], 2)
+        self.assertEqual(queue_body["user"]["active"], 2)
+        self.assertEqual(
+            {item["request_id"] for item in queue_body["items"]},
+            {"responses-shared-queue", "images-shared-queue"},
+        )
+
+    def test_image_request_record_omits_raw_token_and_full_prompt(self) -> None:
+        prompt = "draw " + ("very-sensitive " * 20)
+        request_id = "request-record-safe"
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/images/generations",
+                headers={
+                    "Authorization": f"Bearer {api.config.auth_key}",
+                    "X-Image-Queue-Request-Id": request_id,
+                },
+                json={"prompt": prompt, "model": "gpt-image-2", "n": 1},
+            )
+            record_response = client.get(
+                f"/api/image-requests/{request_id}",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(record_response.status_code, 200)
+        record = record_response.json()
+        self.assertEqual(record["request_id"], request_id)
+        self.assertEqual(record["status"], "finished")
+        self.assertNotEqual(record["auth_token_hash"], api.config.auth_key)
+        self.assertLessEqual(len(record["prompt_preview"]), 80)
+        self.assertNotEqual(record["prompt_preview"], prompt)
+        self.assertEqual(len(record["prompt_hash"]), 64)
+
+    def test_responses_health_check_does_not_create_image_request_record(self) -> None:
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api.config.auth_key}",
+                    "X-Image-Queue-Request-Id": "health-check-record",
+                },
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "ping"}],
+                    "tools": [],
+                },
+            )
+            record_response = client.get(
+                "/api/image-requests/health-check-record",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(record_response.status_code, 404)
+
+    def test_live_responses_stream_failure_marks_request_record_failed(self) -> None:
+        FakeBackendService.error = ImageGenerationError("stream upstream failed")
+        request_id = "stream-failed-record"
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api.config.auth_key}",
+                    "X-Image-Queue-Request-Id": request_id,
+                },
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "draw failed stream"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "stream": True,
+                },
+            )
+            record_response = client.get(
+                f"/api/image-requests/{request_id}",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        events = self.collect_sse_events(response.content.decode("utf-8"))
+        self.assertTrue(any(event == "response.failed" for event, _ in events))
+        self.assertEqual(events[-1], (None, "[DONE]"))
+        self.assertEqual(record_response.status_code, 200)
+        record = record_response.json()
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("stream upstream failed", record["error_message"])
+
+    def test_image_request_records_cursor_keeps_same_second_rows(self) -> None:
+        created_ids = ["cursor-c", "cursor-b", "cursor-a"]
+        for request_id in created_ids:
+            api.image_request_log_service.create_record(
+                request_id=request_id,
+                owner_id="owner-cursor",
+                auth_type="auth_key",
+                endpoint="/v1/images/generations",
+                protocol="images",
+                model="gpt-image-2",
+                size="auto",
+                n=1,
+                stream=False,
+                prompt=f"draw {request_id}",
+                auth_token=api.config.auth_key,
+            )
+        same_second = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with api.sqlite_store.connect() as connection:
+            connection.execute(
+                "UPDATE image_request_records SET created_at = ?, updated_at = ? WHERE owner_id = ?",
+                (same_second, same_second, "owner-cursor"),
+            )
+
+        with self.make_client() as client:
+            first_page = client.get(
+                "/api/image-requests?owner_id=owner-cursor&limit=2",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+            ).json()
+            second_page = client.get(
+                f"/api/image-requests?owner_id=owner-cursor&limit=2&cursor={first_page['next_cursor']}",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+            ).json()
+
+        seen_ids = [item["request_id"] for item in first_page["items"] + second_page["items"]]
+        self.assertEqual(seen_ids, ["cursor-c", "cursor-b", "cursor-a"])
 
     def test_admin_can_create_and_update_user_key_pricing(self) -> None:
         with self.make_client() as client:

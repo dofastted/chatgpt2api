@@ -21,13 +21,16 @@ from starlette.background import BackgroundTask
 
 from services.account_service import account_service
 from services.config import DATA_DIR, config
+from services.data_management_service import data_management_service, start_backup_scheduler
 from services.backend_service import BackendService
 from services.chat_image.account_import import normalize_account_carrier
 from services.image_service import ImageGenerationError
 from services.image_size import normalize_image_size
 from services.image_queue_service import image_queue_service
+from services.image_request_log_service import image_request_log_service, token_owner_id
 from services.proxy_service import proxy_service
 from services.redeem_code_service import redeem_code_service
+from services.sqlite_store import sqlite_store
 from services.uploaded_image_service import (
     MIN_INPUT_IMAGE_SIDE,
     detect_image_dimensions,
@@ -58,7 +61,7 @@ RESPONSES_STORE_LOCK = Lock()
 class UserKeyPricingRequest(BaseModel):
     gpt_image_2: int = Field(default=2, ge=0, alias="gpt-image-2")
     gpt_image_2_2k: int = Field(default=2, ge=0, alias="gpt-image-2-2K")
-    gpt_image_2_4k: int = Field(default=2, ge=0, alias="gpt-image-2-4K")
+    gpt_image_2_4k: int = Field(default=8, ge=0, alias="gpt-image-2-4K")
 
     model_config = {"populate_by_name": True}
 
@@ -186,6 +189,15 @@ class RedeemCodeRedeemRequest(BaseModel):
     code: str = Field(default="")
 
 
+class DataManagementSettingsRequest(BaseModel):
+    backup_enabled: bool | None = None
+    backup_interval_minutes: int | None = Field(default=None, ge=0)
+    backup_max_bytes: int | None = Field(default=None, ge=1)
+    save_image_conversations: bool | None = None
+    save_logs: bool | None = None
+    s3: dict[str, Any] | None = None
+
+
 @dataclass(frozen=True)
 class AuthContext:
     role: str
@@ -306,17 +318,72 @@ def build_queue_title(prompt: str) -> str:
     return f"{trimmed[:40]}..."
 
 
+def build_request_owner_id(auth_token: str) -> str:
+    return token_owner_id(auth_token)
+
+
+def http_status_from_exception(exc: Exception) -> int | None:
+    if isinstance(exc, HTTPException):
+        return int(exc.status_code)
+    return None
+
+
+def create_image_request_record(
+        *,
+        request_id: str,
+        context: AuthContext,
+        auth_token: str,
+        endpoint: str,
+        protocol: str,
+        model: str,
+        size: str | None,
+        n: int,
+        stream: bool,
+        prompt: str,
+        has_input_image: bool = False,
+        input_image_count: int = 0,
+        client_conversation_id: str | None = None,
+        response_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+) -> None:
+    image_request_log_service.create_record(
+        request_id=request_id,
+        owner_id=build_request_owner_id(auth_token),
+        auth_type=context.auth_type,
+        auth_token=auth_token,
+        user_key_id=context.user_key_id,
+        user_key_label=context.user_key_label,
+        endpoint=endpoint,
+        protocol=protocol,
+        model=model,
+        size=size,
+        n=n,
+        stream=stream,
+        prompt=prompt,
+        has_input_image=has_input_image,
+        input_image_count=input_image_count,
+        client_conversation_id=client_conversation_id,
+        response_id=response_id,
+        requested_count=n,
+        metadata=metadata,
+    )
+
+
 async def register_image_queue_request(auth_token: str, request_id: str, title: str) -> None:
     try:
         await run_in_threadpool(image_queue_service.create_ticket, auth_token, request_id, title)
+        image_request_log_service.mark_waiting(request_id)
     except ValueError as exc:
+        image_request_log_service.mark_rejected(request_id, reason=str(exc), http_status=429)
         raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
     except RuntimeError as exc:
+        image_request_log_service.mark_rejected(request_id, reason=str(exc), http_status=503)
         raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
 
 
 async def wait_for_image_request_turn(request_id: str) -> None:
     await run_in_threadpool(image_queue_service.wait_for_turn, request_id)
+    image_request_log_service.mark_assigning(request_id)
 
 
 def build_queue_background_task(request_id: str) -> BackgroundTask:
@@ -482,14 +549,16 @@ async def generate_image_payload(
 def response_store_set(response_id: str, payload: dict[str, object]) -> None:
     with RESPONSES_STORE_LOCK:
         RESPONSES_STORE[response_id] = dict(payload)
+    sqlite_store.set_response(response_id, dict(payload))
 
 
 def response_store_get(response_id: str) -> dict[str, object] | None:
     with RESPONSES_STORE_LOCK:
-        payload = RESPONSES_STORE.get(response_id)
-    if payload is None:
-        return None
-    return dict(payload)
+        memory_payload = RESPONSES_STORE.get(response_id)
+    if memory_payload is not None:
+        return dict(memory_payload)
+    payload = sqlite_store.get_response(response_id)
+    return dict(payload) if payload is not None else None
 
 
 def get_image_generation_tool(tools: list[ResponsesToolRequest]) -> ResponsesToolRequest | None:
@@ -1044,6 +1113,11 @@ async def iter_live_responses_generation_stream(
         payload = await task
     except Exception as exc:
         fail_queue_request(queue_request_id, str(exc))
+        image_request_log_service.mark_failed(
+            queue_request_id,
+            error=exc,
+            http_status=http_status_from_exception(exc),
+        )
         failed_payload = {
             **pending_payload,
             "status": "failed",
@@ -1058,6 +1132,7 @@ async def iter_live_responses_generation_stream(
 
     for chunk in iter_responses_stream(payload, include_start=False):
         yield chunk
+    image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
     image_queue_service.finish_ticket(queue_request_id)
 
 
@@ -1126,6 +1201,7 @@ def iter_images_stream_with_finish(
             size=size,
             partial_images=partial_images,
         )
+        image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
     finally:
         image_queue_service.finish_ticket(queue_request_id)
 
@@ -1245,11 +1321,13 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI):
         stop_event = Event()
         thread = start_limited_account_watcher(stop_event)
+        backup_thread = start_backup_scheduler(stop_event)
         try:
             yield
         finally:
             stop_event.set()
             thread.join(timeout=1)
+            backup_thread.join(timeout=1)
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
     app.add_middleware(
@@ -1318,7 +1396,20 @@ def create_app() -> FastAPI:
     ):
         require_auth_key(authorization)
         auth_token = extract_bearer_token(authorization)
-        return image_queue_service.snapshot(auth_token, request_id=request_id)
+        snapshot = image_queue_service.snapshot(auth_token, request_id=request_id)
+        if request_id and snapshot.get("request"):
+            record = image_request_log_service.get_record(request_id)
+            if record and record.get("owner_id") == build_request_owner_id(auth_token):
+                request_payload = dict(snapshot["request"] or {})
+                for key in ("queue_wait_ms", "running_ms", "total_ms"):
+                    request_payload[key] = record.get(key)
+                snapshot["request"] = request_payload
+        return snapshot
+
+    @router.get("/api/image-queue/admin")
+    async def get_admin_image_queue(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return image_queue_service.snapshot_all()
 
     @router.api_route("/v1/responses", methods=["GET", "HEAD"])
     async def check_responses_endpoint(authorization: str | None = Header(default=None)):
@@ -1349,6 +1440,19 @@ def create_app() -> FastAPI:
         requested_model = normalize_requested_image_model(body.model)
         requested_size = resolve_requested_image_size(body.size)
         queue_request_id = resolve_queue_request_id(image_queue_request_id)
+        create_image_request_record(
+            request_id=queue_request_id,
+            context=context,
+            auth_token=request_auth_token,
+            endpoint="/v1/images/generations",
+            protocol="images",
+            model=requested_model,
+            size=requested_size,
+            n=body.n,
+            stream=body.stream,
+            prompt=body.prompt,
+            metadata={"response_format": body.response_format},
+        )
 
         async def build_generation_payload() -> dict[str, object]:
             await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(body.prompt))
@@ -1376,8 +1480,15 @@ def create_app() -> FastAPI:
 
         try:
             payload = await build_generation_payload()
+            if not body.stream:
+                image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
         except Exception as exc:
             fail_queue_request(queue_request_id, str(exc))
+            image_request_log_service.mark_failed(
+                queue_request_id,
+                error=exc,
+                http_status=http_status_from_exception(exc),
+            )
             raise
         if body.stream:
             return StreamingResponse(
@@ -1441,6 +1552,21 @@ def create_app() -> FastAPI:
                 "image_url": f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
             }
         ]
+        create_image_request_record(
+            request_id=queue_request_id,
+            context=context,
+            auth_token=request_auth_token,
+            endpoint="/v1/images/edits",
+            protocol="images_edit",
+            model=requested_model,
+            size=requested_size,
+            n=n,
+            stream=stream,
+            prompt=prompt,
+            has_input_image=True,
+            input_image_count=1,
+            metadata={"response_format": response_format},
+        )
 
         async def build_generation_payload() -> dict[str, object]:
             await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
@@ -1469,8 +1595,15 @@ def create_app() -> FastAPI:
 
         try:
             payload = await build_generation_payload()
+            if not stream:
+                image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
         except Exception as exc:
             fail_queue_request(queue_request_id, str(exc))
+            image_request_log_service.mark_failed(
+                queue_request_id,
+                error=exc,
+                http_status=http_status_from_exception(exc),
+            )
             raise
         if stream:
             return StreamingResponse(
@@ -1539,6 +1672,23 @@ def create_app() -> FastAPI:
         response_model = str(body.model or "").strip() or DEFAULT_RESPONSES_MODEL
         requested_model = resolve_requested_response_image_model(body)
         response_id = f"resp_{uuid4().hex}"
+        create_image_request_record(
+            request_id=queue_request_id,
+            context=context,
+            auth_token=request_auth_token,
+            endpoint="/v1/responses",
+            protocol="responses",
+            model=requested_model,
+            size=requested_size,
+            n=body.n,
+            stream=body.stream,
+            prompt=prompt,
+            has_input_image=bool(input_images),
+            input_image_count=len(input_images),
+            client_conversation_id=client_conversation_id,
+            response_id=response_id,
+            metadata={"response_model": response_model},
+        )
 
         async def build_generation_payload() -> dict[str, object]:
             await register_image_queue_request(request_auth_token, queue_request_id, build_queue_title(prompt))
@@ -1605,8 +1755,15 @@ def create_app() -> FastAPI:
             )
         try:
             payload = await build_generation_payload()
+            if not body.stream:
+                image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
         except Exception as exc:
             fail_queue_request(queue_request_id, str(exc))
+            image_request_log_service.mark_failed(
+                queue_request_id,
+                error=exc,
+                http_status=http_status_from_exception(exc),
+            )
             raise
         return JSONResponse(payload, background=build_queue_background_task(queue_request_id))
 
@@ -1723,6 +1880,124 @@ def create_app() -> FastAPI:
     async def get_redeem_codes(authorization: str | None = Header(default=None)):
         require_admin_auth_key(authorization)
         return {"items": redeem_code_service.list_public_codes()}
+
+    @router.get("/api/data-management/status")
+    async def get_data_management_status(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return data_management_service.get_status()
+
+    @router.get("/api/data-management/settings")
+    async def get_data_management_settings(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return data_management_service.get_settings(masked=True)
+
+    @router.put("/api/data-management/settings")
+    async def update_data_management_settings(
+            body: DataManagementSettingsRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        return data_management_service.update_settings(body.model_dump(exclude_none=True))
+
+    @router.post("/api/data-management/backups")
+    async def create_data_backup(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return data_management_service.create_backup(reason="manual")
+
+    @router.get("/api/data-management/backups")
+    async def list_data_backups(
+            authorization: str | None = Header(default=None),
+            limit: int = Query(default=100, ge=1, le=500),
+    ):
+        require_admin_auth_key(authorization)
+        return {"items": data_management_service.list_backups(limit=limit)}
+
+    @router.post("/api/data-management/s3/test")
+    async def test_data_management_s3(body: dict[str, Any], authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        try:
+            return data_management_service.test_s3(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/data-management/logs")
+    async def list_data_management_logs(
+            authorization: str | None = Header(default=None),
+            limit: int = Query(default=100, ge=1, le=500),
+            level: str | None = Query(default=None),
+            component: str | None = Query(default=None),
+            since: str | None = Query(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        return {
+            "items": data_management_service.list_logs(
+                limit=limit,
+                level=level,
+                component=component,
+                since=since,
+            )
+        }
+
+    @router.get("/api/image-requests")
+    async def list_image_requests(
+            authorization: str | None = Header(default=None),
+            request_id: str | None = Query(default=None),
+            owner_id: str | None = Query(default=None),
+            auth_type: str | None = Query(default=None),
+            status: str | None = Query(default=None),
+            model: str | None = Query(default=None),
+            endpoint: str | None = Query(default=None),
+            since: str | None = Query(default=None),
+            until: str | None = Query(default=None),
+            limit: int = Query(default=100, ge=1, le=500),
+            cursor: str | None = Query(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        return image_request_log_service.list_records(
+            filters={
+                "request_id": request_id,
+                "owner_id": owner_id,
+                "auth_type": auth_type,
+                "status": status,
+                "model": model,
+                "endpoint": endpoint,
+                "since": since,
+                "until": until,
+            },
+            cursor=cursor,
+            limit=limit,
+        )
+
+    @router.get("/api/image-requests/{request_id}")
+    async def get_image_request_record(request_id: str, authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        record = image_request_log_service.get_record(request_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"error": "image request record not found"})
+        return record
+
+    @router.get("/api/image-conversations")
+    async def list_image_conversations(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return {"items": data_management_service.list_conversations(extract_bearer_token(authorization))}
+
+    @router.post("/api/image-conversations")
+    async def save_image_conversation(body: dict[str, Any], authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        try:
+            item = data_management_service.upsert_conversation(extract_bearer_token(authorization), body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {"item": item, "items": data_management_service.list_conversations(extract_bearer_token(authorization))}
+
+    @router.delete("/api/image-conversations")
+    async def delete_image_conversation(body: dict[str, Any], authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        conversation_id = str(body.get("id") or body.get("conversation_id") or "").strip()
+        if not conversation_id:
+            raise HTTPException(status_code=400, detail={"error": "conversation id is required"})
+        result = data_management_service.delete_conversation(extract_bearer_token(authorization), conversation_id)
+        return {**result, "items": data_management_service.list_conversations(extract_bearer_token(authorization))}
 
     @router.post("/api/accounts")
     async def create_accounts(

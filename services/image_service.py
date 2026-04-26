@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any, Optional
 from urllib.parse import unquote_to_bytes
 
@@ -37,8 +38,8 @@ CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_RESPONSES_MODEL = "gpt-5.4-mini"
 CODEX_RESPONSES_USER_AGENT = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
 MAX_POW_ATTEMPTS = 500000
-UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS = 45
-UPSTREAM_CONVERSATION_TIMEOUT_SECONDS = 90
+UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS = 600
+UPSTREAM_CONVERSATION_TIMEOUT_SECONDS = 600
 TRANSIENT_HTTP_STATUS_CODES = (408, 429, 500, 502, 503, 504, 520, 522, 524)
 SUPPORTED_INPUT_IMAGE_EXTENSIONS = {
     "image/png": ".png",
@@ -49,6 +50,8 @@ SUPPORTED_INPUT_IMAGE_EXTENSIONS = {
     "image/avif": ".avif",
 }
 TRANSIENT_UPSTREAM_STATUS_CODES = frozenset((*TRANSIENT_HTTP_STATUS_CODES, 422))
+MAX_UPSTREAM_INPUT_IMAGE_SIDE = 1536
+MAX_UPSTREAM_INPUT_IMAGE_BYTES = 4 * 1024 * 1024
 
 _CORES = [16, 24, 32]
 _SCREENS = [3000, 4000, 6000]
@@ -805,7 +808,6 @@ def _download_input_image(session: Session, image_url: str) -> tuple[bytes, str]
 
 def _detect_input_image_dimensions(image_bytes: bytes) -> tuple[int | None, int | None]:
     try:
-        from io import BytesIO
         from PIL import Image
     except Exception:
         return None, None
@@ -814,6 +816,56 @@ def _detect_input_image_dimensions(image_bytes: bytes) -> tuple[int | None, int 
         return int(image.width), int(image.height)
     except Exception:
         return None, None
+
+
+def _prepare_input_image_for_upstream(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+    if len(image_bytes) <= MAX_UPSTREAM_INPUT_IMAGE_BYTES:
+        width, height = _detect_input_image_dimensions(image_bytes)
+        if not width or not height or max(width, height) <= MAX_UPSTREAM_INPUT_IMAGE_SIDE:
+            return image_bytes, mime_type
+    try:
+        from PIL import Image
+    except Exception:
+        return image_bytes, mime_type
+    try:
+        image = Image.open(BytesIO(image_bytes))
+        image.load()
+    except Exception:
+        return image_bytes, mime_type
+
+    has_alpha = image.mode in {"RGBA", "LA"} or (
+        image.mode == "P" and "transparency" in getattr(image, "info", {})
+    )
+    width, height = int(image.width), int(image.height)
+    if max(width, height) > MAX_UPSTREAM_INPUT_IMAGE_SIDE:
+        scale = MAX_UPSTREAM_INPUT_IMAGE_SIDE / max(width, height)
+        next_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+        image = image.resize(next_size, resampling)
+
+    output = BytesIO()
+    try:
+        if has_alpha:
+            if image.mode not in {"RGBA", "LA"}:
+                image = image.convert("RGBA")
+            image.save(output, format="PNG", optimize=True)
+            next_bytes = output.getvalue()
+            next_mime_type = "image/png"
+        else:
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            image.save(output, format="JPEG", quality=88, optimize=True, progressive=True)
+            next_bytes = output.getvalue()
+            next_mime_type = "image/jpeg"
+    except Exception:
+        return image_bytes, mime_type
+    if next_bytes and len(next_bytes) < len(image_bytes):
+        print(
+            f"[image-upstream] input image optimized "
+            f"from={len(image_bytes)} to={len(next_bytes)} mime={mime_type}->{next_mime_type}"
+        )
+        return next_bytes, next_mime_type
+    return image_bytes, mime_type
 
 
 def _normalize_input_image_ref(input_image: dict[str, str] | str) -> dict[str, str]:
@@ -844,8 +896,9 @@ def _load_input_image_bytes(session: Session, input_image: dict[str, str] | str)
             raise ImageGenerationError("input image file_id was not found")
         image_bytes, item = stored
         mime_type = _normalize_input_image_mime_type(image_bytes, str(item.get("mime_type") or ""))
-        return image_bytes, mime_type
-    return _download_input_image(session, str(normalized_input_image.get("image_url") or "").strip())
+        return _prepare_input_image_for_upstream(image_bytes, mime_type)
+    image_bytes, mime_type = _download_input_image(session, str(normalized_input_image.get("image_url") or "").strip())
+    return _prepare_input_image_for_upstream(image_bytes, mime_type)
 
 
 def _build_uploaded_input_image(
@@ -998,7 +1051,7 @@ def _download_image_payload(session: Session, download_url: str) -> tuple[str, s
     for _ in range(3):
         try:
             response = _retry(
-                lambda: session.get(download_url, timeout=60),
+                lambda: session.get(download_url, timeout=UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS),
                 retries=2,
                 retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
             )
@@ -1232,26 +1285,31 @@ def _send_responses_request(
         "parallel_tool_calls": True,
         "include": ["reasoning.encrypted_content"],
     }
-    response = _retry(
-        lambda: session.post(
-            CODEX_RESPONSES_BASE_URL + "/responses",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Chatgpt-Account-Id": account_id,
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-                "User-Agent": CODEX_RESPONSES_USER_AGENT,
-                "Originator": "codex-tui",
-                "Session_id": str(uuid.uuid4()),
-                "Connection": "Keep-Alive",
-            },
-            json=body,
-            stream=True,
-            timeout=UPSTREAM_CONVERSATION_TIMEOUT_SECONDS + 30,
-        ),
-        retries=3,
-        retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
-    )
+    try:
+        response = _retry(
+            lambda: session.post(
+                CODEX_RESPONSES_BASE_URL + "/responses",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Chatgpt-Account-Id": account_id,
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "User-Agent": CODEX_RESPONSES_USER_AGENT,
+                    "Originator": "codex-tui",
+                    "Session_id": str(uuid.uuid4()),
+                    "Connection": "Keep-Alive",
+                },
+                json=body,
+                stream=True,
+                timeout=UPSTREAM_CONVERSATION_TIMEOUT_SECONDS + 30,
+            ),
+            retries=3,
+            retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
+        )
+    except Exception as exc:
+        if _is_transient_stream_error(exc) or is_transient_image_error(str(exc)):
+            raise ImageGenerationError(str(exc)) from exc
+        raise
     if not response.ok:
         raise ImageGenerationError(response.text[:400] or f"responses failed: {response.status_code}")
     return response

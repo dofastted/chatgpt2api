@@ -13,6 +13,7 @@ from services.image_service import (
     is_token_invalid_error,
 )
 from services.image_queue_service import image_queue_service
+from services.image_request_log_service import image_request_log_service
 from services.config import config
 from services.chat_image.gateway import ImageGateway
 from services.chat_image.route_selector import select_image_route
@@ -78,6 +79,16 @@ class BackendService:
     def _is_responses_input_image_rejection(exc: ImageGenerationError, input_images: list[dict[str, str]] | None) -> bool:
         return bool(input_images) and "responses failed: 400" in str(exc).lower()
 
+    def _mark_image_result(self, access_token: str, *, success: bool, input_image: bool) -> dict | None:
+        try:
+            return self.account_service.mark_image_result(
+                access_token,
+                success=success,
+                input_image=input_image,
+            )
+        except TypeError:
+            return self.account_service.mark_image_result(access_token, success=success)
+
     def _refresh_request_token(self, access_token: str) -> dict | None:
         cached_account = self.account_service.get_account(access_token)
         try:
@@ -101,13 +112,30 @@ class BackendService:
             return None
         return self.account_service.update_account(access_token, remote_info)
 
-    def resolve_request_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def resolve_request_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+        *,
+        prefer_input_image: bool = False,
+    ) -> str:
         if hasattr(self.account_service, "try_acquire_token_slot"):
-            token = self.account_service.try_acquire_token_slot(excluded_tokens=excluded_tokens)
+            try:
+                token = self.account_service.try_acquire_token_slot(
+                    excluded_tokens=excluded_tokens,
+                    prefer_input_image=prefer_input_image,
+                )
+            except TypeError:
+                token = self.account_service.try_acquire_token_slot(excluded_tokens=excluded_tokens)
             if token:
                 return token
         try:
-            return self.account_service.next_token(excluded_tokens=excluded_tokens)
+            try:
+                return self.account_service.next_token(
+                    excluded_tokens=excluded_tokens,
+                    prefer_input_image=prefer_input_image,
+                )
+            except TypeError:
+                return self.account_service.next_token(excluded_tokens=excluded_tokens)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
 
@@ -126,7 +154,10 @@ class BackendService:
             if queue_request_id:
                 image_queue_service.mark_assigning_account(queue_request_id)
             try:
-                request_token = self.resolve_request_token(excluded_tokens=attempted_tokens)
+                request_token = self.resolve_request_token(
+                    excluded_tokens=attempted_tokens,
+                    prefer_input_image=bool(input_images),
+                )
             except HTTPException:
                 raise
 
@@ -153,7 +184,16 @@ class BackendService:
                 if fallback_route:
                     route_candidates.append(fallback_route)
                 last_route_error: ImageGenerationError | None = None
-                for candidate_route in route_candidates:
+                for attempt_index, candidate_route in enumerate(route_candidates, start=1):
+                    if queue_request_id:
+                        image_request_log_service.mark_running(
+                            queue_request_id,
+                            account_token=request_token,
+                            account_type=str((refreshed_account or {}).get("type") or ""),
+                            route=candidate_route,
+                            attempt_count=len(attempted_tokens),
+                            fallback_used=attempt_index > 1,
+                        )
                     print(
                         f"[image-generate] start pooled token={self._token_label(request_token)} "
                         f"model={model} n={n} size={size or 'auto'} route={candidate_route}"
@@ -185,14 +225,22 @@ class BackendService:
                 else:
                     assert last_route_error is not None
                     raise last_route_error
-                account = self.account_service.mark_image_result(request_token, success=True)
+                account = self._mark_image_result(
+                    request_token,
+                    success=True,
+                    input_image=bool(input_images),
+                )
                 print(
                     f"[image-generate] success pooled token={self._token_label(request_token)} "
                     f"quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
                 )
                 return result
             except ImageGenerationError as exc:
-                account = self.account_service.mark_image_result(request_token, success=False)
+                account = self._mark_image_result(
+                    request_token,
+                    success=False,
+                    input_image=bool(input_images),
+                )
                 print(
                     f"[image-generate] fail pooled token={self._token_label(request_token)} "
                     f"error={exc} quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"

@@ -2,5 +2,14 @@
   "auth-key": "replace-with-your-auth-key",
   "admin-auth-key": "replace-with-your-admin-auth-key",
   "proxies-file": "data/proxies.json",
+  "sqlite-path": "data/chatgpt2api.sqlite3",
+  "backup-dir": "data/backups",
+  "backup-max-bytes": 524288000,
+  "backup-interval-minutes": 0,
+  "image-queue-per-user-active-limit": 10,
+  "image-queue-per-user-wait-limit": 10,
+  "image-queue-global-wait-limit": 2000,
+  "image-queue-global-start-limit": 60,
+  "image-queue-global-start-window-seconds": 60,
   "tls-verify": true
 }

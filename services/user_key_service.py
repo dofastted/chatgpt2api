@@ -8,7 +8,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from services.config import config
+from services.config import DATA_DIR, config
+from services.sqlite_store import sqlite_store
 
 
 class UserKeyService:
@@ -18,11 +19,12 @@ class UserKeyService:
     DEFAULT_PRICING = {
         "gpt-image-2": 2,
         "gpt-image-2-2K": 2,
-        "gpt-image-2-4K": 2,
+        "gpt-image-2-4K": 8,
     }
 
     def __init__(self, store_file: Path):
         self.store_file = store_file
+        self.document_name = f"user_keys:{self.store_file.resolve()}"
         self._lock = Lock()
         self._user_keys = self._load_user_keys()
 
@@ -76,22 +78,21 @@ class UserKeyService:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _load_user_keys(self) -> list[dict[str, Any]]:
-        if not self.store_file.exists():
-            return []
-        try:
-            data = json.loads(self.store_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
+        data = sqlite_store.load_document(self.document_name, [], self.store_file)
         if not isinstance(data, list):
             return []
         return [normalized for item in data if (normalized := self._normalize_user_key(item)) is not None]
 
     def _save_user_keys(self) -> None:
-        self.store_file.parent.mkdir(parents=True, exist_ok=True)
-        self.store_file.write_text(
-            json.dumps(self._user_keys, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        sqlite_store.save_document(self.document_name, self._user_keys)
+        try:
+            self.store_file.resolve().relative_to(DATA_DIR.resolve())
+        except ValueError:
+            self.store_file.parent.mkdir(parents=True, exist_ok=True)
+            self.store_file.write_text(
+                json.dumps(self._user_keys, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
     def _find_user_key_index(self, key: str) -> int:
         for index, item in enumerate(self._user_keys):

@@ -17,7 +17,9 @@
 - 账号页支持批量上传 JSON 文件，前端先清洗并递归提取 `access_token`，再直接调用新增接口，见 `web/src/lib/account-import.ts:1`、`web/src/app/accounts/page.tsx:372`、`web/src/lib/api.ts:127`。
 - 画图页头部还有一个公开的“捐赠上传”入口。它会上传 JSON，提取 token，然后调用捐赠入池接口，见 `web/src/components/top-nav.tsx:68` 和 `web/src/lib/api.ts:134`。
 - 账号页包含代理管理区，接口封装在 `web/src/lib/api.ts`，后端路由在 `services/api.py` 的 `/api/proxies` 段。
-- 出站代理配置保存在 `services/proxy_service.py` 管理的 JSON 文件里，账号刷新和生图请求会读取当前启用代理。
+- 出站代理配置由 `services/proxy_service.py` 管理，主存储在 SQLite；旧 JSON 只作为首次导入来源。账号刷新和生图请求会读取当前启用代理。
+- 运行数据现在主存储在 `data/chatgpt2api.sqlite3`。`services/sqlite_store.py` 提供 SQLite 文档和 response 记录；`services/data_management_service.py` 提供备份、日志、S3 测试和图片会话存储。
+- 账号页新增“数据管理”tab，可查看 SQLite 状态、手动备份、备份记录、S3 设置和日志。
 
 如果要继续改：
 

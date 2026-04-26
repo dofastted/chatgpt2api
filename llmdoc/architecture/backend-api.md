@@ -13,7 +13,7 @@
 - 普通鉴权在 `services/api.py:192`。
 - 管理员鉴权在 `services/api.py:199`。
 - `user_key` 的模型单价解析在 `services/api.py:142`，图片模型名校验在 `services/api.py:169`。
-- 当前默认单价是 `gpt-image-2=2`、`gpt-image-2-2K=2`、`gpt-image-2-4K=2`，来源在 `services/user_key_service.py` 和 `services/api.py`。
+- 当前默认单价是 `gpt-image-2=2`、`gpt-image-2-2K=2`、`gpt-image-2-4K=8`，来源在 `services/user_key_service.py` 和 `services/api.py`。
 - 图片请求如果走 `user_key`，实际扣费不再是全局固定倍率，而是 `pricing[model] * n`，预扣与回退逻辑在 `services/api.py:481`。
 - 图片协议转换也在这一层完成：`build_images_response_payload`、`iter_images_stream`、`build_responses_payload`、`iter_responses_stream` 会把内部结果包成对外接口需要的 JSON 或 SSE。
 
@@ -41,11 +41,19 @@
 - 兑换码创建只允许 `20` 或 `100` 两档额度。用户 key 兑换成功后会返回 `added_quota`，并把这次额度加到当前剩余值上，不会重置成固定值。
 - `/v1/images/generations` 的流式输出按图片接口风格返回；最终结果一定会给 `image_generation.completed`，然后给 `data: [DONE]`。
 - `/v1/responses` 的流式输出按 Responses 接口风格返回；最终结果一定会给 `response.completed`，然后给 `data: [DONE]`。
-- `GET /api/image-queue/me` 是当前 Bearer Token 的队列状态入口，返回等待数、运行数和可选 `request_id` 的排队位置。前端图片页靠它显示“当前用户队列”和当前请求进度。
+- `GET /api/image-queue/me` 是当前 Bearer Token 的队列状态入口，返回等待数、运行数、活动数和可选 `request_id` 的排队位置。前端图片页靠它显示当前用户队列和当前请求进度。
+- `GET /api/image-queue/admin` 是管理员队列入口，返回当前所有活动 ticket，不按用户过滤。
+- `GET /api/image-requests` 和 `GET /api/image-requests/{request_id}` 是管理员请求记录入口，数据来自 SQLite 表 `image_request_records`。
 - 队列状态放在 `services/image_queue_service.py`，只保存在进程内。请求开始前会先登记 ticket，响应真正发完后才结束 ticket。
+- 请求轨迹放在 `services/image_request_log_service.py`，会记录 `accepted / waiting / assigning_account / running / finished / failed / rejected` 状态、耗时、扣费和路线摘要。
+- 2026-04-26 云端实测 `/v1/responses` 和 `/v1/images/generations` 混合 20 并发时共享同一个 `image_queue_service` 统计：全局运行峰值 20，结束后 `waiting=0`、`running=0`。
+- 账号、用户 key、兑换码、代理、上传图元数据和 Responses 历史现在通过 `services/sqlite_store.py` 写入 SQLite；旧 JSON 文件只在对应 SQLite 文档为空时导入一次。
+- 数据管理接口在 `services/api.py` 注册，底层是 `services/data_management_service.py`。管理员可查看 SQLite 状态、备份记录、设置、S3 测试和日志；普通 key 访问会返回 `403`。
+- 图片会话服务端保存入口是 `GET/POST/DELETE /api/image-conversations`，按 Bearer Token 哈希隔离。前端仍保留本地缓存和一次上传旧会话的兼容逻辑。
 
 后台线程：
 
 - `services/api.py:206` 会每 300 秒刷新一次可恢复账号。
 - 线程会处理 `account_service.list_refreshable_tokens()` 返回的 token，范围包括“限流”账号和冷静期已结束的账号，不会全量刷新所有账号。
 - 图片请求前如果刷新账号信息时只遇到 TLS、连接重置、超时这类瞬时错误，而本地缓存账号仍可用，会先用缓存状态继续尝试，逻辑在 `services/backend_service.py:20` 到 `services/backend_service.py:59`。
+- `services/data_management_service.py` 会按设置启动备份线程。默认 `backup_interval_minutes=0`，不自动备份；开启后会把 SQLite 快照、上传图目录和生成图目录打包到 `data/backups/`。

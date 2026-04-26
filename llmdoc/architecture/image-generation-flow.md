@@ -20,8 +20,9 @@
 - 先从账号池选一个当前可用的 token，逻辑在 `services/backend_service.py:38`。
 - 再用 `services/backend_service.py:21` 先刷新这个 token 的远端信息，确认它还有额度、状态也可用。
 - 刷新结果不满足条件时会跳过这个 token，继续尝试下一个。
-- 选号后会按账号套餐选择内部执行路线：Free 无输入图走 `images`，Free 有输入图走 `images_edit`，Plus/Pro/Team 走 `responses`，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
-- 如果 Plus/Pro/Team 的无输入图 Responses 路线遇到 `429`、网关超时或其他瞬时上游错误，同一个账号会先退到 Images 路线再试一次；仍失败才换下一个账号。带输入图的付费账号请求不会退到 `images_edit`。
+- 选号后会按是否带输入图选择内部执行路线：无输入图默认走 `images`，Free 有输入图走 `images_edit`，Plus/Pro/Team 有输入图走 `responses`，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
+- 带输入图请求会优先选择最近在 input image responses 路线成功过的账号。账号侧记录 `input_image_success`、`input_image_fail`、`last_input_image_used_at` 和 `last_input_image_success_at`，选择逻辑在 `services/account_service.py`，调用点在 `services/backend_service.py`。
+- 如果临时用 `IMAGE_ROUTE_POLICY=force_responses` 让无输入图走 Responses，遇到 `429`、网关超时或其他瞬时上游错误时，同一个账号会先退到 Images 路线再试一次；仍失败才换下一个账号。带输入图的付费账号请求不会退到 `images_edit`。
 - 这条分层来自 `IMAGE_ROUTE_POLICY=plan_type` 的默认配置；主容器默认走 `IMAGE_ENGINE=chat_image`，不要退回旧后端协议作为长期方案。
 - 真正的远端图片请求交给 `services/image_service.py`。
 
@@ -30,11 +31,12 @@
 - Session 和指纹头在 `services/image_service.py:88` 组装。
 - Chat requirements token 在 `services/image_service.py:184` 获取。
 - 如果请求里带 `input_image.image_url`，会先抓取或解码图片；如果带 `input_image.file_id`，会先从 `services/uploaded_image_service.py:212` 读取本地已上传文件。
+- 输入图发往上游前会做轻量规整：超过 `1536` 长边或超过 `4 MB` 时，`services/image_service.py` 会尝试用 Pillow 缩放并重新编码；如果处理失败或结果没有变小，就保留原图。
 - 本地上传入口是 `services/api.py:859` 到 `services/api.py:913`。前端图片页会先调用 `web/src/lib/api.ts:350` 到 `web/src/lib/api.ts:364` 上传图片，再在 `web/src/app/image/page.tsx:545` 到 `web/src/app/image/page.tsx:558` 把 `fileId` 保存到当前输入图状态。
 - 上传到 ChatGPT 上游的过程在 `services/image_service.py`。预上传请求会带 `mime_type`，随后上传 blob，再调用上传确认接口。
 - Free/legacy 会话消息有输入图时使用 Studio 同款 `multimodal_text`，`content.parts` 同时包含文本和 `image_asset_pointer`，`metadata.attachments` 只作为附件索引保留。图片指针不能只放在 `metadata.attachments`，否则模型可能识别不到输入图。
-- Free 账号的 `images` 和 `images_edit` 内部路线优先请求上游 `/backend-api/f/conversation`，并带 `client_prepare_state=none` 与 `supported_encodings=["v1"]`。
-- Plus/Pro/Team 账号的 Responses 路线请求上游 `/backend-api/codex/responses`，顶层文本模型使用 `gpt-5.4-mini`，图片工具模型使用 `gpt-image-2`。
+- `images` 和 `images_edit` 内部路线优先请求上游 `/backend-api/f/conversation`，并带 `client_prepare_state=none` 与 `supported_encodings=["v1"]`。
+- Plus/Pro/Team 带输入图的 Responses 路线请求上游 `/backend-api/codex/responses`，顶层文本模型使用 `gpt-5.4-mini`，图片工具模型使用 `gpt-image-2`。
 - 非 `auto` 尺寸会继续传给上游。Images 路线在 conversation 请求中带 `image_generation_options.size`；Responses 路线在 `image_generation` tool 中带 `size`。
 - legacy 回退路线仍请求上游 `/backend-api/conversation`，可通过 `IMAGE_ROUTE_POLICY=legacy` 开启。
 - 会话流请求在 `services/image_service.py` 发出。
@@ -46,14 +48,14 @@
 - 如果入口是 `/v1/responses`，结果还会被包成 `response.output[]`，图片项类型是 `image_generation_call`。对外应按官方格式把文本模型放在顶层 `model`，把公开图片模型放在 `tools[].model`；如果没传图片模型，当前默认按 `gpt-image-2` 处理。
 - `/v1/responses` 顶层 `model` 可以直接传 `gpt-image-2`。这种请求对外 Response 的 `model` 保留 `gpt-image-2`，内部图片模型也按 `gpt-image-2` 执行。
 - `/v1/images/generations` 和 `/v1/images/edits` 默认返回 `b64_json`；当第三方客户端传 `response_format=url` 时，会把图片保存到 `data/generated_images/`，并返回 `/v1/images/generated/{image_id}` 的 HTTP URL。这个图片读取 URL 不要求再次带 Authorization，避免 Cherry Studio 二次 fetch 图片时失败。
-- `/v1/responses` 现在允许 `previous_response_id` 指向本进程内已有 response。服务会从 `RESPONSES_STORE` 读取最近历史，把历史 prompt、尺寸和可复制文本合进本次文本上下文；上游会话标识不足时，响应 `metadata.context_mode` 标成 `text_history`。
+- `/v1/responses` 现在允许 `previous_response_id` 指向本服务生成过的 response。服务会从 SQLite response 记录读取最近历史，把历史 prompt、尺寸和可复制文本合进本次文本上下文；上游会话标识不足时，响应 `metadata.context_mode` 标成 `text_history`。
 - 对外协议转换都在 `services/api.py`。`build_responses_payload` 和 `iter_responses_stream` 负责 Responses 风格输出；`build_images_response_payload` 和 `iter_images_stream` 负责图片接口风格输出。
 - 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
 - `/v1/images/generations` 和 `/v1/images/edits` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
 - `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终 `response.image_generation_call.completed` 会带图片 `result` 和完整 `item`，最后一定会给 `response.completed` 和 `data: [DONE]`。
 - 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。
 - 前端图片页调用 `/v1/responses` 时默认传 `stream: true`，会把选中的公开模型放到 `tools[].model`，把当前尺寸选择放到 `tools[].size`，再从 SSE 的 `response.completed` 事件读取最终 Response。公开的 `/v1/images/generations` 和 `/v1/images/edits` 只作为外部兼容入口，项目自带网页不使用。
-- 前端图片页现在会把本地 session 存成多轮 `turns[]`。每轮保存 prompt、模型、张数、尺寸、参考图、结果图、队列 id、`responseId` 和 `copied_text`；旧单轮记录读取时会映射成一个 turn，实现见 `web/src/store/image-conversations.ts`。
+- 前端图片页现在会把 session 存成多轮 `turns[]`，主存储是后端 `/api/image-conversations`，本地 `localforage` 只做缓存和旧数据上传来源。每轮保存 prompt、模型、张数、尺寸、参考图、结果图、队列 id、`responseId` 和 `copied_text`；旧单轮记录读取时会映射成一个 turn，实现见 `web/src/store/image-conversations.ts`。
 - 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。
 - 在同一 session 继续发送新 prompt 时，前端复用 `clientConversationId`，并把上一轮 `responseId` 作为 `previous_response_id` 发给 `/v1/responses`。
 
@@ -65,13 +67,26 @@
 
 失败处理：
 
-- 请求先进入 `services/image_queue_service.py` 的进程内队列。等待中的请求按全局 FIFO 排；同一个 Bearer Token 最多保留 10 个等待请求；全局等待数超过 2000 时直接拒绝。
+- 三条生图入口在鉴权和参数校验后会创建 `image_request_records` 记录，主键来自 `X-Image-Queue-Request-Id`，未传时由服务端生成。`/v1/responses` 健康检查不写请求记录。
+- 请求记录由 `services/image_request_log_service.py` 写入 SQLite。它只保存 prompt 前 80 字、prompt sha256、Bearer Token 哈希、账号哈希、耗时、扣费、错误和路线摘要，不保存完整 prompt、原始请求体或 base64 图片。
+- 请求先进入 `services/image_queue_service.py` 的进程内队列。等待中的请求按全局 FIFO 排；同一个 Bearer Token 默认最多保留 10 个活动请求，活动数按 `waiting + running` 计算；全局等待数超过 2000 时直接拒绝。
 - 队列启动运行前还有全局 60 次/60 秒限制。超过这个速率的生图请求继续停在等待态，直到滑动窗口释放名额；健康检查、登录、额度和上传接口不计入。
 - 进入运行阶段后，真正的并发上限由 `services/account_service.py` 的账号槽位控制。单个账号最多同时跑 2 个生图；如果没有空闲槽位，请求会保持在 `assigning_account` 状态继续等。
-- 前端会给每次请求附带 `X-Image-Queue-Request-Id`，再通过 `GET /api/image-queue/me` 查询当前 Bearer Token 的等待数、运行数、当前请求位置和状态。
+- 前端会给每次请求附带 `X-Image-Queue-Request-Id`，再通过 `GET /api/image-queue/me` 查询当前 Bearer Token 的等待数、运行数、活动数、当前请求位置和状态。
+- `wait_for_turn` 通过后，请求记录进入 `assigning_account`；`BackendService.generate_with_pool` 选到账户并开始上游调用时进入 `running`，同时记录账号哈希、账号类型、内部路线和尝试次数。
+- JSON 请求成功返回前写 `finished`；SSE 请求在最终事件和 `data: [DONE]` 发完后写 `finished`。异常路径写 `failed`，队列或活动数超限写 `rejected`。
 - 成功和失败统计都回写账号池，见 `services/account_service.py:329`。
 - 如果报错命中失效 token 条件，判断在 `services/image_service.py:205`，随后 `services/backend_service.py:68` 会把 token 从池里删掉。
 - 如果请求前刷新失败，`services/backend_service.py:27` 会把这个账号标成 3 分钟冷却，跳过后继续试下一个。
 - 如果上游会话返回瞬时错误，`services/image_service.py` 会把 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit、temporarily unavailable 这类信号都当作可重试失败；`services/backend_service.py` 会跳过当前账号继续试。
 - 如果整个池里没有可用 token，`services/backend_service.py:38` 会抛出 `503`。
 - 请求完成后，不论是 JSON 还是 SSE，都会在响应真正发完后才从运行态移除。`/v1/images/generations` 和 `/v1/images/edits` 流式请求要等 `image_generation.completed` 与 `data: [DONE]` 发完；`/v1/responses` 流式请求要等 `response.completed` 与 `data: [DONE]` 发完。
+
+2026-04-26 云端并发验收：
+
+- `https://img.fkcodex.com` 上混合执行 20 个真实生图请求，其中 `/v1/responses` 10 个、`/v1/images/generations` 10 个。
+- 模型分布是 `gpt-image-2` 10 个、`gpt-image-2-2K` 6 个、`gpt-image-2-4K` 4 个。
+- 20 个请求全部成功；平均耗时 `24.29s`，P95 耗时 `46.89s`。
+- 队列采样显示全局运行峰值 20、全局等待峰值 3、单 key 等待峰值 2，最后 `global.waiting=0`、`global.running=0`。
+- 扣费结果是 `1K=20/10次`、`2K=12/6次`、`4K=32/4次`，没有单价不匹配。
+- 原始报告在 `.llmdoc-tmp/cloud-queue-checks/20260426-173010/report.json`。

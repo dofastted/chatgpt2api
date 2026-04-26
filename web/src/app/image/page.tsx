@@ -70,25 +70,16 @@ import {
   type ImageResolutionPreset,
 } from "@/lib/image-size";
 
-const imageModelMeta: Record<ImageModel, { label: string; helperText: string }> = {
-  "gpt-image-2": {
-    label: "基础",
-    helperText: "公开模型 gpt-image-2。",
-  },
-  "gpt-image-2-2K": {
-    label: "2K",
-    helperText: "按 gpt-image-2-2K 计费，上游仍走 gpt-image-2。",
-  },
-  "gpt-image-2-4K": {
-    label: "4K",
-    helperText: "按 gpt-image-2-4K 计费，上游仍走 gpt-image-2。",
-  },
+const imageModelLabels: Record<ImageModel, string> = {
+  "gpt-image-2": "基础",
+  "gpt-image-2-2K": "2K",
+  "gpt-image-2-4K": "4K",
 };
 
 const DEFAULT_IMAGE_PRICING: Record<ImageModel, number> = {
   "gpt-image-2": 2,
   "gpt-image-2-2K": 2,
-  "gpt-image-2-4K": 2,
+  "gpt-image-2-4K": 8,
 };
 const MAX_IMAGES_PER_REQUEST = 2;
 const IMAGE_COUNT_OPTIONS = Array.from(
@@ -117,6 +108,19 @@ function formatConversationTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function resolveImageModelFromPreference(
+  preference: ImageGenerationPreference,
+): ImageModel {
+  const normalized = normalizeImageGenerationPreference(preference);
+  if (normalized.resolution === "2k") {
+    return "gpt-image-2-2K";
+  }
+  if (normalized.resolution === "4k") {
+    return "gpt-image-2-4K";
+  }
+  return "gpt-image-2";
 }
 
 function downloadBase64Image(
@@ -338,7 +342,6 @@ export default function ImagePage() {
   const conversationsRef = useRef<ImageConversation[]>([]);
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
-  const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
   const [imageSize, setImageSize] = useState("auto");
   const [imagePreference, setImagePreference] = useState<ImageGenerationPreference>(
     DEFAULT_IMAGE_GENERATION_PREFERENCE,
@@ -430,6 +433,10 @@ export default function ImagePage() {
   const effectivePricing = useMemo(
     () => currentPricing || DEFAULT_IMAGE_PRICING,
     [currentPricing],
+  );
+  const imageModel = useMemo(
+    () => resolveImageModelFromPreference(imagePreference),
+    [imagePreference],
   );
   const currentUnitCost = useMemo(
     () => Math.max(0, Number(effectivePricing[imageModel] || 0)),
@@ -1341,7 +1348,7 @@ export default function ImagePage() {
 
                     <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
                       <span className="rounded-full bg-stone-100 px-3 py-1">
-                        {turn.model}
+                        {imageModelLabels[turn.model] || turn.model}
                       </span>
                       <span className="rounded-full bg-stone-100 px-3 py-1">
                         {turn.count} 张
@@ -1603,31 +1610,6 @@ export default function ImagePage() {
                         ? "更换图片"
                         : "上传图片"}
                   </button>
-
-                  {(
-                    Object.entries(imageModelMeta) as Array<
-                      [ImageModel, (typeof imageModelMeta)[ImageModel]]
-                    >
-                  ).map(([model, meta]) => {
-                      const active = imageModel === model;
-                      return (
-                        <button
-                          key={model}
-                          type="button"
-                          aria-pressed={active}
-                          title={meta.helperText}
-                          onClick={() => setImageModel(model)}
-                          className={cn(
-                            "cursor-pointer rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/40",
-                            active
-                              ? "border-white/15 bg-white/14 text-white"
-                              : "border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/18 hover:text-stone-100",
-                          )}
-                        >
-                          {meta.label}
-                        </button>
-                      );
-                    })}
 
                   {IMAGE_COUNT_OPTIONS.map((count) => {
                     const active = imageCount === count;

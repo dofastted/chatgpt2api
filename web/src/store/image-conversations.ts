@@ -3,7 +3,13 @@
 import localforage from "localforage";
 
 import { detectImageMimeType } from "@/lib/image-data";
-import type { ImageModel } from "@/lib/api";
+import {
+  deleteImageConversationFromServer,
+  fetchImageConversations,
+  saveImageConversationToServer,
+  type ImageConversationPayload,
+  type ImageModel,
+} from "@/lib/api";
 import {
   DEFAULT_IMAGE_GENERATION_PREFERENCE,
   normalizeImageGenerationPreference,
@@ -78,6 +84,7 @@ const imageConversationStorage = localforage.createInstance({
 
 const IMAGE_CONVERSATIONS_KEY_PREFIX = "items";
 const IMAGE_PREFERENCE_KEY_PREFIX = "generation_preference";
+const IMAGE_SERVER_MIGRATION_KEY_PREFIX = "server_migrated";
 const IMAGE_CONVERSATIONS_DEFAULT_SCOPE = "__anonymous__";
 const conversationWriteQueues = new Map<string, Promise<void>>();
 const VALID_IMAGE_MODELS = new Set<ImageModel>([
@@ -102,6 +109,10 @@ function buildConversationStorageKey(scope: string): string {
 
 function buildPreferenceStorageKey(scope: string): string {
   return `${IMAGE_PREFERENCE_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
+}
+
+function buildServerMigrationKey(scope: string): string {
+  return `${IMAGE_SERVER_MIGRATION_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
 }
 
 function enqueueConversationWrite<T>(scope: string, operation: () => Promise<T>): Promise<T> {
@@ -241,9 +252,31 @@ function normalizeConversation(conversation: ImageConversation): ImageConversati
 }
 
 export async function listImageConversations(scope: string): Promise<ImageConversation[]> {
-  const items =
+  const localItems =
     (await imageConversationStorage.getItem<ImageConversation[]>(buildConversationStorageKey(scope))) || [];
-  return items.map(normalizeConversation).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const normalizedLocalItems = localItems
+    .map(normalizeConversation)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  try {
+    const migrated = Boolean(await imageConversationStorage.getItem<boolean>(buildServerMigrationKey(scope)));
+    if (!migrated && normalizedLocalItems.length > 0) {
+      for (const item of normalizedLocalItems) {
+        await saveImageConversationToServer(item as unknown as ImageConversationPayload);
+      }
+      await imageConversationStorage.setItem(buildServerMigrationKey(scope), true);
+    }
+    const response = await fetchImageConversations();
+    const serverItems = (response.items || [])
+      .map((item) => normalizeConversation(item as unknown as ImageConversation))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (serverItems.length > 0 || migrated) {
+      await imageConversationStorage.setItem(buildConversationStorageKey(scope), serverItems);
+      return serverItems;
+    }
+  } catch {
+    return normalizedLocalItems;
+  }
+  return normalizedLocalItems;
 }
 
 export async function saveImageConversation(scope: string, conversation: ImageConversation): Promise<void> {
@@ -252,6 +285,11 @@ export async function saveImageConversation(scope: string, conversation: ImageCo
     const nextItems = [normalizeConversation(conversation), ...items.filter((item) => item.id !== conversation.id)];
     nextItems.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     await imageConversationStorage.setItem(buildConversationStorageKey(scope), nextItems);
+    try {
+      await saveImageConversationToServer(normalizeConversation(conversation) as unknown as ImageConversationPayload);
+    } catch {
+      return;
+    }
   });
 }
 
@@ -260,6 +298,13 @@ export async function replaceImageConversations(scope: string, conversations: Im
     const nextItems = conversations.map(normalizeConversation);
     nextItems.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     await imageConversationStorage.setItem(buildConversationStorageKey(scope), nextItems);
+    try {
+      for (const item of nextItems) {
+        await saveImageConversationToServer(item as unknown as ImageConversationPayload);
+      }
+    } catch {
+      return;
+    }
   });
 }
 
@@ -270,12 +315,25 @@ export async function deleteImageConversation(scope: string, id: string): Promis
       buildConversationStorageKey(scope),
       items.filter((item) => item.id !== id),
     );
+    try {
+      await deleteImageConversationFromServer(id);
+    } catch {
+      return;
+    }
   });
 }
 
 export async function clearImageConversations(scope: string): Promise<void> {
   await enqueueConversationWrite(scope, async () => {
+    const items = await listImageConversations(scope);
     await imageConversationStorage.removeItem(buildConversationStorageKey(scope));
+    try {
+      for (const item of items) {
+        await deleteImageConversationFromServer(item.id);
+      }
+    } catch {
+      return;
+    }
   });
 }
 

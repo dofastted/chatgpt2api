@@ -22,6 +22,14 @@ export type ImageBilling = {
 };
 
 export type ImageQueueItemStatus = "waiting" | "assigning_account" | "running" | "finished" | "failed";
+export type ImageRequestStatus =
+  | "accepted"
+  | "waiting"
+  | "assigning_account"
+  | "running"
+  | "finished"
+  | "failed"
+  | "rejected";
 
 export type ImageQueueItem = {
   request_id: string;
@@ -99,6 +107,58 @@ export type RedeemCode = {
   updatedAt?: string | null;
   usedAt?: string | null;
   usedByKey?: string | null;
+};
+
+export type DataManagementSettings = {
+  backup_enabled: boolean;
+  backup_interval_minutes: number;
+  backup_max_bytes: number;
+  save_image_conversations: boolean;
+  save_logs: boolean;
+  s3: {
+    enabled: boolean;
+    endpoint: string;
+    region: string;
+    bucket: string;
+    access_key_id: string;
+    secret_access_key: string;
+    prefix: string;
+    force_path_style: boolean;
+    use_ssl: boolean;
+  };
+};
+
+export type DataBackupRecord = {
+  id: string;
+  path: string;
+  size_bytes: number;
+  status: string;
+  error?: string | null;
+  s3_uploaded: boolean;
+  s3_error?: string | null;
+  created_at: string;
+};
+
+export type DataManagementLogItem = {
+  id: number;
+  created_at: string;
+  level: string;
+  component: string;
+  message: string;
+  context?: Record<string, unknown>;
+};
+
+export type DataManagementStatus = {
+  sqlite_path: string;
+  exists: boolean;
+  size_bytes: number;
+  tables: Record<string, number>;
+  backup_dir: string;
+  backup_size_bytes: number;
+  backup_max_bytes: number;
+  backup_count: number;
+  latest_backup?: DataBackupRecord | null;
+  settings: DataManagementSettings;
 };
 
 type AccountListResponse = {
@@ -204,10 +264,12 @@ type ImageQueueStatusResponse = {
   user: {
     waiting: number;
     running: number;
+    active: number;
   };
   global: {
     waiting: number;
     running: number;
+    active: number;
   };
   request?: ImageQueueItem | null;
   items: ImageQueueItem[];
@@ -243,6 +305,70 @@ export type UploadedInputImage = {
   client_conversation_id?: string;
   consumed_at?: string | null;
   download_url: string;
+};
+
+export type ImageRequestRecord = {
+  request_id: string;
+  owner_id: string;
+  auth_type: AuthType | string;
+  user_key_id?: string | null;
+  user_key_label?: string | null;
+  endpoint: string;
+  protocol: string;
+  model?: string | null;
+  size?: string | null;
+  n: number;
+  stream: boolean;
+  has_input_image: boolean;
+  input_image_count: number;
+  client_conversation_id?: string | null;
+  response_id?: string | null;
+  prompt_preview?: string | null;
+  prompt_hash?: string | null;
+  status: ImageRequestStatus;
+  accepted_at?: string | null;
+  queued_at?: string | null;
+  started_at?: string | null;
+  running_at?: string | null;
+  finished_at?: string | null;
+  updated_at?: string | null;
+  queue_wait_ms?: number | null;
+  assigning_ms?: number | null;
+  running_ms?: number | null;
+  total_ms?: number | null;
+  requested_count?: number | null;
+  succeeded_count?: number | null;
+  failed_count?: number | null;
+  unit_cost?: number | null;
+  charged_quota?: number | null;
+  remaining_quota?: number | null;
+  http_status?: number | null;
+  error_type?: string | null;
+  error_message?: string | null;
+  upstream_error?: string | null;
+  account_token_hash?: string | null;
+  account_type?: string | null;
+  route?: string | null;
+  attempt_count?: number | null;
+  fallback_used?: boolean;
+  created_at: string;
+};
+
+export type ImageRequestListFilters = {
+  request_id?: string;
+  owner_id?: string;
+  auth_type?: string;
+  status?: string;
+  model?: string;
+  endpoint?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+};
+
+export type ImageConversationPayload = Record<string, unknown> & {
+  id: string;
 };
 
 type ResponsesImageGenerationResponse = {
@@ -322,6 +448,43 @@ export async function fetchRedeemCodes(options: { redirectOnUnauthorized?: boole
   return httpRequest<RedeemCodeListResponse>("/api/redeem-codes", options);
 }
 
+export async function fetchDataManagementStatus(options: { redirectOnUnauthorized?: boolean } = {}) {
+  return httpRequest<DataManagementStatus>("/api/data-management/status", options);
+}
+
+export async function fetchDataManagementSettings(options: { redirectOnUnauthorized?: boolean } = {}) {
+  return httpRequest<DataManagementSettings>("/api/data-management/settings", options);
+}
+
+export async function updateDataManagementSettings(payload: Partial<DataManagementSettings>) {
+  return httpRequest<DataManagementSettings>("/api/data-management/settings", {
+    method: "PUT",
+    body: payload,
+  });
+}
+
+export async function createDataBackup() {
+  return httpRequest<DataBackupRecord>("/api/data-management/backups", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function fetchDataBackups() {
+  return httpRequest<{ items: DataBackupRecord[] }>("/api/data-management/backups");
+}
+
+export async function fetchDataManagementLogs() {
+  return httpRequest<{ items: DataManagementLogItem[] }>("/api/data-management/logs");
+}
+
+export async function testDataManagementS3(payload: Partial<DataManagementSettings["s3"]>) {
+  return httpRequest<{ ok: boolean; bucket: string }>("/api/data-management/s3/test", {
+    method: "POST",
+    body: payload,
+  });
+}
+
 export async function fetchQuotaSummary() {
   return httpRequest<QuotaSummaryResponse>("/api/quota");
 }
@@ -333,6 +496,44 @@ export async function fetchImageQueueStatus(requestId?: string | null) {
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return httpRequest<ImageQueueStatusResponse>(`/api/image-queue/me${suffix}`);
+}
+
+export async function fetchAdminImageQueue() {
+  return httpRequest<Record<string, unknown>>("/api/image-queue/admin");
+}
+
+export async function fetchImageRequests(filters: ImageRequestListFilters = {}) {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value === undefined || value === null || String(value).trim() === "") {
+      return;
+    }
+    params.set(key, String(value));
+  });
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return httpRequest<{ items: ImageRequestRecord[]; next_cursor?: string | null }>(`/api/image-requests${suffix}`);
+}
+
+export async function fetchImageRequestRecord(requestId: string) {
+  return httpRequest<ImageRequestRecord>(`/api/image-requests/${encodeURIComponent(requestId)}`);
+}
+
+export async function fetchImageConversations() {
+  return httpRequest<{ items: ImageConversationPayload[] }>("/api/image-conversations");
+}
+
+export async function saveImageConversationToServer(conversation: ImageConversationPayload) {
+  return httpRequest<{ item: ImageConversationPayload; items: ImageConversationPayload[] }>("/api/image-conversations", {
+    method: "POST",
+    body: conversation,
+  });
+}
+
+export async function deleteImageConversationFromServer(id: string) {
+  return httpRequest<{ removed: number; items: ImageConversationPayload[] }>("/api/image-conversations", {
+    method: "DELETE",
+    body: { id },
+  });
 }
 
 export async function createAccounts(options: { tokens?: string[]; accounts?: ImportedAccount[] }) {

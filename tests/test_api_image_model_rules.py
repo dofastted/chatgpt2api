@@ -73,7 +73,7 @@ class ApiImageModelRuleTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_default_user_key_pricing_now_uses_image_2_cost_two(self) -> None:
+    def test_default_user_key_pricing_uses_4k_cost_eight(self) -> None:
         legacy_file = self.temp_dir / "legacy-user-keys.json"
         legacy_file.write_text(
             '[{"key":"legacy-key","quota":12,"status":"启用"}]',
@@ -87,7 +87,7 @@ class ApiImageModelRuleTests(unittest.TestCase):
         assert item is not None
         self.assertEqual(
             item["pricing"],
-            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 2},
+            {"gpt-image-2": 2, "gpt-image-2-2K": 2, "gpt-image-2-4K": 8},
         )
 
     def test_normalize_requested_image_model_allows_public_image_2_variants(self) -> None:

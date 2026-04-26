@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import random
 import sys
 import unittest
 from io import BytesIO
@@ -48,6 +49,19 @@ class FakeOkResponse:
 
 
 class ImageServiceAttachmentTests(unittest.TestCase):
+    def test_prepare_input_image_for_upstream_downscales_large_png(self) -> None:
+        image = Image.frombytes("RGB", (2200, 1600), random.Random(1234).randbytes(2200 * 1600 * 3))
+        source = BytesIO()
+        image.save(source, format="PNG")
+        source_bytes = source.getvalue()
+
+        optimized, mime_type = image_service._prepare_input_image_for_upstream(source_bytes, "image/png")
+        width, height = image_service._detect_input_image_dimensions(optimized)
+
+        self.assertEqual(mime_type, "image/jpeg")
+        self.assertLess(len(optimized), len(source_bytes))
+        self.assertLessEqual(max(width or 0, height or 0), image_service.MAX_UPSTREAM_INPUT_IMAGE_SIDE)
+
     def test_build_uploaded_input_image_supports_data_url(self) -> None:
         png_bytes = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
@@ -460,6 +474,24 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertEqual(body["tools"][0]["type"], "image_generation")
         self.assertEqual(body["tools"][0]["model"], "gpt-image-2")
         self.assertEqual(body["tools"][0]["action"], "generate")
+
+    def test_send_responses_request_wraps_http2_stream_errors_as_image_errors(self) -> None:
+        class Session(FakeSession):
+            def post(self, url: str, **kwargs):
+                del url, kwargs
+                raise RuntimeError("Failed to perform, curl: (92) HTTP/2 stream 1 was not closed cleanly")
+
+        with self.assertRaises(image_service.ImageGenerationError) as raised:
+            image_service._send_responses_request(
+                Session(),
+                "token-123",
+                "account-123",
+                "draw",
+                "gpt-image-2",
+                None,
+            )
+
+        self.assertIn("HTTP/2 stream", str(raised.exception))
 
     def test_is_transient_image_error_treats_conversation_422_as_retryable(self) -> None:
         self.assertTrue(image_service.is_transient_image_error("conversation failed: 422"))

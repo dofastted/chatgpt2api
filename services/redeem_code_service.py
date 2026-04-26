@@ -8,7 +8,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from services.config import config
+from services.config import DATA_DIR, config
+from services.sqlite_store import sqlite_store
 
 
 class RedeemCodeService:
@@ -17,6 +18,7 @@ class RedeemCodeService:
 
     def __init__(self, store_file: Path):
         self.store_file = store_file
+        self.document_name = f"redeem_codes:{self.store_file.resolve()}"
         self._lock = Lock()
         self._items = self._load_items()
 
@@ -58,22 +60,21 @@ class RedeemCodeService:
         }
 
     def _load_items(self) -> list[dict[str, Any]]:
-        if not self.store_file.exists():
-            return []
-        try:
-            data = json.loads(self.store_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
+        data = sqlite_store.load_document(self.document_name, [], self.store_file)
         if not isinstance(data, list):
             return []
         return [normalized for item in data if (normalized := self._normalize_item(item)) is not None]
 
     def _save_items(self) -> None:
-        self.store_file.parent.mkdir(parents=True, exist_ok=True)
-        self.store_file.write_text(
-            json.dumps(self._items, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        sqlite_store.save_document(self.document_name, self._items)
+        try:
+            self.store_file.resolve().relative_to(DATA_DIR.resolve())
+        except ValueError:
+            self.store_file.parent.mkdir(parents=True, exist_ok=True)
+            self.store_file.write_text(
+                json.dumps(self._items, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
     def _public_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [

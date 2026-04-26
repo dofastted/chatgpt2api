@@ -182,6 +182,63 @@ class AccountServiceImportTests(unittest.TestCase):
         service.release_token_slot("token-1")
         self.assertEqual(service.try_acquire_token_slot(), "token-1")
 
+    def test_input_image_token_slot_prefers_recent_successful_accounts(self) -> None:
+        service = self.make_service(
+            [
+                {
+                    "access_token": "token-1",
+                    "category": "普通",
+                    "type": "Plus",
+                    "status": "正常",
+                    "quota": 5,
+                    "input_image_success": 0,
+                    "input_image_fail": 2,
+                    "needs_refresh": False,
+                },
+                {
+                    "access_token": "token-2",
+                    "category": "普通",
+                    "type": "Plus",
+                    "status": "正常",
+                    "quota": 5,
+                    "input_image_success": 3,
+                    "input_image_fail": 0,
+                    "last_input_image_success_at": "2026-04-26 10:00:00",
+                    "needs_refresh": False,
+                },
+            ]
+        )
+
+        self.assertEqual(service.try_acquire_token_slot(prefer_input_image=True), "token-2")
+
+    def test_mark_image_result_tracks_input_image_stats(self) -> None:
+        service = self.make_service(
+            [
+                {
+                    "access_token": "token-1",
+                    "category": "普通",
+                    "type": "Plus",
+                    "status": "正常",
+                    "quota": 5,
+                    "needs_refresh": False,
+                }
+            ]
+        )
+
+        success = service.mark_image_result("token-1", success=True, input_image=True)
+        self.assertIsNotNone(success)
+        assert success is not None
+        self.assertEqual(success["input_image_success"], 1)
+        self.assertEqual(success["input_image_fail"], 0)
+        self.assertIsNotNone(success["last_input_image_used_at"])
+        self.assertIsNotNone(success["last_input_image_success_at"])
+
+        failed = service.mark_image_result("token-1", success=False, input_image=True)
+        self.assertIsNotNone(failed)
+        assert failed is not None
+        self.assertEqual(failed["input_image_success"], 1)
+        self.assertEqual(failed["input_image_fail"], 1)
+
     def test_list_refreshable_tokens_includes_limited_and_expired_cooldown(self) -> None:
         service = self.make_service(
             [

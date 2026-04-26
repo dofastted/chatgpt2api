@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
 from threading import Condition
 from time import time
 from typing import Any
 from uuid import uuid4
+
+from services.config import config
 
 
 @dataclass
@@ -23,10 +26,11 @@ class ImageQueueTicket:
 
 
 class ImageQueueService:
-    PER_USER_WAIT_LIMIT = 10
-    GLOBAL_WAIT_LIMIT = 2000
-    GLOBAL_START_LIMIT = 60
-    GLOBAL_START_WINDOW_SECONDS = 60.0
+    PER_USER_ACTIVE_LIMIT = max(1, int(config.image_queue_per_user_active_limit or 10))
+    PER_USER_WAIT_LIMIT = max(1, int(config.image_queue_per_user_wait_limit or 10))
+    GLOBAL_WAIT_LIMIT = max(1, int(config.image_queue_global_wait_limit or 2000))
+    GLOBAL_START_LIMIT = max(1, int(config.image_queue_global_start_limit or 60))
+    GLOBAL_START_WINDOW_SECONDS = float(max(1, int(config.image_queue_global_start_window_seconds or 60)))
     RECENT_TTL_SECONDS = 600
 
     def __init__(self) -> None:
@@ -52,6 +56,13 @@ class ImageQueueService:
         if timestamp is None:
             return None
         return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _hash_token(auth_token: str) -> str:
+        normalized = str(auth_token or "").strip()
+        if not normalized:
+            return ""
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     def _cleanup_recent_locked(self) -> None:
         now_value = time()
@@ -99,6 +110,9 @@ class ImageQueueService:
             if len(self._waiting_order) >= self.GLOBAL_WAIT_LIMIT:
                 raise RuntimeError(f"global image queue is full, max_waiting={self.GLOBAL_WAIT_LIMIT}")
             user_waiting = int(self._user_waiting.get(normalized_auth_token) or 0)
+            user_running = int(self._user_running.get(normalized_auth_token) or 0)
+            if user_waiting + user_running >= self.PER_USER_ACTIVE_LIMIT:
+                raise ValueError(f"user image queue is full, max_active={self.PER_USER_ACTIVE_LIMIT}")
             if user_waiting >= self.PER_USER_WAIT_LIMIT:
                 raise ValueError(f"user image queue is full, max_waiting={self.PER_USER_WAIT_LIMIT}")
             existing = self._tickets.get(normalized_request_id)
@@ -216,6 +230,7 @@ class ImageQueueService:
                 request_ticket = self._tickets.get(normalized_request_id) or self._recent.get(normalized_request_id)
             return {
                 "limits": {
+                    "per_user_active": self.PER_USER_ACTIVE_LIMIT,
                     "per_user_waiting": self.PER_USER_WAIT_LIMIT,
                     "global_waiting": self.GLOBAL_WAIT_LIMIT,
                     "global_starts_per_window": self.GLOBAL_START_LIMIT,
@@ -224,15 +239,56 @@ class ImageQueueService:
                 "user": {
                     "waiting": int(self._user_waiting.get(normalized_auth_token) or 0),
                     "running": int(self._user_running.get(normalized_auth_token) or 0),
+                    "active": int(self._user_waiting.get(normalized_auth_token) or 0)
+                    + int(self._user_running.get(normalized_auth_token) or 0),
                 },
                 "global": {
                     "waiting": len(self._waiting_order),
                     "running": self._global_running,
+                    "active": len(self._waiting_order) + self._global_running,
                     "starts_in_window": len(self._start_timestamps),
                     "start_wait_seconds": round(start_wait_seconds, 3),
                 },
                 "request": self._serialize_ticket(request_ticket, waiting_positions),
                 "items": [self._serialize_ticket(ticket, waiting_positions) for ticket in items],
+            }
+
+    def snapshot_all(self) -> dict[str, object]:
+        with self._condition:
+            now_value = time()
+            self._cleanup_recent_locked()
+            self._cleanup_start_timestamps_locked(now_value)
+            start_wait_seconds = self._global_start_wait_seconds_locked(now_value)
+            waiting_positions = {item_id: index + 1 for index, item_id in enumerate(self._waiting_order)}
+            return {
+                "limits": {
+                    "per_user_active": self.PER_USER_ACTIVE_LIMIT,
+                    "per_user_waiting": self.PER_USER_WAIT_LIMIT,
+                    "global_waiting": self.GLOBAL_WAIT_LIMIT,
+                    "global_starts_per_window": self.GLOBAL_START_LIMIT,
+                    "global_start_window_seconds": self.GLOBAL_START_WINDOW_SECONDS,
+                },
+                "global": {
+                    "waiting": len(self._waiting_order),
+                    "running": self._global_running,
+                    "active": len(self._waiting_order) + self._global_running,
+                    "starts_in_window": len(self._start_timestamps),
+                    "start_wait_seconds": round(start_wait_seconds, 3),
+                },
+                "users": [
+                    {
+                        "auth_token_hash": self._hash_token(auth_token),
+                        "waiting": int(self._user_waiting.get(auth_token) or 0),
+                        "running": int(self._user_running.get(auth_token) or 0),
+                        "active": int(self._user_waiting.get(auth_token) or 0)
+                        + int(self._user_running.get(auth_token) or 0),
+                    }
+                    for auth_token in sorted(set(self._user_waiting) | set(self._user_running))
+                ],
+                "items": [
+                    self._serialize_ticket(ticket, waiting_positions)
+                    for ticket in sorted(self._tickets.values(), key=lambda item: item.created_at)
+                ],
             }
 
     def _serialize_ticket(

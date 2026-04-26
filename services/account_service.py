@@ -11,8 +11,9 @@ from datetime import datetime, timedelta
 
 from curl_cffi.requests import Session
 
-from services.config import config
+from services.config import DATA_DIR, config
 from services.proxy_service import proxy_service
+from services.sqlite_store import sqlite_store
 
 
 class AccountService:
@@ -33,6 +34,7 @@ class AccountService:
 
     def __init__(self, store_file: Path):
         self.store_file = store_file
+        self.document_name = f"accounts:{self.store_file.resolve()}"
         self._lock = Lock()
         self._slot_condition = Condition(self._lock)
         self._index = 0
@@ -232,7 +234,11 @@ class AccountService:
         normalized["restore_at"] = self._clean_token(normalized.get("restore_at")) or None
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
+        normalized["input_image_success"] = int(normalized.get("input_image_success") or 0)
+        normalized["input_image_fail"] = int(normalized.get("input_image_fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
+        normalized["last_input_image_used_at"] = normalized.get("last_input_image_used_at")
+        normalized["last_input_image_success_at"] = normalized.get("last_input_image_success_at")
         normalized["cooldown_until"] = self._normalize_future_time_text(normalized.get("cooldown_until"))
         raw_needs_refresh = normalized.get("needs_refresh")
         if raw_needs_refresh is None:
@@ -256,22 +262,21 @@ class AccountService:
         return quota, restore_at
 
     def _load_accounts(self) -> list[dict]:
-        if not self.store_file.exists():
-            return []
-        try:
-            data = json.loads(self.store_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
+        data = sqlite_store.load_document(self.document_name, [], self.store_file)
         if not isinstance(data, list):
             return []
         return [normalized for item in data if (normalized := self._normalize_account(item)) is not None]
 
     def _save_accounts(self) -> None:
-        self.store_file.parent.mkdir(parents=True, exist_ok=True)
-        self.store_file.write_text(
-            json.dumps(self._accounts, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        sqlite_store.save_document(self.document_name, self._accounts)
+        try:
+            self.store_file.resolve().relative_to(DATA_DIR.resolve())
+        except ValueError:
+            self.store_file.parent.mkdir(parents=True, exist_ok=True)
+            self.store_file.write_text(
+                json.dumps(self._accounts, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
     def _build_remote_headers(self, access_token: str) -> tuple[dict[str, str], str]:
         account = self.get_account(access_token) or {}
@@ -320,7 +325,11 @@ class AccountService:
                 "restoreAt": account.get("restore_at"),
                 "success": int(account.get("success") or 0),
                 "fail": int(account.get("fail") or 0),
+                "inputImageSuccess": int(account.get("input_image_success") or 0),
+                "inputImageFail": int(account.get("input_image_fail") or 0),
                 "lastUsedAt": account.get("last_used_at"),
+                "lastInputImageUsedAt": account.get("last_input_image_used_at"),
+                "lastInputImageSuccessAt": account.get("last_input_image_success_at"),
                 "cooldownUntil": account.get("cooldown_until"),
                 "needsRefresh": bool(account.get("needs_refresh")),
             }
@@ -332,33 +341,72 @@ class AccountService:
         with self._lock:
             return [token for item in self._accounts if (token := self._clean_token(item.get("access_token")))]
 
-    def _candidate_tokens_locked(self, excluded_tokens: set[str] | None = None) -> list[str]:
-        excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
-        return [
-            token
-            for item in self._accounts
-            if self._is_image_account_available(item)
-            and (token := self._clean_token(item.get("access_token")))
-            and token not in excluded
-            and self._has_account_capacity(int(self._inflight_counts.get(token) or 0))
-        ]
+    @classmethod
+    def _input_image_score(cls, account: dict[str, Any]) -> tuple[int, int, int, str]:
+        success = int(account.get("input_image_success") or 0)
+        fail = int(account.get("input_image_fail") or 0)
+        last_success = str(account.get("last_input_image_success_at") or "")
+        return (
+            1 if success > 0 else 0,
+            success - fail,
+            success,
+            last_success,
+        )
 
-    def next_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def _candidate_tokens_locked(
+        self,
+        excluded_tokens: set[str] | None = None,
+        *,
+        prefer_input_image: bool = False,
+    ) -> list[str]:
+        excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for item in self._accounts:
+            if not self._is_image_account_available(item):
+                continue
+            token = self._clean_token(item.get("access_token"))
+            if not token or token in excluded:
+                continue
+            if not self._has_account_capacity(int(self._inflight_counts.get(token) or 0)):
+                continue
+            candidates.append((token, item))
+        if prefer_input_image:
+            candidates.sort(key=lambda pair: self._input_image_score(pair[1]), reverse=True)
+        return [token for token, _item in candidates]
+
+    def next_token(self, excluded_tokens: set[str] | None = None, *, prefer_input_image: bool = False) -> str:
         with self._lock:
-            tokens = self._candidate_tokens_locked(excluded_tokens=excluded_tokens)
+            tokens = self._candidate_tokens_locked(
+                excluded_tokens=excluded_tokens,
+                prefer_input_image=prefer_input_image,
+            )
             if not tokens:
                 raise RuntimeError(f"No available tokens found in {self.store_file}")
-            access_token = tokens[self._index % len(tokens)]
-            self._index += 1
+            if prefer_input_image:
+                access_token = tokens[0]
+            else:
+                access_token = tokens[self._index % len(tokens)]
+                self._index += 1
             return access_token
 
-    def try_acquire_token_slot(self, excluded_tokens: set[str] | None = None) -> str | None:
+    def try_acquire_token_slot(
+        self,
+        excluded_tokens: set[str] | None = None,
+        *,
+        prefer_input_image: bool = False,
+    ) -> str | None:
         with self._lock:
-            tokens = self._candidate_tokens_locked(excluded_tokens=excluded_tokens)
+            tokens = self._candidate_tokens_locked(
+                excluded_tokens=excluded_tokens,
+                prefer_input_image=prefer_input_image,
+            )
             if not tokens:
                 return None
-            access_token = tokens[self._index % len(tokens)]
-            self._index += 1
+            if prefer_input_image:
+                access_token = tokens[0]
+            else:
+                access_token = tokens[self._index % len(tokens)]
+                self._index += 1
             self._inflight_counts[access_token] = int(self._inflight_counts.get(access_token) or 0) + 1
             return access_token
 
@@ -580,7 +628,7 @@ class AccountService:
             return dict(account)
         return None
 
-    def mark_image_result(self, access_token: str, success: bool) -> dict | None:
+    def mark_image_result(self, access_token: str, success: bool, *, input_image: bool = False) -> dict | None:
         access_token = self._clean_token(access_token)
         if not access_token:
             return None
@@ -589,9 +637,15 @@ class AccountService:
             if index < 0:
                 return None
             next_item = dict(self._accounts[index])
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = now_text
+            if input_image:
+                next_item["last_input_image_used_at"] = now_text
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1
+                if input_image:
+                    next_item["input_image_success"] = int(next_item.get("input_image_success") or 0) + 1
+                    next_item["last_input_image_success_at"] = now_text
                 next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
                 next_item["cooldown_until"] = None
                 if next_item["quota"] == 0:
@@ -601,6 +655,8 @@ class AccountService:
                     next_item["status"] = "正常"
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
+                if input_image:
+                    next_item["input_image_fail"] = int(next_item.get("input_image_fail") or 0) + 1
                 next_item["cooldown_until"] = self._build_cooldown_until(self.FAILURE_COOLDOWN_SECONDS)
             account = self._normalize_account(next_item)
             if account is None:

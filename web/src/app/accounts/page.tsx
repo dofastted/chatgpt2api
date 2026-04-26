@@ -11,13 +11,17 @@ import {
   CircleAlert,
   CircleOff,
   Copy,
+  Database,
+  FileSearch,
   Download,
+  HardDrive,
   KeyRound,
   LoaderCircle,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  Save,
   Ticket,
   Trash2,
   Upload,
@@ -54,6 +58,7 @@ import {
 import {
   createAccounts,
   createRedeemCodes,
+  createDataBackup,
   createUserKeys,
   deleteProxy,
   deleteAccounts,
@@ -61,17 +66,30 @@ import {
   deleteUserKeys,
   fetchAuthSession,
   fetchAccounts,
+  fetchDataBackups,
+  fetchDataManagementLogs,
+  fetchDataManagementSettings,
+  fetchDataManagementStatus,
+  fetchImageRequests,
   fetchProxies,
   fetchRedeemCodes,
   fetchUserKeys,
   refreshAccounts,
+  testDataManagementS3,
   upsertProxy,
+  updateDataManagementSettings,
   updateAccount,
   updateUserKey,
   type Account,
   type AccountCategory,
   type AccountStatus,
   type AccountType,
+  type DataBackupRecord,
+  type DataManagementLogItem,
+  type DataManagementSettings,
+  type DataManagementStatus,
+  type ImageRequestRecord,
+  type ImageRequestStatus,
   type ProxyItem,
   type ProxyProtocol,
   type RedeemCode,
@@ -147,12 +165,14 @@ const metricCards = [
 const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
   "gpt-image-2": 2,
   "gpt-image-2-2K": 2,
-  "gpt-image-2-4K": 2,
+  "gpt-image-2-4K": 8,
 };
+
+const imageModels: ImageModel[] = ["gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K"];
 
 const ADMIN_SECONDARY_PAGE_SIZE = 10;
 
-type AdminTab = "accounts" | "userKeys" | "redeemCodes";
+type AdminTab = "accounts" | "userKeys" | "redeemCodes" | "data";
 type UserKeyExportState = {
   open: boolean;
   title: string;
@@ -224,6 +244,31 @@ function formatDateTime(value?: string | null) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
     date.getMinutes(),
   )}:${pad(date.getSeconds())}`;
+}
+
+function formatBytes(value: number) {
+  const bytes = Math.max(0, Number(value || 0));
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${bytes} B`;
+}
+
+function formatDurationMs(value?: number | null) {
+  const ms = Math.max(0, Number(value || 0));
+  if (!ms) {
+    return "—";
+  }
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function buildUserKeyPricing(
@@ -321,6 +366,16 @@ export default function AccountsPage() {
   const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
   const [proxies, setProxies] = useState<ProxyItem[]>([]);
   const [activeProxyUrl, setActiveProxyUrl] = useState<string>("");
+  const [dataStatus, setDataStatus] = useState<DataManagementStatus | null>(null);
+  const [dataSettings, setDataSettings] = useState<DataManagementSettings | null>(null);
+  const [dataBackups, setDataBackups] = useState<DataBackupRecord[]>([]);
+  const [dataLogs, setDataLogs] = useState<DataManagementLogItem[]>([]);
+  const [imageRequests, setImageRequests] = useState<ImageRequestRecord[]>([]);
+  const [selectedImageRequest, setSelectedImageRequest] = useState<ImageRequestRecord | null>(null);
+  const [imageRequestQuery, setImageRequestQuery] = useState("");
+  const [imageRequestStatusFilter, setImageRequestStatusFilter] = useState<ImageRequestStatus | "all">("all");
+  const [imageRequestModelFilter, setImageRequestModelFilter] = useState<ImageModel | "all">("all");
+  const [imageRequestEndpointFilter, setImageRequestEndpointFilter] = useState<string>("all");
   const [activeTab, setActiveTab] = useState<AdminTab>("accounts");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedUserKeyIds, setSelectedUserKeyIds] = useState<string[]>([]);
@@ -397,6 +452,11 @@ export default function AccountsPage() {
   const [isUploadingJson, setIsUploadingJson] = useState(false);
   const [isLoadingUserKeys, setIsLoadingUserKeys] = useState(true);
   const [isLoadingRedeemCodes, setIsLoadingRedeemCodes] = useState(true);
+  const [isLoadingDataManagement, setIsLoadingDataManagement] = useState(true);
+  const [isLoadingImageRequests, setIsLoadingImageRequests] = useState(true);
+  const [isSavingDataSettings, setIsSavingDataSettings] = useState(false);
+  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [isTestingS3, setIsTestingS3] = useState(false);
   const [isSubmittingUserKeys, setIsSubmittingUserKeys] = useState(false);
   const [isSubmittingRedeemCodes, setIsSubmittingRedeemCodes] = useState(false);
   const [isDeletingUserKeys, setIsDeletingUserKeys] = useState(false);
@@ -523,6 +583,58 @@ export default function AccountsPage() {
     }
   }
 
+  async function loadDataManagement(silent = false) {
+    if (!silent) {
+      setIsLoadingDataManagement(true);
+    }
+    try {
+      const [status, settings, backups, logs] = await Promise.all([
+        fetchDataManagementStatus({ redirectOnUnauthorized: false }),
+        fetchDataManagementSettings({ redirectOnUnauthorized: false }),
+        fetchDataBackups(),
+        fetchDataManagementLogs(),
+      ]);
+      setDataStatus(status);
+      setDataSettings(settings);
+      setDataBackups(backups.items);
+      setDataLogs(logs.items);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "加载数据管理失败";
+      if (!handleAdminRouteFailure(message)) {
+        toast.error(message);
+      }
+    } finally {
+      if (!silent) {
+        setIsLoadingDataManagement(false);
+      }
+    }
+  }
+
+  async function loadImageRequests(silent = false) {
+    if (!silent) {
+      setIsLoadingImageRequests(true);
+    }
+    try {
+      const data = await fetchImageRequests({
+        limit: 80,
+        ...(imageRequestQuery.trim() ? { request_id: imageRequestQuery.trim() } : {}),
+        ...(imageRequestStatusFilter !== "all" ? { status: imageRequestStatusFilter } : {}),
+        ...(imageRequestModelFilter !== "all" ? { model: imageRequestModelFilter } : {}),
+        ...(imageRequestEndpointFilter !== "all" ? { endpoint: imageRequestEndpointFilter } : {}),
+      });
+      setImageRequests(data.items);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "加载请求记录失败";
+      if (!handleAdminRouteFailure(message)) {
+        toast.error(message);
+      }
+    } finally {
+      if (!silent) {
+        setIsLoadingImageRequests(false);
+      }
+    }
+  }
+
   useEffect(() => {
     if (didLoadRef.current) {
       return;
@@ -550,6 +662,8 @@ export default function AccountsPage() {
           loadUserKeys(),
           loadRedeemCodes(),
           loadProxies(),
+          loadDataManagement(),
+          loadImageRequests(),
         ]);
       } catch (error) {
         if (cancelled) {
@@ -1317,6 +1431,72 @@ export default function AccountsPage() {
     }
   };
 
+  const handleSaveDataSettings = async () => {
+    if (!dataSettings) {
+      return;
+    }
+    setIsSavingDataSettings(true);
+    try {
+      const saved = await updateDataManagementSettings(dataSettings);
+      setDataSettings(saved);
+      await loadDataManagement(true);
+      toast.success("数据管理设置已保存");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "保存数据管理设置失败";
+      toast.error(message);
+    } finally {
+      setIsSavingDataSettings(false);
+    }
+  };
+
+  const handleCreateDataBackup = async () => {
+    setIsCreatingBackup(true);
+    try {
+      const backup = await createDataBackup();
+      await loadDataManagement(true);
+      if (backup.status === "success") {
+        toast.success("备份已创建");
+      } else {
+        toast.error(backup.error || "备份创建失败");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "创建备份失败";
+      toast.error(message);
+    } finally {
+      setIsCreatingBackup(false);
+    }
+  };
+
+  const handleTestDataS3 = async () => {
+    if (!dataSettings) {
+      return;
+    }
+    setIsTestingS3(true);
+    try {
+      await testDataManagementS3(dataSettings.s3);
+      toast.success("S3 连接正常");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "S3 连接失败";
+      toast.error(message);
+    } finally {
+      setIsTestingS3(false);
+    }
+  };
+
+  const updateDataS3Field = (key: keyof DataManagementSettings["s3"], value: string | boolean) => {
+    setDataSettings((prev) =>
+      prev
+        ? {
+            ...prev,
+            s3: {
+              ...prev.s3,
+              [key]: value,
+            },
+          }
+        : prev,
+    );
+  };
+
   const toggleSelectAll = (checked: boolean) => {
     if (checked) {
       setSelectedIds((prev) =>
@@ -1361,6 +1541,7 @@ export default function AccountsPage() {
     { value: "accounts", label: "账号池" },
     { value: "userKeys", label: "用户 Key" },
     { value: "redeemCodes", label: "兑换码" },
+    { value: "data", label: "数据管理" },
   ];
 
   return (
@@ -3538,6 +3719,459 @@ export default function AccountsPage() {
           </Card>
         </section>
       ) : null}
+
+      {activeTab === "data" ? (
+        <section className="minimal-fade-soft space-y-4 [animation-delay:180ms]">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
+                <Database className="size-4" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold tracking-tight">
+                  数据管理
+                </h2>
+                <p className="text-sm text-stone-500">
+                  查看 SQLite、备份、本地保存和 S3 设置。
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+                onClick={() => {
+                  void loadDataManagement();
+                  void loadImageRequests();
+                }}
+                disabled={isLoadingDataManagement || isLoadingImageRequests}
+              >
+                <RefreshCw className={cn("size-4", isLoadingDataManagement || isLoadingImageRequests ? "animate-spin" : "")} />
+                刷新
+              </Button>
+              <Button
+                className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+                onClick={() => void handleCreateDataBackup()}
+                disabled={isCreatingBackup}
+              >
+                {isCreatingBackup ? <LoaderCircle className="size-4 animate-spin" /> : <HardDrive className="size-4" />}
+                手动备份
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-3">
+            <Card className="minimal-card lg:col-span-2">
+              <CardContent className="space-y-4 p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-stone-900">
+                      SQLite 状态
+                    </h3>
+                    <p className="mt-1 text-sm text-stone-500">
+                      {dataStatus?.sqlite_path || "—"}
+                    </p>
+                  </div>
+                  <Badge variant={dataStatus?.exists ? "success" : "danger"}>
+                    {dataStatus?.exists ? "可用" : "未创建"}
+                  </Badge>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-stone-100 bg-stone-50/70 p-3">
+                    <div className="text-xs text-stone-500">数据库大小</div>
+                    <div className="mt-1 text-lg font-semibold text-stone-900">
+                      {formatBytes(dataStatus?.size_bytes || 0)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-stone-100 bg-stone-50/70 p-3">
+                    <div className="text-xs text-stone-500">备份目录</div>
+                    <div className="mt-1 truncate text-sm font-medium text-stone-900">
+                      {dataStatus?.backup_dir || "—"}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-stone-100 bg-stone-50/70 p-3">
+                    <div className="text-xs text-stone-500">备份占用</div>
+                    <div className="mt-1 text-lg font-semibold text-stone-900">
+                      {formatBytes(dataStatus?.backup_size_bytes || 0)}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {Object.entries(dataStatus?.tables || {}).map(([name, count]) => (
+                    <div key={name} className="flex items-center justify-between rounded-lg border border-stone-100 px-3 py-2 text-sm">
+                      <span className="text-stone-500">{name}</span>
+                      <span className="font-medium text-stone-900">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="minimal-card">
+              <CardContent className="space-y-3 p-5">
+                <h3 className="text-base font-semibold text-stone-900">
+                  保存设置
+                </h3>
+                <label className="flex items-center gap-2 text-sm text-stone-700">
+                  <Checkbox
+                    checked={Boolean(dataSettings?.backup_enabled)}
+                    onCheckedChange={(checked) =>
+                      setDataSettings((prev) => (prev ? { ...prev, backup_enabled: Boolean(checked) } : prev))
+                    }
+                  />
+                  开启定时备份
+                </label>
+                <label className="flex items-center gap-2 text-sm text-stone-700">
+                  <Checkbox
+                    checked={Boolean(dataSettings?.save_image_conversations)}
+                    onCheckedChange={(checked) =>
+                      setDataSettings((prev) => (prev ? { ...prev, save_image_conversations: Boolean(checked) } : prev))
+                    }
+                  />
+                  保存图片会话
+                </label>
+                <label className="flex items-center gap-2 text-sm text-stone-700">
+                  <Checkbox
+                    checked={Boolean(dataSettings?.save_logs)}
+                    onCheckedChange={(checked) =>
+                      setDataSettings((prev) => (prev ? { ...prev, save_logs: Boolean(checked) } : prev))
+                    }
+                  />
+                  保存运行日志
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    value={dataSettings?.backup_interval_minutes ?? 0}
+                    onChange={(event) =>
+                      setDataSettings((prev) =>
+                        prev ? { ...prev, backup_interval_minutes: Math.max(0, Number(event.target.value || 0)) } : prev,
+                      )
+                    }
+                    className="h-10 rounded-xl border-stone-200"
+                    placeholder="间隔分钟"
+                  />
+                  <Input
+                    type="number"
+                    min={1}
+                    value={dataSettings?.backup_max_bytes ?? 1}
+                    onChange={(event) =>
+                      setDataSettings((prev) =>
+                        prev ? { ...prev, backup_max_bytes: Math.max(1, Number(event.target.value || 1)) } : prev,
+                      )
+                    }
+                    className="h-10 rounded-xl border-stone-200"
+                    placeholder="最大字节"
+                  />
+                </div>
+                <Button
+                  className="h-10 w-full rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+                  onClick={() => void handleSaveDataSettings()}
+                  disabled={isSavingDataSettings || !dataSettings}
+                >
+                  {isSavingDataSettings ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+                  保存设置
+                </Button>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className="minimal-card">
+            <CardContent className="space-y-4 p-5">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 className="text-base font-semibold text-stone-900">
+                    S3 备份上传
+                  </h3>
+                  <p className="mt-1 text-sm text-stone-500">
+                    只上传备份包，不改变图片读取方式。
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                    onClick={() => void handleTestDataS3()}
+                    disabled={isTestingS3 || !dataSettings}
+                  >
+                    {isTestingS3 ? <LoaderCircle className="size-4 animate-spin" /> : null}
+                    测试 S3
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-3 md:grid-cols-4">
+                <Input value={dataSettings?.s3.endpoint || ""} onChange={(event) => updateDataS3Field("endpoint", event.target.value)} placeholder="endpoint" className="h-10 rounded-xl border-stone-200" />
+                <Input value={dataSettings?.s3.region || ""} onChange={(event) => updateDataS3Field("region", event.target.value)} placeholder="region" className="h-10 rounded-xl border-stone-200" />
+                <Input value={dataSettings?.s3.bucket || ""} onChange={(event) => updateDataS3Field("bucket", event.target.value)} placeholder="bucket" className="h-10 rounded-xl border-stone-200" />
+                <Input value={dataSettings?.s3.prefix || ""} onChange={(event) => updateDataS3Field("prefix", event.target.value)} placeholder="prefix" className="h-10 rounded-xl border-stone-200" />
+                <Input value={dataSettings?.s3.access_key_id || ""} onChange={(event) => updateDataS3Field("access_key_id", event.target.value)} placeholder="access key id" className="h-10 rounded-xl border-stone-200" />
+                <Input value={dataSettings?.s3.secret_access_key || ""} onChange={(event) => updateDataS3Field("secret_access_key", event.target.value)} placeholder="secret access key" type="password" className="h-10 rounded-xl border-stone-200" />
+                <label className="flex items-center gap-2 rounded-xl border border-stone-100 px-3 text-sm text-stone-700">
+                  <Checkbox checked={Boolean(dataSettings?.s3.enabled)} onCheckedChange={(checked) => updateDataS3Field("enabled", Boolean(checked))} />
+                  启用上传
+                </label>
+                <label className="flex items-center gap-2 rounded-xl border border-stone-100 px-3 text-sm text-stone-700">
+                  <Checkbox checked={Boolean(dataSettings?.s3.force_path_style)} onCheckedChange={(checked) => updateDataS3Field("force_path_style", Boolean(checked))} />
+                  path style
+                </label>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="minimal-card">
+            <CardContent className="space-y-4 p-5">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 className="flex items-center gap-2 text-base font-semibold text-stone-900">
+                    <FileSearch className="size-4" />
+                    请求记录
+                  </h3>
+                  <p className="mt-1 text-sm text-stone-500">
+                    只保存摘要、耗时、扣费和路线，不保存完整 prompt 或图片内容。
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                  onClick={() => void loadImageRequests()}
+                  disabled={isLoadingImageRequests}
+                >
+                  <RefreshCw className={cn("size-4", isLoadingImageRequests ? "animate-spin" : "")} />
+                  刷新记录
+                </Button>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-4">
+                <Input
+                  value={imageRequestQuery}
+                  onChange={(event) => setImageRequestQuery(event.target.value)}
+                  placeholder="请求 id"
+                  className="h-10 rounded-xl border-stone-200"
+                />
+                <Select value={imageRequestStatusFilter} onValueChange={(value) => setImageRequestStatusFilter(value as ImageRequestStatus | "all")}>
+                  <SelectTrigger className="h-10 rounded-xl border-stone-200">
+                    <SelectValue placeholder="状态" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部状态</SelectItem>
+                    {["accepted", "waiting", "assigning_account", "running", "finished", "failed", "rejected"].map((status) => (
+                      <SelectItem key={status} value={status}>
+                        {status}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={imageRequestModelFilter} onValueChange={(value) => setImageRequestModelFilter(value as ImageModel | "all")}>
+                  <SelectTrigger className="h-10 rounded-xl border-stone-200">
+                    <SelectValue placeholder="模型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部模型</SelectItem>
+                    {imageModels.map((model) => (
+                      <SelectItem key={model} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={imageRequestEndpointFilter} onValueChange={setImageRequestEndpointFilter}>
+                  <SelectTrigger className="h-10 rounded-xl border-stone-200">
+                    <SelectValue placeholder="入口" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">全部入口</SelectItem>
+                    <SelectItem value="/v1/responses">/v1/responses</SelectItem>
+                    <SelectItem value="/v1/images/generations">/v1/images/generations</SelectItem>
+                    <SelectItem value="/v1/images/edits">/v1/images/edits</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                  onClick={() => void loadImageRequests()}
+                  disabled={isLoadingImageRequests}
+                >
+                  <Search className="size-4" />
+                  查询
+                </Button>
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border border-stone-100">
+                <table className="w-full min-w-[1120px] text-left text-sm">
+                  <thead className="bg-stone-50 text-xs text-stone-500">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">时间</th>
+                      <th className="px-3 py-2 font-medium">状态</th>
+                      <th className="px-3 py-2 font-medium">入口</th>
+                      <th className="px-3 py-2 font-medium">模型</th>
+                      <th className="px-3 py-2 font-medium">尺寸</th>
+                      <th className="px-3 py-2 font-medium">张数</th>
+                      <th className="px-3 py-2 font-medium">总耗时</th>
+                      <th className="px-3 py-2 font-medium">等待</th>
+                      <th className="px-3 py-2 font-medium">运行</th>
+                      <th className="px-3 py-2 font-medium">扣费</th>
+                      <th className="px-3 py-2 font-medium">key 标签</th>
+                      <th className="px-3 py-2 font-medium">请求 id</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {imageRequests.length === 0 ? (
+                      <tr>
+                        <td className="px-3 py-4 text-stone-500" colSpan={12}>
+                          暂无请求记录
+                        </td>
+                      </tr>
+                    ) : (
+                      imageRequests.map((item) => (
+                        <tr
+                          key={item.request_id}
+                          className="cursor-pointer hover:bg-stone-50"
+                          onClick={() => setSelectedImageRequest(item)}
+                        >
+                          <td className="px-3 py-2 text-stone-600">{formatDateTime(item.created_at)}</td>
+                          <td className="px-3 py-2">
+                            <Badge variant={item.status === "finished" ? "success" : item.status === "failed" || item.status === "rejected" ? "danger" : "secondary"}>
+                              {item.status}
+                            </Badge>
+                          </td>
+                          <td className="px-3 py-2 text-stone-600">{item.endpoint}</td>
+                          <td className="px-3 py-2 text-stone-900">{item.model || "—"}</td>
+                          <td className="px-3 py-2 text-stone-600">{item.size || "auto"}</td>
+                          <td className="px-3 py-2 text-stone-600">{item.n}</td>
+                          <td className="px-3 py-2 text-stone-600">{formatDurationMs(item.total_ms)}</td>
+                          <td className="px-3 py-2 text-stone-600">{formatDurationMs(item.queue_wait_ms)}</td>
+                          <td className="px-3 py-2 text-stone-600">{formatDurationMs(item.running_ms)}</td>
+                          <td className="px-3 py-2 text-stone-600">{item.charged_quota ?? "—"}</td>
+                          <td className="px-3 py-2 text-stone-600">{item.user_key_label || item.auth_type}</td>
+                          <td className="max-w-[180px] truncate px-3 py-2 font-mono text-xs text-stone-500">{item.request_id}</td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card className="minimal-card">
+              <CardContent className="p-0">
+                <div className="border-b border-stone-100 px-5 py-4">
+                  <h3 className="text-base font-semibold text-stone-900">
+                    备份记录
+                  </h3>
+                </div>
+                <div className="divide-y divide-stone-100">
+                  {dataBackups.length === 0 ? (
+                    <div className="p-5 text-sm text-stone-500">暂无备份</div>
+                  ) : (
+                    dataBackups.slice(0, 8).map((item) => (
+                      <div key={item.id} className="flex items-center justify-between gap-3 px-5 py-3 text-sm">
+                        <div className="min-w-0">
+                          <div className="truncate font-medium text-stone-900">{item.id}</div>
+                          <div className="truncate text-xs text-stone-500">{item.path}</div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <Badge variant={item.status === "success" ? "success" : "danger"}>{item.status}</Badge>
+                          <div className="mt-1 text-xs text-stone-500">{formatBytes(item.size_bytes)}</div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="minimal-card">
+              <CardContent className="p-0">
+                <div className="border-b border-stone-100 px-5 py-4">
+                  <h3 className="text-base font-semibold text-stone-900">
+                    最近日志
+                  </h3>
+                </div>
+                <div className="divide-y divide-stone-100">
+                  {dataLogs.length === 0 ? (
+                    <div className="p-5 text-sm text-stone-500">暂无日志</div>
+                  ) : (
+                    dataLogs.slice(0, 10).map((item) => (
+                      <div key={item.id} className="px-5 py-3 text-sm">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="font-medium text-stone-900">{item.component}</div>
+                          <span className="text-xs text-stone-500">{formatDateTime(item.created_at)}</span>
+                        </div>
+                        <div className="mt-1 text-stone-600">{item.message}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </section>
+      ) : null}
+
+      <Dialog open={Boolean(selectedImageRequest)} onOpenChange={(open) => !open && setSelectedImageRequest(null)}>
+        <DialogContent className="max-w-3xl rounded-2xl border-stone-200 bg-white">
+          <DialogHeader>
+            <DialogTitle>请求详情</DialogTitle>
+            <DialogDescription>
+              {selectedImageRequest?.request_id || "—"}
+            </DialogDescription>
+          </DialogHeader>
+          {selectedImageRequest ? (
+            <div className="grid gap-4 text-sm md:grid-cols-2">
+              <div className="space-y-2 rounded-xl border border-stone-100 p-3">
+                <div className="font-medium text-stone-900">阶段时间</div>
+                <div className="text-stone-600">接收：{formatDateTime(selectedImageRequest.accepted_at)}</div>
+                <div className="text-stone-600">排队：{formatDateTime(selectedImageRequest.queued_at)}</div>
+                <div className="text-stone-600">分配账号：{formatDateTime(selectedImageRequest.started_at)}</div>
+                <div className="text-stone-600">运行：{formatDateTime(selectedImageRequest.running_at)}</div>
+                <div className="text-stone-600">结束：{formatDateTime(selectedImageRequest.finished_at)}</div>
+              </div>
+              <div className="space-y-2 rounded-xl border border-stone-100 p-3">
+                <div className="font-medium text-stone-900">耗时</div>
+                <div className="text-stone-600">等待：{formatDurationMs(selectedImageRequest.queue_wait_ms)}</div>
+                <div className="text-stone-600">分配：{formatDurationMs(selectedImageRequest.assigning_ms)}</div>
+                <div className="text-stone-600">运行：{formatDurationMs(selectedImageRequest.running_ms)}</div>
+                <div className="text-stone-600">总计：{formatDurationMs(selectedImageRequest.total_ms)}</div>
+              </div>
+              <div className="space-y-2 rounded-xl border border-stone-100 p-3">
+                <div className="font-medium text-stone-900">计费</div>
+                <div className="text-stone-600">请求张数：{selectedImageRequest.requested_count ?? selectedImageRequest.n}</div>
+                <div className="text-stone-600">成功：{selectedImageRequest.succeeded_count ?? "—"}</div>
+                <div className="text-stone-600">失败：{selectedImageRequest.failed_count ?? "—"}</div>
+                <div className="text-stone-600">单价：{selectedImageRequest.unit_cost ?? "—"}</div>
+                <div className="text-stone-600">扣费：{selectedImageRequest.charged_quota ?? "—"}</div>
+                <div className="text-stone-600">剩余：{selectedImageRequest.remaining_quota ?? "—"}</div>
+              </div>
+              <div className="space-y-2 rounded-xl border border-stone-100 p-3">
+                <div className="font-medium text-stone-900">路线</div>
+                <div className="text-stone-600">账号类型：{selectedImageRequest.account_type || "—"}</div>
+                <div className="text-stone-600">路线：{selectedImageRequest.route || "—"}</div>
+                <div className="text-stone-600">尝试次数：{selectedImageRequest.attempt_count ?? "—"}</div>
+                <div className="text-stone-600">使用回退：{selectedImageRequest.fallback_used ? "是" : "否"}</div>
+                <div className="truncate text-stone-600">账号哈希：{selectedImageRequest.account_token_hash || "—"}</div>
+              </div>
+              <div className="space-y-2 rounded-xl border border-stone-100 p-3 md:col-span-2">
+                <div className="font-medium text-stone-900">内容摘要</div>
+                <div className="text-stone-600">prompt 摘要：{selectedImageRequest.prompt_preview || "—"}</div>
+                <div className="break-all font-mono text-xs text-stone-500">prompt_hash：{selectedImageRequest.prompt_hash || "—"}</div>
+              </div>
+              {(selectedImageRequest.error_message || selectedImageRequest.upstream_error) ? (
+                <div className="space-y-2 rounded-xl border border-red-100 bg-red-50 p-3 md:col-span-2">
+                  <div className="font-medium text-red-900">错误</div>
+                  <div className="text-red-700">{selectedImageRequest.error_message || "—"}</div>
+                  <div className="text-red-700">{selectedImageRequest.upstream_error || ""}</div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

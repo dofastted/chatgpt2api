@@ -18,6 +18,9 @@ ChatGPT 图片生成代理与账号池管理面板，提供账号维护、额度
 - 支持本地参考图上传，上传记录按当前 Bearer Token 隔离保存
 - 提供独立画廊页 `/gallery`，可搜索图片和 prompt，并把 prompt 带回画图页
 - 管理员可在号池管理页维护出站代理；账号刷新和生图请求会使用当前启用代理
+- 运行数据主存储为 `data/chatgpt2api.sqlite3`；旧 JSON 文件只作为首次导入和人工备份来源
+- 管理员页提供“数据管理”，可查看 SQLite 状态、手动备份、本地备份限制、S3 备份上传设置和最近日志
+- 生图请求会写入 SQLite 请求记录；管理员可按请求 id、状态、模型和入口查询耗时、扣费和路线摘要
 
 生图界面：
 ![image](assets/image.png)
@@ -37,7 +40,7 @@ Authorization: Bearer <auth-key>
 
 - `auth-key`：普通使用
 - `admin-auth-key`：后台管理
-- `user key`：普通调用，但有自己独立的剩余次数和模型单价；当前默认是 `gpt-image-2=2`、`gpt-image-2-2K=2`、`gpt-image-2-4K=2`
+- `user key`：普通调用，但有自己独立的剩余次数和模型单价；当前默认是 `gpt-image-2=2`、`gpt-image-2-2K=2`、`gpt-image-2-4K=8`
 
 前端购买与兑换：
 
@@ -71,11 +74,11 @@ POST /v1/images/generations
 - `user key` 调用时，实际扣费 = 当前 key 的模型单价 × `n`
 - 响应会额外返回 `billing`，包含本次模型、单价、实际扣减次数和剩余次数
 - 如果上游页面返回了可复制文本，响应还会额外带 `copied_text`
-- 服务现在有三层限制：全局请求队列、当前 Bearer Token 的等待上限、账号并发槽位
+- 服务现在有三层限制：全局请求队列、当前 Bearer Token 的活动请求上限、账号并发槽位
 - 单个账号最多同时跑 2 个生图；10 个健康账号时，最多同时跑 20 个生图
-- 单个 Bearer Token 最多允许 10 个等待中的请求；超过后会返回 `429`
+- 单个 Bearer Token 默认最多允许 10 个活动请求，活动数按 `waiting + running` 计算；超过后会返回 `429`
 - 全局等待队列默认一直等，但等待数超过 2000 时会返回 `503`
-- 可选请求头 `X-Image-Queue-Request-Id` 可让前端或调用方查询自己的排队状态，查询接口是 `GET /api/image-queue/me`
+- 可选请求头 `X-Image-Queue-Request-Id` 可让前端或调用方查询自己的排队状态，也会作为请求记录主键；查询接口是 `GET /api/image-queue/me`
 - 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
 - 支持 `stream: true`。流式时会返回 `image_generation.partial_image`，最后返回 `image_generation.completed` 和 `data: [DONE]`
@@ -96,12 +99,12 @@ POST /v1/responses
 - `input_image` 支持两种写法：`image_url` 只接受 `http(s)` 或 `data:image/*`，`file_id` 对应本地上传接口返回的文件标识
 - 图片模型放在 `tools[].model`，当前支持 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`；如果没传，默认按 `gpt-image-2` 处理，三个公开模型发往 ChatGPT 上游时都使用 `gpt-image-2`
 - 图片尺寸放在 `tools[].size`，默认 `auto`；非 `auto` 会规整后传给上游
-- 支持 `previous_response_id` 指向本服务生成过的 response，用于带入最近历史文本上下文；找不到会返回 `404`
+- 支持 `previous_response_id` 指向本服务生成过的 response，用于带入最近历史文本上下文；记录保存在 SQLite，容器重启后仍可读取；找不到会返回 `404`
 - `n` 最多 2
 - 返回 `response.output[]`，其中图片结果项是 `type: "image_generation_call"`，图片 base64 在 `result`
 - 如果上游页面返回了可复制文本，响应顶层还会带 `copied_text`
 - 同样会按 `user key` 自己的模型单价扣费，并在响应里返回 `billing`
-- 这条入口也走同一套三层队列；单个账号最多 2 并发，单个 Bearer Token 最多 10 个等待请求，全局等待超过 2000 时返回 `503`
+- 这条入口也走同一套三层队列；单个账号最多 2 并发，单个 Bearer Token 默认最多 10 个活动请求，全局等待超过 2000 时返回 `503`
 - 可选请求头 `X-Image-Queue-Request-Id` 可配合 `GET /api/image-queue/me` 查看当前 Bearer Token 的排队状态
 - 如果上游返回 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit 或 temporarily unavailable 这类瞬时错误，服务会自动换下一个可用账号重试
 - 某个账号命中上游失败后会暂停 3 分钟，再参与下一轮选号
@@ -158,7 +161,7 @@ GET /backend-api/files/{file_id}/content
 - 上传接口接收 `multipart/form-data`，字段名是 `file`
 - 单张图片大小上限是 8 MB
 - 支持的输入图片类型有 `png`、`jpeg`、`webp`、`gif`、`bmp`、`avif`
-- 上传记录保存在本地 `data/uploaded_images/` 和 `data/uploaded_images.json`
+- 上传原图保存在本地 `data/uploaded_images/`，元数据保存在 SQLite；旧 `data/uploaded_images.json` 只用于首次导入
 - 上传列表会按当前 Bearer Token 隔离，只返回自己的记录
 - 上传成功后会返回 `file_id`、尺寸、大小和下载地址；这个 `file_id` 可以直接放进 `/v1/responses` 的 `input_image`
 - 前端图片页选图时默认先走这组接口，不再把大图直接塞进请求体
@@ -173,7 +176,7 @@ GET /backend-api/files/{file_id}/content
 
 说明：
 
-- 代理记录保存在 `data/proxies.json`，可用 `CHATGPT2API_PROXIES_FILE` 或 `proxies-file` 覆盖
+- 代理记录保存在 SQLite；旧 `data/proxies.json` 只用于首次导入，可用 `CHATGPT2API_PROXIES_FILE` 或 `proxies-file` 指向导入来源
 - 支持 `http` 和 `socks5`
 - 同一时间只有一个代理处于启用状态
 - 没有启用代理时，账号刷新和生图请求直连上游
@@ -186,11 +189,45 @@ GET /backend-api/files/{file_id}/content
 - 返回 200，结果图保存在 `.llmdoc-tmp/api-image-tests/uploaded-abc123-result.png`
 - 实际结果图内容是 `ABC123`
 
+### 云端并发验收
+
+- 2026-04-26 在 `https://img.fkcodex.com` 上执行 20 个真实生图请求：`1K=10`、`2K=6`、`4K=4`
+- `/v1/responses` 和 `/v1/images/generations` 各 10 个请求，两个 user key 交替使用
+- 20 个请求全部成功，平均耗时 `24.29s`，P95 耗时 `46.89s`
+- 扣费结果：`gpt-image-2` 共 10 次扣 20，`gpt-image-2-2K` 共 6 次扣 12，`gpt-image-2-4K` 共 4 次扣 32
+- 队列采样显示全局运行峰值 20、全局等待峰值 3、单 key 等待峰值 2，请求结束后 `waiting=0`、`running=0`
+- 本次报告保存在 `.llmdoc-tmp/cloud-queue-checks/20260426-173010/report.json`
+
 ### 账号刷新兜底
 
 - 账号池请求前会先刷新远端信息
 - 如果刷新时只是瞬时网络错误，比如 TLS、连接重置、超时，而本地缓存账号仍可用，则会临时使用缓存状态继续请求
 - 如果是 `401` 这类确定失效，则仍按异常账号处理
+
+### 数据管理与备份
+
+管理员接口：
+
+- `GET /api/data-management/status`
+- `GET/PUT /api/data-management/settings`
+- `POST /api/data-management/backups`
+- `GET /api/data-management/backups`
+- `POST /api/data-management/s3/test`
+- `GET /api/data-management/logs`
+- `GET/POST/DELETE /api/image-conversations`
+- `GET /api/image-requests`
+- `GET /api/image-requests/{request_id}`
+- `GET /api/image-queue/admin`
+
+说明：
+
+- SQLite 默认路径是 `data/chatgpt2api.sqlite3`，可用 `CHATGPT2API_SQLITE_PATH` 或 `sqlite-path` 覆盖
+- 本地备份默认写到 `data/backups/`，可用 `backup-dir` 覆盖
+- `CHATGPT2API_BACKUP_MAX_BYTES` 默认 `524288000`，超过后删除最旧 `.tar.gz` 快照
+- `CHATGPT2API_BACKUP_INTERVAL_MINUTES` 默认 `0`，表示不启用定时备份
+- 备份包包含 SQLite 快照、`data/uploaded_images/` 和 `data/generated_images/`
+- S3 只接收备份包上传，不影响上传图和生成图的本地读取
+- 请求记录保存在 `image_request_records`，只保存 prompt 前 80 字、prompt sha256、Bearer Token 哈希、账号哈希、耗时、扣费和错误摘要，不保存完整 prompt、原始请求体或 base64 图片
 
 ## 部署
 

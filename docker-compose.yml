@@ -5,6 +5,10 @@ services:
     restart: unless-stopped
     ports:
       - "3000:80"
+    environment:
+      CHATGPT2API_SQLITE_PATH: /app/data/chatgpt2api.sqlite3
+      CHATGPT2API_BACKUP_MAX_BYTES: "524288000"
+      CHATGPT2API_BACKUP_INTERVAL_MINUTES: "0"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json:ro
