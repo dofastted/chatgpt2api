@@ -36,8 +36,11 @@
 画图页：
 
 - 画图页不再读账号列表，而是调用 `/api/quota` 显示当前 key 可用次数。如果当前是 `user_key`，也会拿到这个 key 自己的 `pricing`，入口在 `web/src/app/image/page.tsx:240`。
-- 画图页工具区提供“打开画廊”入口，画廊预览弹层可把 prompt 带回 `/image?prompt=...&focus=prompt`。
-- 画图页左侧只保留新建对话、图像尺寸、队列简况和会话列表。图像尺寸默认 `auto`，弹窗支持自动、比例和自定义宽高；尺寸计算在 `web/src/lib/image-size.ts`。
+- 画图页工具区提供“打开画廊”入口，画廊预览弹层可把 prompt 带回 `/image?prompt=...&focus=prompt`。`/image` 收到 `focus=prompt` 后会聚焦并滚动到输入框，再清掉查询串。
+- 画图页顶部栏放“新建”和“配置”。主界面在桌面端是历史侧栏、对话区、画廊栏三栏结构；中间对话区使用 `minmax(0, 1fr)` 风格的弹性区域承载结果和 composer，避免被左右两栏挤出。侧栏默认隐藏且只显示会话历史；桌面端用左上角按钮展开或收起，移动端用浮层抽屉打开。桌面历史侧栏使用约 500ms 的宽度、透明度和位移动画，不再用 spring 弹性动画；历史条目只做轻微 fade 和 y 轴移动。隐藏后的桌面侧栏不可点击，避免挡住顶部按钮。首屏不拉会话历史。侧栏打开后先请求 `/api/image-conversations?summary=true` 读取轻量摘要，摘要只保留最新 turn、`turnCount` 和状态字段；点选某条会话时再请求 `/api/image-conversations/{conversation_id}` 读取完整图片和 turn 数据。清空历史按钮在侧栏底部，点击后必须在弹窗里二次确认。图像尺寸默认 `auto`，弹窗支持自动、比例和自定义宽高；尺寸计算在 `web/src/lib/image-size.ts`。侧栏、历史条目、结果图和输入区使用 `motion/react` 做轻量动效，并通过 `prefers-reduced-motion` 降低动效。
+- 画图页右侧桌面端常驻画廊栏由 `web/src/app/image/page.tsx` 内部的 `ImageInspirationRail` 渲染。它动态读取 `web/src/data/gallery-ui-seed.json` 和 `web/src/data/gallery-image-dimensions.json`，两列展示小图，点击小图只打开预览弹窗，不直接改输入框。弹窗里提供复制 prompt 和“带入 prompt”，用户点“带入 prompt”后才写入 composer 并聚焦。右侧画廊栏可隐藏；隐藏状态只存在当前页面 state，不写后端。
+- 画图页空状态标题是“今天你想创造什么?”。标题下方展示 `gallery-ui-seed.json` 中有 prompt 的前 8 条快捷 prompt，点击后直接写入 composer 并聚焦输入框，不跳转。
+- 画图页 composer 在 `web/src/app/image/page.tsx` 中实现，结构接近 ChatGPT 输入栏：大圆角输入框，上方是 prompt textarea，下方是上传、画廊、张数切换、状态提示和圆形发送按钮。上传图预览仍在输入框内显示，Enter 发送、Shift+Enter 换行。
 - 前端发送时会先按当前 key 的模型单价和张数算成本，默认单价是 `1K=2`、`2K=2`、`4K=8`。画图页模型按钮提供 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`，默认模型是 `gpt-image-2`。
 - 前端画图页向 `/v1/responses` 发送请求时，会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。
 - 如果当前额度不够，发送按钮会禁用，并显示提示，位置在 `web/src/app/image/page.tsx:644` 和 `web/src/app/image/page.tsx:652`。

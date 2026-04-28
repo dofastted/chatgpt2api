@@ -1977,18 +1977,35 @@ def create_app() -> FastAPI:
         return record
 
     @router.get("/api/image-conversations")
-    async def list_image_conversations(authorization: str | None = Header(default=None)):
+    async def list_image_conversations(
+        summary: bool = False,
+        authorization: str | None = Header(default=None),
+    ):
         require_auth_key(authorization)
-        return {"items": data_management_service.list_conversations(extract_bearer_token(authorization))}
+        return {
+            "items": data_management_service.list_conversations(
+                extract_bearer_token(authorization),
+                summary=summary,
+            )
+        }
+
+    @router.get("/api/image-conversations/{conversation_id}")
+    async def get_image_conversation(conversation_id: str, authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        item = data_management_service.get_conversation(extract_bearer_token(authorization), conversation_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "image conversation not found"})
+        return {"item": item}
 
     @router.post("/api/image-conversations")
     async def save_image_conversation(body: dict[str, Any], authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
+        auth_token = extract_bearer_token(authorization)
         try:
-            item = data_management_service.upsert_conversation(extract_bearer_token(authorization), body)
+            item = data_management_service.upsert_conversation(auth_token, body)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        return {"item": item, "items": data_management_service.list_conversations(extract_bearer_token(authorization))}
+        return {"item": item, "items": data_management_service.list_conversations(auth_token, summary=True)}
 
     @router.delete("/api/image-conversations")
     async def delete_image_conversation(body: dict[str, Any], authorization: str | None = Header(default=None)):
@@ -1996,8 +2013,9 @@ def create_app() -> FastAPI:
         conversation_id = str(body.get("id") or body.get("conversation_id") or "").strip()
         if not conversation_id:
             raise HTTPException(status_code=400, detail={"error": "conversation id is required"})
-        result = data_management_service.delete_conversation(extract_bearer_token(authorization), conversation_id)
-        return {**result, "items": data_management_service.list_conversations(extract_bearer_token(authorization))}
+        auth_token = extract_bearer_token(authorization)
+        result = data_management_service.delete_conversation(auth_token, conversation_id)
+        return {**result, "items": data_management_service.list_conversations(auth_token, summary=True)}
 
     @router.post("/api/accounts")
     async def create_accounts(

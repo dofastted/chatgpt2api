@@ -518,8 +518,19 @@ export async function fetchImageRequestRecord(requestId: string) {
   return httpRequest<ImageRequestRecord>(`/api/image-requests/${encodeURIComponent(requestId)}`);
 }
 
-export async function fetchImageConversations() {
-  return httpRequest<{ items: ImageConversationPayload[] }>("/api/image-conversations");
+export async function fetchImageConversations(options: { summary?: boolean } = {}) {
+  const params = new URLSearchParams();
+  if (options.summary) {
+    params.set("summary", "true");
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return httpRequest<{ items: ImageConversationPayload[] }>(`/api/image-conversations${suffix}`);
+}
+
+export async function fetchImageConversation(id: string) {
+  return httpRequest<{ item: ImageConversationPayload }>(
+    `/api/image-conversations/${encodeURIComponent(id)}`,
+  );
 }
 
 export async function saveImageConversationToServer(conversation: ImageConversationPayload) {

@@ -1,5 +1,6 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- This page renders uploaded and generated data URLs; Next Image optimization is not useful here. */
 import Link from "next/link";
 import {
   useCallback,
@@ -9,25 +10,35 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  CirclePlus,
   Copy,
   Download,
   Images,
-  ImagePlus,
   LoaderCircle,
+  PanelRightClose,
+  PanelRightOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
   MessageSquarePlus,
   RotateCcw,
-  Ruler,
+  Settings2,
   Trash2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   buildImageDataUrl,
   detectImageFileExtension,
@@ -45,9 +56,9 @@ import {
 import {
   clearImageConversations,
   deleteImageConversation,
+  getImageConversationDetail,
   getImageGenerationPreference,
-  listImageConversations,
-  replaceImageConversations,
+  listImageConversationSummaries,
   saveImageConversation,
   saveImageGenerationPreference,
   type ImageConversation,
@@ -88,6 +99,30 @@ const IMAGE_COUNT_OPTIONS = Array.from(
 );
 const MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024;
 const activeGenerationKeys = new Set<string>();
+const GALLERY_PROMPT_SUGGESTION_COUNT = 8;
+const GALLERY_RAIL_ITEM_COUNT = 48;
+const DEFAULT_GALLERY_ASPECT_RATIO = 0.8;
+
+type GallerySeedItem = {
+  id: number;
+  postNumber: number;
+  username: string;
+  imageIndex: number;
+  title: string;
+  imageUrl: string;
+  downloadPath: string;
+  postUrl: string;
+  prompt: string;
+  promptPreview: string;
+  hasPrompt: boolean;
+};
+
+type GalleryImageDimension = {
+  id: number;
+  width: number;
+  height: number;
+  aspectRatio: number;
+};
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -108,6 +143,29 @@ function formatConversationTime(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatConversationStatus(conversation: ImageConversation) {
+  const turn = getLatestTurn(conversation);
+  if (!turn) {
+    return "草稿";
+  }
+  if (turn.status === "queued") {
+    return "等待";
+  }
+  if (turn.status === "assigning_account") {
+    return "分配账号";
+  }
+  if (turn.status === "running") {
+    return "生成中";
+  }
+  if (turn.status === "success") {
+    return "完成";
+  }
+  if (turn.status === "error") {
+    return "失败";
+  }
+  return "草稿";
 }
 
 function resolveImageModelFromPreference(
@@ -168,22 +226,13 @@ type ImageQueueStatusSnapshot = Awaited<
   ReturnType<typeof fetchImageQueueStatus>
 >;
 
+type GalleryPreviewItem = GallerySeedItem;
+
 function formatInputImageSize(sizeBytes: number) {
   if (sizeBytes >= 1024 * 1024) {
     return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
   }
   return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
-}
-
-function formatQueueItemLabel(
-  item: ImageQueueItem,
-  localTitles: Record<string, string>,
-) {
-  const localTitle = String(localTitles[item.request_id] || "").trim();
-  if (localTitle) {
-    return localTitle;
-  }
-  return `请求 ${item.request_id.slice(-8)}`;
 }
 
 function formatQueueProgressText(item: ImageQueueItem | null | undefined) {
@@ -211,25 +260,6 @@ function formatQueueProgressText(item: ImageQueueItem | null | undefined) {
   return "正在同步排队状态";
 }
 
-function formatQueueStatusBadge(item: ImageQueueItem) {
-  if (item.status === "waiting") {
-    return "排队中";
-  }
-  if (item.status === "assigning_account") {
-    return "等账号";
-  }
-  if (item.status === "running") {
-    return "生成中";
-  }
-  if (item.status === "finished") {
-    return "已完成";
-  }
-  if (item.status === "failed") {
-    return "失败";
-  }
-  return item.status;
-}
-
 function createClientRequestId(prefix = "") {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     const value = crypto.randomUUID();
@@ -238,7 +268,125 @@ function createClientRequestId(prefix = "") {
   return prefix ? `${prefix}fallback-request-id` : "fallback-request-id";
 }
 
-function getConversationTurns(conversation: ImageConversation | null | undefined) {
+function ImageInspirationRail({
+  items,
+  imageDimensions,
+  isHidden,
+  isLoading,
+  shouldReduceMotion,
+  onHide,
+  onOpenPreview,
+}: {
+  items: GallerySeedItem[];
+  imageDimensions: Record<number, GalleryImageDimension>;
+  isHidden: boolean;
+  isLoading: boolean;
+  shouldReduceMotion: boolean;
+  onHide: () => void;
+  onOpenPreview: (item: GallerySeedItem) => void;
+}) {
+  const railItems = useMemo(
+    () => items.filter((item) => item.imageUrl).slice(0, GALLERY_RAIL_ITEM_COUNT),
+    [items],
+  );
+  const transition = shouldReduceMotion
+    ? { duration: 0 }
+    : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
+
+  return (
+    <motion.aside
+      className="image-chat-gallery-rail hidden h-full min-w-0 shrink-0 overflow-hidden border-l border-border bg-background lg:flex"
+      initial={false}
+      animate={{
+        width: isHidden ? 0 : 286,
+        opacity: isHidden ? 0 : 1,
+        x: isHidden ? 16 : 0,
+      }}
+      transition={transition}
+      aria-hidden={isHidden}
+    >
+      <div className="flex h-full w-[286px] shrink-0 flex-col">
+        <div className="flex min-h-14 items-center justify-between gap-2 border-b border-border px-3 py-2">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-foreground">
+              画廊灵感
+            </div>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
+              点图预览
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-9 shrink-0"
+            onClick={onHide}
+            aria-label="隐藏画廊"
+            title="隐藏画廊"
+          >
+            <PanelRightClose className="size-4" />
+          </Button>
+        </div>
+
+        <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-2.5 py-3">
+          {isLoading ? (
+            <div className="flex min-h-[200px] items-center justify-center gap-2 text-sm text-muted-foreground">
+              <LoaderCircle className="size-4 animate-spin" />
+              正在加载
+            </div>
+          ) : railItems.length === 0 ? (
+            <div className="flex min-h-[200px] items-center justify-center text-sm text-muted-foreground">
+              暂无图片
+            </div>
+          ) : (
+            <div className="columns-2 gap-2 [column-fill:_balance]">
+              {railItems.map((item) => {
+                const aspectRatio =
+                  imageDimensions[item.id]?.aspectRatio ||
+                  DEFAULT_GALLERY_ASPECT_RATIO;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => onOpenPreview(item)}
+                    className="group mb-2 block w-full break-inside-avoid overflow-hidden rounded-lg border border-border bg-muted text-left transition hover:border-primary/60 focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none"
+                    aria-label={`预览第 ${item.postNumber} 层图片`}
+                  >
+                    <div
+                      className="relative w-full overflow-hidden"
+                      style={{ aspectRatio: String(aspectRatio) }}
+                    >
+                      <img
+                        src={item.imageUrl}
+                        alt={item.title}
+                        loading="lazy"
+                        className="absolute inset-0 h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+                      />
+                    </div>
+                    <div className="px-2 py-1.5">
+                      <div className="truncate text-[11px] font-medium text-foreground">
+                        #{item.postNumber} / 图 {item.imageIndex}
+                      </div>
+                      {item.hasPrompt ? (
+                        <div className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-muted-foreground">
+                          {item.promptPreview || item.prompt}
+                        </div>
+                      ) : null}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.aside>
+  );
+}
+
+function getConversationTurns(
+  conversation: ImageConversation | null | undefined,
+) {
   return Array.isArray(conversation?.turns) ? conversation.turns : [];
 }
 
@@ -271,7 +419,9 @@ function updateConversationTurn(
 ) {
   return {
     ...conversation,
-    turns: getConversationTurns(conversation).map((turn) => (turn.id === turnId ? updater(turn) : turn)),
+    turns: getConversationTurns(conversation).map((turn) =>
+      turn.id === turnId ? updater(turn) : turn,
+    ),
   };
 }
 
@@ -293,60 +443,23 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
-async function normalizeConversationHistory(
-  items: ImageConversation[],
-  scope: string,
-) {
-  const normalized = items.map((item) => {
-    const turns = getConversationTurns(item).map((turn) => {
-      if (
-        (turn.status === "queued" || turn.status === "assigning_account" || turn.status === "running") &&
-        !activeGenerationKeys.has(`${scope}:${item.id}:${turn.id}`)
-      ) {
-        if (String(turn.queueRequestId || "").trim()) {
-          return turn;
-        }
-        return {
-          ...turn,
-          status: "error" as const,
-          error: turn.images.some((image) => image.status === "success")
-            ? turn.error || turn.lastError || "页面刷新后未找回运行态"
-            : "页面刷新后未找回运行态",
-          lastError: turn.lastError || "页面刷新后未找回运行态",
-          requestFinishedAt: turn.requestFinishedAt || new Date().toISOString(),
-          images: turn.images.map((image) =>
-            image.status === "loading"
-              ? {
-                  ...image,
-                  status: "error" as const,
-                  error: "页面刷新后未找回运行态",
-                }
-              : image,
-          ),
-        };
-      }
-      return turn;
-    });
-    return { ...item, turns };
-  });
-
-  if (normalized.some((item, index) => item !== items[index])) {
-    await replaceImageConversations(scope, normalized);
-  }
-
-  return normalized;
-}
-
 export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
+  const shouldReduceMotion = useReducedMotion();
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("auto");
-  const [imagePreference, setImagePreference] = useState<ImageGenerationPreference>(
-    DEFAULT_IMAGE_GENERATION_PREFERENCE,
-  );
+  const [imagePreference, setImagePreference] =
+    useState<ImageGenerationPreference>(DEFAULT_IMAGE_GENERATION_PREFERENCE);
   const [isSizeDialogOpen, setIsSizeDialogOpen] = useState(false);
+  const [isClearHistoryDialogOpen, setIsClearHistoryDialogOpen] =
+    useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
+  const [isDesktopViewport, setIsDesktopViewport] = useState(false);
+  const [isInspirationRailHidden, setIsInspirationRailHidden] =
+    useState(false);
   const [sizeDraft, setSizeDraft] = useState<SizeDialogState>({
     ...DEFAULT_IMAGE_GENERATION_PREFERENCE,
   });
@@ -355,10 +468,20 @@ export default function ImagePage() {
     string | null
   >(null);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
+  const [galleryPreviewItem, setGalleryPreviewItem] =
+    useState<GalleryPreviewItem | null>(null);
+  const [galleryItems, setGalleryItems] = useState<GallerySeedItem[]>([]);
+  const [galleryImageDimensions, setGalleryImageDimensions] = useState<
+    Record<number, GalleryImageDimension>
+  >({});
+  const [isGalleryDataLoading, setIsGalleryDataLoading] = useState(true);
   const [conversationScope, setConversationScope] = useState<string | null>(
     null,
   );
-  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
+  const [hasLoadedHistory, setHasLoadedHistory] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [loadingConversationDetailId, setLoadingConversationDetailId] =
+    useState<string | null>(null);
   const [isUploadingInputImage, setIsUploadingInputImage] = useState(false);
   const [inputImage, setInputImage] = useState<PendingInputImage | null>(null);
   const [availableQuota, setAvailableQuota] = useState<number | null>(null);
@@ -368,10 +491,32 @@ export default function ImagePage() {
   > | null>(null);
   const [queueStatus, setQueueStatus] =
     useState<ImageQueueStatusSnapshot | null>(null);
-  const [queueTitles, setQueueTitles] = useState<Record<string, string>>({});
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputImageRef = useRef<HTMLInputElement>(null);
+
+  const focusPromptInput = useCallback(() => {
+    window.setTimeout(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: shouldReduceMotion ? "auto" : "smooth",
+      });
+    }, 0);
+  }, [shouldReduceMotion]);
+
+  const applyPromptToComposer = useCallback(
+    (prompt: string) => {
+      const normalizedPrompt = String(prompt || "").trim();
+      if (!normalizedPrompt) {
+        toast.error("这张图没有 prompt");
+        return;
+      }
+      setImagePrompt(normalizedPrompt);
+      focusPromptInput();
+    },
+    [focusPromptInput],
+  );
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -381,13 +526,64 @@ export default function ImagePage() {
     }
     const timer = window.setTimeout(() => {
       setImagePrompt(prompt);
-      textareaRef.current?.focus();
+      if (params.get("focus") === "prompt") {
+        focusPromptInput();
+      } else {
+        textareaRef.current?.focus();
+      }
       params.delete("prompt");
+      params.delete("focus");
       const nextQuery = params.toString();
       const nextUrl = nextQuery ? `/image?${nextQuery}` : "/image";
       window.history.replaceState({}, "", nextUrl);
     }, 0);
     return () => window.clearTimeout(timer);
+  }, [focusPromptInput]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(min-width: 1024px)");
+    const syncViewport = () => {
+      setIsDesktopViewport(mediaQuery.matches);
+    };
+    syncViewport();
+    mediaQuery.addEventListener("change", syncViewport);
+    return () => {
+      mediaQuery.removeEventListener("change", syncViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadGalleryData = async () => {
+      setIsGalleryDataLoading(true);
+      try {
+        const [itemsMod, dimensionsMod] = await Promise.all([
+          import("@/data/gallery-ui-seed.json"),
+          import("@/data/gallery-image-dimensions.json").catch(() => ({
+            default: [],
+          })),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        const nextItems = (itemsMod.default || []) as GallerySeedItem[];
+        const nextDimensions = Object.fromEntries(
+          ((dimensionsMod.default || []) as GalleryImageDimension[]).map(
+            (item) => [item.id, item],
+          ),
+        );
+        setGalleryItems(nextItems);
+        setGalleryImageDimensions(nextDimensions);
+      } finally {
+        if (!cancelled) {
+          setIsGalleryDataLoading(false);
+        }
+      }
+    };
+    void loadGalleryData();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -455,7 +651,10 @@ export default function ImagePage() {
       conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
   );
-  const selectedTurn = useMemo(() => getLatestTurn(selectedConversation), [selectedConversation]);
+  const selectedTurn = useMemo(
+    () => getLatestTurn(selectedConversation),
+    [selectedConversation],
+  );
   const activeRequestIds = useMemo(
     () =>
       Array.from(
@@ -514,6 +713,13 @@ export default function ImagePage() {
   const hasPreviousPreviewImage = previewImageIndex > 0;
   const hasNextPreviewImage =
     previewImageIndex >= 0 && previewImageIndex < previewableImages.length - 1;
+  const emptyPromptSuggestions = useMemo(
+    () =>
+      galleryItems
+        .filter((item) => item.hasPrompt && String(item.prompt || "").trim())
+        .slice(0, GALLERY_PROMPT_SUGGESTION_COUNT),
+    [galleryItems],
+  );
   const currentQueueRequest = useMemo(() => {
     if (!selectedTurn?.queueRequestId) {
       return null;
@@ -524,20 +730,26 @@ export default function ImagePage() {
       ) || null
     );
   }, [queueStatus, selectedTurn]);
-  const activeQueueItems = useMemo(
-    () =>
-      (queueStatus?.items || []).filter(
-        (item) =>
-          item.status === "waiting" ||
-          item.status === "assigning_account" ||
-          item.status === "running",
-      ),
-    [queueStatus],
-  );
   const currentQueueProgressText = useMemo(
     () => formatQueueProgressText(currentQueueRequest),
     [currentQueueRequest],
   );
+  const composerStatusText = isQuotaInsufficient
+    ? `至少需要 ${requestCost} 额度`
+    : isUploadingInputImage
+      ? "图片上传中"
+      : inputImage
+        ? "已附加参考图，Enter 发送"
+        : "Enter 发送，Shift + Enter 换行";
+  const sidebarTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
+  const listTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const };
+  const isSidebarVisible = isDesktopViewport
+    ? !isSidebarCollapsed
+    : isSidebarOpen;
 
   useEffect(() => {
     let cancelled = false;
@@ -546,10 +758,23 @@ export default function ImagePage() {
       try {
         const authKey = await getStoredAuthKey();
         if (!cancelled) {
-          setConversationScope(String(authKey || "").trim() || "__anonymous__");
+          const nextScope = String(authKey || "").trim() || "__anonymous__";
+          conversationsRef.current = [];
+          setConversations([]);
+          setSelectedConversationId(null);
+          setPreviewImageId(null);
+          setHasLoadedHistory(false);
+          setIsLoadingHistory(false);
+          setConversationScope(nextScope);
         }
       } catch (error) {
         if (!cancelled) {
+          conversationsRef.current = [];
+          setConversations([]);
+          setSelectedConversationId(null);
+          setPreviewImageId(null);
+          setHasLoadedHistory(false);
+          setIsLoadingHistory(false);
           setConversationScope("__anonymous__");
         }
       }
@@ -561,44 +786,55 @@ export default function ImagePage() {
     };
   }, []);
 
-  useEffect(() => {
+  const loadConversationHistory = useCallback(async () => {
     if (conversationScope === null) {
+      return;
+    }
+
+    setIsLoadingHistory(true);
+    setPreviewImageId(null);
+    try {
+      const items = await listImageConversationSummaries(conversationScope);
+      conversationsRef.current = items;
+      setConversations(items);
+      setHasLoadedHistory(true);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "读取会话记录失败";
+      toast.error(message);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, [conversationScope]);
+
+  useEffect(() => {
+    if (conversationScope === null || hasLoadedHistory || isLoadingHistory) {
+      return;
+    }
+    if (!isSidebarOpen && isSidebarCollapsed) {
       return;
     }
 
     let cancelled = false;
 
-    const loadHistory = async () => {
-      setIsLoadingHistory(true);
-      setSelectedConversationId(null);
-      setPreviewImageId(null);
-      try {
-        const items = await listImageConversations(conversationScope);
-        const normalizedItems = await normalizeConversationHistory(
-          items,
-          conversationScope,
-        );
-        if (cancelled) {
-          return;
-        }
-        conversationsRef.current = normalizedItems;
-        setConversations(normalizedItems);
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "读取会话记录失败";
-        toast.error(message);
-      } finally {
-        if (!cancelled) {
-          setIsLoadingHistory(false);
-        }
-      }
+    const load = async () => {
+      await loadConversationHistory();
     };
 
-    void loadHistory();
+    if (!cancelled) {
+      void load();
+    }
     return () => {
       cancelled = true;
     };
-  }, [conversationScope]);
+  }, [
+    conversationScope,
+    hasLoadedHistory,
+    isLoadingHistory,
+    isSidebarCollapsed,
+    isSidebarOpen,
+    loadConversationHistory,
+  ]);
 
   useEffect(() => {
     if (conversationScope === null) {
@@ -609,7 +845,8 @@ export default function ImagePage() {
 
     const loadPreference = async () => {
       try {
-        const preference = await getImageGenerationPreference(conversationScope);
+        const preference =
+          await getImageGenerationPreference(conversationScope);
         if (cancelled) {
           return;
         }
@@ -639,14 +876,26 @@ export default function ImagePage() {
       setAvailableQuota(Math.max(0, Number(data.available_quota || 0)));
       if (data.pricing) {
         setCurrentPricing({
-          "gpt-image-2": Math.max(0, Number(data.pricing["gpt-image-2"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2"])),
+          "gpt-image-2": Math.max(
+            0,
+            Number(
+              data.pricing["gpt-image-2"] ??
+                DEFAULT_IMAGE_PRICING["gpt-image-2"],
+            ),
+          ),
           "gpt-image-2-2K": Math.max(
             0,
-            Number(data.pricing["gpt-image-2-2K"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2-2K"]),
+            Number(
+              data.pricing["gpt-image-2-2K"] ??
+                DEFAULT_IMAGE_PRICING["gpt-image-2-2K"],
+            ),
           ),
           "gpt-image-2-4K": Math.max(
             0,
-            Number(data.pricing["gpt-image-2-4K"] ?? DEFAULT_IMAGE_PRICING["gpt-image-2-4K"]),
+            Number(
+              data.pricing["gpt-image-2-4K"] ??
+                DEFAULT_IMAGE_PRICING["gpt-image-2-4K"],
+            ),
           ),
         });
       } else {
@@ -696,15 +945,21 @@ export default function ImagePage() {
 
     const syncQueueStatus = async () => {
       try {
+        const requestIds =
+          activeRequestIds.length > 0 ? activeRequestIds : [null];
         const snapshots = await Promise.all(
-          activeRequestIds.map((requestId) =>
+          requestIds.map((requestId) =>
             fetchImageQueueStatus(requestId).catch(() => null),
           ),
         );
         if (!cancelled) {
-          const mergedItems = snapshots.flatMap((snapshot) => snapshot?.items || []);
+          const mergedItems = snapshots.flatMap(
+            (snapshot) => snapshot?.items || [],
+          );
           const uniqueItems = Array.from(
-            new Map(mergedItems.map((item) => [item.request_id, item])).values(),
+            new Map(
+              mergedItems.map((item) => [item.request_id, item]),
+            ).values(),
           );
           const baseSnapshot = snapshots.find((snapshot) => snapshot) || null;
           setQueueStatus(
@@ -713,7 +968,8 @@ export default function ImagePage() {
                   ...baseSnapshot,
                   request:
                     uniqueItems.find(
-                      (item) => item.request_id === selectedConversationRequestId,
+                      (item) =>
+                        item.request_id === selectedConversationRequestId,
                     ) || null,
                   items: uniqueItems,
                 }
@@ -728,9 +984,10 @@ export default function ImagePage() {
     };
 
     void syncQueueStatus();
+    const intervalMs = activeRequestIds.length > 0 ? 1500 : 10000;
     const intervalId = window.setInterval(() => {
       void syncQueueStatus();
-    }, 1500);
+    }, intervalMs);
     const handleFocus = () => {
       void syncQueueStatus();
     };
@@ -800,7 +1057,38 @@ export default function ImagePage() {
     setPreviewImageId(null);
     setImagePrompt("");
     setInputImage(null);
-    textareaRef.current?.focus();
+    setIsSidebarOpen(false);
+    focusPromptInput();
+  };
+
+  const handleSelectConversation = async (conversation: ImageConversation) => {
+    setSelectedConversationId(conversation.id);
+    setPreviewImageId(null);
+    setIsSidebarOpen(false);
+    if (!conversationScope || !conversation.isSummary) {
+      return;
+    }
+
+    try {
+      setLoadingConversationDetailId(conversation.id);
+      const detail = await getImageConversationDetail(
+        conversationScope,
+        conversation.id,
+      );
+      conversationsRef.current = [
+        detail,
+        ...conversationsRef.current.filter((item) => item.id !== detail.id),
+      ].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      setConversations(conversationsRef.current);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "读取会话详情失败";
+      toast.error(message);
+    } finally {
+      setLoadingConversationDetailId((current) =>
+        current === conversation.id ? null : current,
+      );
+    }
   };
 
   const handleDeleteConversation = async (id: string) => {
@@ -821,7 +1109,7 @@ export default function ImagePage() {
       const message = error instanceof Error ? error.message : "删除会话失败";
       toast.error(message);
       const items = conversationScope
-        ? await listImageConversations(conversationScope)
+        ? await listImageConversationSummaries(conversationScope)
         : [];
       conversationsRef.current = items;
       setConversations(items);
@@ -838,6 +1126,7 @@ export default function ImagePage() {
       setConversations([]);
       setSelectedConversationId(null);
       setPreviewImageId(null);
+      setIsClearHistoryDialogOpen(false);
       toast.success("已清空历史记录");
     } catch (error) {
       const message =
@@ -868,12 +1157,10 @@ export default function ImagePage() {
     }
   };
 
-  const handleGenerateImage = async (
-    retry?: {
-      conversation: ImageConversation;
-      turn: ImageConversationTurn;
-    },
-  ) => {
+  const handleGenerateImage = async (retry?: {
+    conversation: ImageConversation;
+    turn: ImageConversationTurn;
+  }) => {
     if (!conversationScope) {
       toast.error("当前登录信息还在初始化，请稍后再试");
       return;
@@ -883,16 +1170,26 @@ export default function ImagePage() {
     const targetModel = retry?.turn.model || imageModel;
     const targetCount = Math.max(
       1,
-      Math.min(MAX_IMAGES_PER_REQUEST, Number(retry?.turn.count || parsedCount) || 1),
+      Math.min(
+        MAX_IMAGES_PER_REQUEST,
+        Number(retry?.turn.count || parsedCount) || 1,
+      ),
     );
-    const targetSize = String(retry?.turn.size || imageSize || "auto").trim() || "auto";
-    const targetUnitCost = Math.max(0, Number(effectivePricing[targetModel] || 0));
+    const targetSize =
+      String(retry?.turn.size || imageSize || "auto").trim() || "auto";
+    const targetUnitCost = Math.max(
+      0,
+      Number(effectivePricing[targetModel] || 0),
+    );
     const targetRequestCost = targetCount * targetUnitCost;
     if (!prompt) {
       toast.error("请输入提示词");
       return;
     }
-    if (availableQuota !== null && targetRequestCost > Math.max(0, availableQuota)) {
+    if (
+      availableQuota !== null &&
+      targetRequestCost > Math.max(0, availableQuota)
+    ) {
       toast.error(`当前额度不足，本次需要 ${targetRequestCost} 额度`);
       return;
     }
@@ -953,10 +1250,6 @@ export default function ImagePage() {
           turns: [draftTurn],
         };
     const activeGenerationKey = `${conversationScope}:${conversationRecordId}:${turnId}`;
-    setQueueTitles((prev) => ({
-      ...prev,
-      [queueRequestId]: draftConversation.title,
-    }));
 
     setSelectedConversationId(conversationRecordId);
     if (!retry) {
@@ -987,7 +1280,11 @@ export default function ImagePage() {
         (_, index) => {
           const current =
             returnedItems.find((item) => item.index === index) ??
-            returnedItems.find((item) => item.index === undefined && returnedItems.indexOf(item) === index);
+            returnedItems.find(
+              (item) =>
+                item.index === undefined &&
+                returnedItems.indexOf(item) === index,
+            );
           if (current?.b64_json) {
             return {
               id: `${turnId}-${index}`,
@@ -1021,16 +1318,22 @@ export default function ImagePage() {
       }
 
       await updateConversation(conversationRecordId, (current) =>
-        updateConversationTurn(current ?? draftConversation, turnId, (turn) => ({
-          ...turn,
-          copiedText: String(data.copied_text || "").trim() || undefined,
-          images: nextImages,
-          status: failedCount > 0 ? "error" : "success",
-          error: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
-          lastError: failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
-          requestFinishedAt: new Date().toISOString(),
-          responseId: String(data.id || "").trim() || turn.responseId,
-        })),
+        updateConversationTurn(
+          current ?? draftConversation,
+          turnId,
+          (turn) => ({
+            ...turn,
+            copiedText: String(data.copied_text || "").trim() || undefined,
+            images: nextImages,
+            status: failedCount > 0 ? "error" : "success",
+            error:
+              failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
+            lastError:
+              failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
+            requestFinishedAt: new Date().toISOString(),
+            responseId: String(data.id || "").trim() || turn.responseId,
+          }),
+        ),
       );
       await loadQuota();
 
@@ -1155,208 +1458,303 @@ export default function ImagePage() {
 
   return (
     <>
-      <section className="minimal-page-shell minimal-image-shell minimal-fade-soft mx-auto grid min-h-0 w-full max-w-[1400px] grid-cols-1 gap-3 px-0 pb-3 sm:px-1 sm:pb-4 lg:h-[calc(100vh-5rem)] lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-5 lg:px-2 lg:pb-6">
-        <aside className="minimal-fade-soft order-2 min-h-0 [animation-delay:60ms] lg:order-1">
-          <div className="flex h-auto min-h-0 flex-col gap-3 py-1 sm:py-2 lg:h-full">
-            <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 sm:flex sm:flex-row">
-              <Button className="h-11 flex-1" onClick={handleCreateDraft}>
-                <MessageSquarePlus className="size-4" />
-                新建对话
-              </Button>
+      <section className="minimal-page-shell minimal-image-shell mx-auto flex h-[calc(100dvh-4.75rem)] min-h-[520px] w-full max-w-[1440px] overflow-hidden rounded-none border border-transparent bg-background lg:rounded-xl lg:border-border">
+        <AnimatePresence>
+          {isSidebarOpen ? (
+            <motion.button
+              type="button"
+              className="fixed inset-0 z-40 bg-black/35 lg:hidden"
+              aria-label="关闭侧栏"
+              onClick={() => setIsSidebarOpen(false)}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: shouldReduceMotion ? 0 : 0.18 }}
+            />
+          ) : null}
+        </AnimatePresence>
+
+        <motion.aside
+          initial={false}
+          animate={{
+            width: isDesktopViewport
+              ? isSidebarCollapsed
+                ? 0
+                : 280
+              : "min(88vw, 320px)",
+            opacity: isSidebarVisible ? 1 : 0,
+            x: isDesktopViewport || isSidebarOpen ? 0 : "-100%",
+          }}
+          transition={sidebarTransition}
+          className={cn(
+            "image-chat-sidebar fixed inset-y-0 left-0 z-50 flex min-w-0 shrink-0 flex-col overflow-hidden border-r border-sidebar-border lg:static lg:z-auto lg:h-full",
+            isSidebarVisible ? "pointer-events-auto" : "pointer-events-none",
+            isDesktopViewport && isSidebarCollapsed ? "border-r-0" : "",
+          )}
+        >
+          <div className="flex h-full w-[min(88vw,320px)] min-w-0 shrink-0 flex-col gap-2.5 p-2.5 lg:w-[280px]">
+            <div className="flex items-center gap-2 px-1">
+              <div className="min-w-0 flex-1 text-sm font-medium text-sidebar-foreground">
+                会话历史
+              </div>
               <Button
-                variant="outline"
-                className="h-11 px-3 sm:w-auto"
-                onClick={() => void handleClearHistory()}
-                disabled={conversations.length === 0}
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="lg:hidden"
+                onClick={() => setIsSidebarOpen(false)}
+                aria-label="关闭侧栏"
               >
-                <Trash2 className="size-4" />
+                <X className="size-4" />
               </Button>
             </div>
 
-            <div className="minimal-fade-soft flex min-h-0 flex-col border-t border-white/8 pt-4 [animation-delay:120ms] lg:flex-1">
-              <div className="space-y-3 text-xs text-stone-500">
-                <button
-                  type="button"
-                  onClick={handleOpenImagePreferenceDialog}
-                  className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-3 text-left text-stone-200 transition hover:bg-white/[0.08]"
-                >
-                  <span className="inline-flex items-center gap-2">
-                    <Ruler className="size-4" />
-                    画面配置
-                  </span>
-                  <span className="text-right font-medium">
-                    {formatImagePreferenceLabel(imagePreference)}
-                  </span>
-                </button>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-stone-400">当前队列</span>
-                  <span className="font-medium text-stone-200">
-                    {queueStatus
-                      ? `${queueStatus.user.waiting} 等待 / ${queueStatus.user.running} 运行`
-                      : "加载中"}
-                  </span>
+            <div className="min-h-0 flex-1 border-t border-sidebar-border pt-2 lg:overflow-y-auto lg:pr-1">
+              {isLoadingHistory ? (
+                <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+                  <LoaderCircle className="size-4 animate-spin" />
+                  正在读取会话记录
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-stone-400">当前请求</span>
-                  <span className="text-right font-medium text-stone-200">
-                    {currentQueueRequest?.position
-                      ? `第 ${currentQueueRequest.position} 位`
-                      : currentQueueRequest
-                        ? formatQueueStatusBadge(currentQueueRequest)
-                        : "空闲"}
-                  </span>
+              ) : !hasLoadedHistory ? (
+                <div className="py-2 text-sm leading-6 text-muted-foreground">
+                  会话记录待读取
                 </div>
-              </div>
-              <p className="mt-4 text-[11px] leading-5 text-stone-400">
-                {currentQueueProgressText}
-              </p>
-
-              <div className="mt-5 border-t border-white/8 pt-4">
-                {activeQueueItems.length === 0 ? (
-                  <div className="text-sm leading-6 text-stone-500">
-                    当前没有等待中的请求
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {activeQueueItems.map((item) => (
-                      <div
-                        key={item.request_id}
-                        className="flex items-start justify-between gap-3 border-l border-stone-300/40 pl-3 text-sm text-stone-700"
+              ) : conversations.length === 0 ? (
+                <div className="py-2 text-sm leading-6 text-muted-foreground">
+                  暂无记录
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {conversations.map((conversation) => {
+                    const active = conversation.id === selectedConversationId;
+                    const isLoadingDetail =
+                      loadingConversationDetailId === conversation.id;
+                    return (
+                      <motion.div
+                        key={conversation.id}
+                        initial={
+                          shouldReduceMotion
+                            ? false
+                            : { opacity: 0, y: 8 }
+                        }
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={
+                          shouldReduceMotion
+                            ? undefined
+                            : { opacity: 0, y: -6 }
+                        }
+                        transition={listTransition}
+                        className={cn(
+                          "group relative w-full rounded-lg border px-2.5 py-2 text-left transition",
+                          active
+                            ? "border-sidebar-border bg-sidebar-accent text-sidebar-foreground"
+                            : "border-transparent text-muted-foreground hover:bg-sidebar-accent",
+                        )}
                       >
-                        <div className="min-w-0">
-                          <div className="truncate font-medium text-stone-900">
-                            {formatQueueItemLabel(item, queueTitles)}
-                          </div>
-                          <div className="mt-1 text-xs leading-5 text-stone-500">
-                            {formatQueueProgressText(item)}
-                          </div>
-                        </div>
-                        <div className="shrink-0 text-[11px] text-stone-500">
-                          {formatQueueStatusBadge(item)}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-5 min-h-0 border-t border-white/8 pt-4 lg:flex-1 lg:overflow-y-auto lg:pr-1">
-                {isLoadingHistory ? (
-                  <div className="flex items-center gap-2 py-3 text-sm text-stone-500">
-                    <LoaderCircle className="size-4 animate-spin" />
-                    正在读取会话记录
-                  </div>
-                ) : conversations.length === 0 ? (
-                  <div className="py-3 text-sm leading-6 text-stone-500">
-                    {activeQueueItems.length === 0 ? "暂无记录" : ""}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {conversations.map((conversation) => {
-                      const active = conversation.id === selectedConversationId;
-                      return (
-                        <div
-                          key={conversation.id}
-                          className={cn(
-                            "minimal-row-shift group relative w-full border-l-2 px-3 py-3 text-left transition",
-                            active
-                              ? "border-stone-900 bg-black/[0.03] text-stone-950"
-                              : "border-transparent text-stone-700 hover:border-stone-300 hover:bg-white/40",
-                          )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleSelectConversation(conversation)
+                          }
+                          className="block w-full pr-7 text-left"
                         >
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setSelectedConversationId(conversation.id)
-                            }
-                            className="block w-full pr-8 text-left"
-                          >
-                            <div className="truncate text-sm font-semibold">
+                          <div className="flex items-center gap-2">
+                            <div className="min-w-0 flex-1 truncate text-[13px] font-medium">
                               {conversation.title}
                             </div>
-                            <div
-                              className={cn(
-                                "mt-1 text-xs",
-                                active ? "text-stone-500" : "text-stone-400",
-                              )}
-                            >
+                            {isLoadingDetail ? (
+                              <LoaderCircle className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                            ) : null}
+                          </div>
+                          <div className="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                            <span>
                               {formatConversationTime(conversation.createdAt)}
-                            </div>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void handleDeleteConversation(conversation.id)
-                            }
-                            className="absolute top-3 right-2 inline-flex size-7 items-center justify-center rounded-md text-stone-400 opacity-100 transition hover:bg-stone-100 hover:text-rose-500 lg:opacity-0 lg:group-hover:opacity-100"
-                            aria-label="删除会话"
-                          >
-                            <Trash2 className="size-4" />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                            </span>
+                            <span>
+                              {conversation.turnCount &&
+                              conversation.turnCount > 1
+                                ? `${conversation.turnCount} 轮`
+                                : formatConversationStatus(conversation)}
+                            </span>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleDeleteConversation(conversation.id)
+                          }
+                          className="absolute top-1.5 right-1.5 inline-flex size-6 items-center justify-center rounded-md text-muted-foreground opacity-100 transition hover:bg-muted hover:text-rose-600 lg:opacity-0 lg:group-hover:opacity-100"
+                          aria-label="删除会话"
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-sidebar-border pt-2">
+              <button
+                type="button"
+                onClick={() => setIsClearHistoryDialogOpen(true)}
+                disabled={conversations.length === 0}
+                className="flex h-10 w-full items-center justify-start gap-2 rounded-lg border border-rose-300 bg-rose-50 px-3 text-sm font-medium text-rose-700 transition hover:bg-rose-100 focus-visible:ring-4 focus-visible:ring-rose-300/30 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45 dark:border-rose-900/70 dark:bg-rose-950/40 dark:text-rose-200 dark:hover:bg-rose-950/65"
+                aria-label="清空历史记录"
+              >
+                <Trash2 className="size-4" />
+                清空历史记录
+              </button>
+              <div className="mt-1 px-1 text-[11px] leading-5 text-muted-foreground">
+                清空前会再次确认。
               </div>
             </div>
           </div>
-        </aside>
+        </motion.aside>
 
-        <div className="order-1 flex min-h-0 flex-col gap-4 xl:order-2">
+        <div className="image-chat-main flex min-w-0 flex-1 flex-col">
+          <div className="flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-2 sm:px-4">
+            <div className="flex min-w-0 items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="relative z-10 shrink-0"
+                onClick={() => {
+                  if (window.innerWidth >= 1024) {
+                    setIsSidebarCollapsed((value) => !value);
+                    return;
+                  }
+                  setIsSidebarOpen(true);
+                }}
+                aria-label="切换会话历史"
+              >
+                {isSidebarCollapsed ? (
+                  <PanelLeftOpen className="size-4" />
+                ) : (
+                  <PanelLeftClose className="size-4" />
+                )}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-11 px-3"
+                onClick={handleCreateDraft}
+                aria-label="新建对话"
+              >
+                <MessageSquarePlus className="size-4" />
+                <span className="hidden sm:inline">新建</span>
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-11 px-3"
+                onClick={handleOpenImagePreferenceDialog}
+                aria-label="配置"
+              >
+                <Settings2 className="size-4" />
+                <span className="hidden sm:inline">配置</span>
+              </Button>
+              <div className="hidden min-w-0 truncate text-sm text-muted-foreground md:block">
+                {formatImagePreferenceLabel(imagePreference)}
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+              {isInspirationRailHidden ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="hidden size-9 lg:inline-flex"
+                  onClick={() => setIsInspirationRailHidden(false)}
+                  aria-label="显示画廊"
+                  title="显示画廊"
+                >
+                  <PanelRightOpen className="size-4" />
+                </Button>
+              ) : null}
+              <span className="hidden rounded-lg border border-border px-2 py-1 sm:inline">
+                {availableQuota === null
+                  ? "额度未知"
+                  : `剩余 ${availableQuota}`}
+              </span>
+              <span className="rounded-lg border border-border px-2 py-1">
+                {queueStatus
+                  ? `${queueStatus.user.running} 运行`
+                  : "队列同步中"}
+              </span>
+            </div>
+          </div>
+
           <div
             ref={resultsViewportRef}
-            className="hide-scrollbar overflow-visible px-1 py-2 sm:px-3 sm:py-4 lg:min-h-0 lg:flex-1 lg:overflow-y-auto"
+            className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6"
           >
             {!selectedConversation ? (
-              <div className="flex min-h-[240px] items-center justify-center px-1 text-center sm:min-h-[360px] lg:h-full lg:min-h-[420px]">
-                <div className="minimal-fade-up w-full max-w-4xl px-4 py-8 sm:py-10">
-                  <div className="minimal-kicker justify-center">
-                    image workstation
-                  </div>
-                  <h1 className="minimal-heading mt-5 text-3xl sm:text-4xl md:text-6xl">
-                    生成图片
+              <div className="flex min-h-full items-center justify-center px-1 text-center">
+                <div className="w-full max-w-3xl px-4 py-8 sm:py-10">
+                  <h1 className="minimal-heading text-3xl sm:text-4xl">
+                    今天你想创造什么?
                   </h1>
-                  <p className="minimal-fade-soft mt-4 text-sm text-white/62 sm:mt-5 sm:text-[15px] [animation-delay:120ms]">
-                    输入提示词即可开始。
-                  </p>
+                  <div className="mt-5 flex flex-wrap justify-center gap-2">
+                    {emptyPromptSuggestions.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => applyPromptToComposer(item.prompt)}
+                        className="max-w-full rounded-full border border-border bg-card px-3 py-1.5 text-left text-xs text-muted-foreground transition hover:border-primary/50 hover:bg-muted hover:text-foreground focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none sm:max-w-[260px]"
+                        title={item.prompt}
+                      >
+                        <span className="line-clamp-1">
+                          {item.promptPreview || item.prompt}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             ) : (
-              <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5">
+              <div className="mx-auto flex w-full max-w-[900px] flex-col gap-6">
                 {getConversationTurns(selectedConversation).map((turn) => (
-                  <div key={turn.id} className="space-y-4">
+                  <motion.div
+                    key={turn.id}
+                    className="space-y-4"
+                    initial={shouldReduceMotion ? false : { opacity: 0, y: 16 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={listTransition}
+                  >
                     <div className="flex justify-end">
                       <div className="flex max-w-full flex-col items-end gap-3 sm:max-w-[80%]">
                         {turn.inputImage ? (
-                          <div className="minimal-surface-hover minimal-fade-soft overflow-hidden rounded-[18px] border border-stone-200 bg-white shadow-sm">
+                          <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
                             <img
                               src={turn.inputImage.dataUrl}
                               alt={turn.inputImage.fileName || "参考图"}
                               className="block h-28 w-28 object-cover"
                             />
-                            <div className="border-t border-stone-100 px-3 py-2 text-[11px] text-stone-500">
+                            <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
                               {turn.inputImage.fileName || "参考图"}
                             </div>
                           </div>
                         ) : null}
-                        <div className="px-1 pt-1 text-right text-sm leading-7 text-stone-700 sm:text-[15px] sm:leading-8">
+                        <div className="rounded-2xl bg-muted px-4 py-3 text-left text-sm leading-7 text-foreground sm:text-[15px] sm:leading-8">
                           {turn.prompt}
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      <span className="rounded-full bg-muted px-3 py-1">
                         {imageModelLabels[turn.model] || turn.model}
                       </span>
-                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                      <span className="rounded-full bg-muted px-3 py-1">
                         {turn.count} 张
                       </span>
-                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                      <span className="rounded-full bg-muted px-3 py-1">
                         {formatImageSizeLabel(turn.size || "auto")}
                       </span>
-                      <span className="rounded-full bg-stone-100 px-3 py-1">
+                      <span className="rounded-full bg-muted px-3 py-1">
                         {formatConversationTime(turn.createdAt)}
                       </span>
                     </div>
@@ -1365,30 +1763,32 @@ export default function ImagePage() {
                       turn.status === "assigning_account" ||
                       turn.status === "running") &&
                     turn.id === selectedTurn?.id ? (
-                      <div className="minimal-surface-hover minimal-fade-soft rounded-[20px] border border-stone-200 bg-stone-50/90 px-4 py-4">
-                        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.16em] text-stone-400">
+                      <div className="rounded-xl border border-border bg-card px-4 py-4">
+                        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                           <LoaderCircle className="size-4 animate-spin" />
                           排队进度
                         </div>
-                        <div className="mt-3 text-sm leading-6 text-stone-700">
+                        <div className="mt-3 text-sm leading-6 text-foreground">
                           {currentQueueProgressText}
                         </div>
                       </div>
                     ) : null}
 
                     {turn.copiedText ? (
-                      <div className="minimal-surface-hover minimal-fade-soft rounded-[20px] border border-stone-200 bg-stone-50/80 px-4 py-4">
+                      <div className="rounded-xl border border-border bg-card px-4 py-4">
                         <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs font-medium uppercase tracking-[0.16em] text-stone-400">
+                          <div className="text-xs font-medium text-muted-foreground">
                             可复制文本
                           </div>
                           <Button
                             type="button"
                             variant="outline"
                             size="sm"
-                            className="h-8 rounded-full border-stone-200 bg-white text-stone-600 hover:bg-stone-100"
+                            className="h-8"
                             onClick={() => {
-                              void navigator.clipboard.writeText(turn.copiedText || "");
+                              void navigator.clipboard.writeText(
+                                turn.copiedText || "",
+                              );
                               toast.success("文本已复制");
                             }}
                           >
@@ -1396,14 +1796,14 @@ export default function ImagePage() {
                             复制
                           </Button>
                         </div>
-                        <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-stone-700">
+                        <pre className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
                           {turn.copiedText}
                         </pre>
                       </div>
                     ) : null}
 
                     {turn.status === "error" && turn.images.length === 0 ? (
-                      <div className="flex flex-col gap-3 border-l-2 border-rose-300 bg-rose-50/70 px-4 py-4 text-sm leading-6 text-rose-600 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-col gap-3 rounded-xl border border-rose-300/70 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-700 sm:flex-row sm:items-center sm:justify-between dark:bg-rose-950/30 dark:text-rose-200">
                         <span>{turn.error || "生成失败"}</span>
                         <Button
                           type="button"
@@ -1416,7 +1816,7 @@ export default function ImagePage() {
                               turn,
                             })
                           }
-                          className="h-9 shrink-0 rounded-full border-rose-200 bg-white text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                          className="h-9 shrink-0 disabled:opacity-60"
                         >
                           {isComposerGenerating ? (
                             <LoaderCircle className="size-4 animate-spin" />
@@ -1431,15 +1831,23 @@ export default function ImagePage() {
                     {turn.images.length > 0 ? (
                       <div className="columns-1 gap-4 space-y-4 sm:columns-2 xl:columns-3">
                         {turn.images.map((image, index) => (
-                          <div
+                          <motion.div
                             key={image.id}
-                            className="minimal-fade-soft break-inside-avoid overflow-hidden rounded-[22px]"
+                            layout
+                            initial={
+                              shouldReduceMotion
+                                ? false
+                                : { opacity: 0, y: 14, scale: 0.98 }
+                            }
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            transition={listTransition}
+                            className="break-inside-avoid overflow-hidden rounded-xl"
                           >
                             {image.status === "success" && image.b64_json ? (
                               <button
                                 type="button"
                                 onClick={() => handleOpenPreview(image.id)}
-                                className="minimal-surface-hover group block w-full overflow-hidden rounded-[22px] bg-stone-100 text-left"
+                                className="group block w-full overflow-hidden rounded-xl bg-muted text-left"
                                 aria-label={`预览第 ${index + 1} 张图片`}
                               >
                                 <img
@@ -1453,24 +1861,24 @@ export default function ImagePage() {
                                 />
                               </button>
                             ) : image.status === "error" ? (
-                              <div className="flex min-h-[320px] items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-600">
+                              <div className="flex min-h-[320px] items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200">
                                 {image.error || "生成失败"}
                               </div>
                             ) : (
-                              <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 bg-stone-100/80 px-6 py-8 text-center text-stone-500">
-                                <div className="rounded-full bg-white p-3 shadow-sm">
+                              <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 bg-muted px-6 py-8 text-center text-muted-foreground">
+                                <div className="rounded-full bg-background p-3 shadow-sm">
                                   <LoaderCircle className="size-5 animate-spin" />
                                 </div>
                                 <p className="text-sm">正在生成图片...</p>
                               </div>
                             )}
-                          </div>
+                          </motion.div>
                         ))}
                       </div>
                     ) : null}
 
                     {turn.status === "error" && turn.images.length > 0 ? (
-                      <div className="flex flex-col gap-3 border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-col gap-3 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800 sm:flex-row sm:items-center sm:justify-between dark:bg-amber-950/30 dark:text-amber-100">
                         <span>{turn.error}</span>
                         <Button
                           type="button"
@@ -1483,7 +1891,7 @@ export default function ImagePage() {
                               turn,
                             })
                           }
-                          className="h-9 shrink-0 rounded-full border-amber-200 bg-white text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+                          className="h-9 shrink-0 disabled:opacity-60"
                         >
                           {isComposerGenerating ? (
                             <LoaderCircle className="size-4 animate-spin" />
@@ -1494,15 +1902,18 @@ export default function ImagePage() {
                         </Button>
                       </div>
                     ) : null}
-                  </div>
+                  </motion.div>
                 ))}
               </div>
             )}
           </div>
 
-          <div className="shrink-0 flex justify-center">
-            <div
-              className="image-composer minimal-fade-up max-h-[45dvh] w-full max-w-[980px] overflow-y-auto rounded-[28px] border border-white/12 bg-[#121218]/95 p-3 shadow-[0_22px_65px_-42px_rgba(0,0,0,0.95)] backdrop-blur-xl transition duration-200 focus-within:border-amber-300/45 focus-within:shadow-[0_0_0_1px_rgba(245,158,11,0.12),0_22px_70px_-44px_rgba(245,158,11,0.45)] sm:p-4 [animation-delay:220ms]"
+          <div className="shrink-0 border-t border-border bg-background/95 px-3 py-3 sm:px-6">
+            <motion.div
+              className="image-composer mx-auto max-h-[42dvh] w-full max-w-[900px] overflow-y-auto rounded-[28px] border px-3 pt-3 pb-2 transition focus-within:border-ring focus-within:ring-4 focus-within:ring-ring/15 sm:px-4 sm:pt-4 sm:pb-3"
+              initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={listTransition}
               onClick={() => {
                 textareaRef.current?.focus();
               }}
@@ -1517,17 +1928,17 @@ export default function ImagePage() {
                 }}
               />
               {inputImage ? (
-                <div className="minimal-fade-soft mb-3 flex items-start gap-3 rounded-[18px] border border-white/8 bg-black/10 px-3 py-3">
+                <div className="mb-3 flex items-start gap-3 rounded-xl border border-border bg-muted px-3 py-3">
                   <img
                     src={inputImage.dataUrl}
                     alt={inputImage.fileName}
                     className="size-14 shrink-0 rounded-xl object-cover"
                   />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-stone-100">
+                    <div className="truncate text-sm font-medium text-foreground">
                       {inputImage.fileName}
                     </div>
-                    <div className="mt-1 text-xs text-stone-400">
+                    <div className="mt-1 text-xs text-muted-foreground">
                       已附加 1 张参考图
                       {" · "}
                       {formatInputImageSize(inputImage.sizeBytes)}
@@ -1539,7 +1950,7 @@ export default function ImagePage() {
                       event.stopPropagation();
                       handleRemoveInputImage();
                     }}
-                    className="inline-flex size-8 items-center justify-center rounded-full text-stone-400 transition hover:bg-white/10 hover:text-stone-100"
+                    className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-background hover:text-foreground"
                     aria-label="移除已上传图片"
                   >
                     <X className="size-4" />
@@ -1568,49 +1979,60 @@ export default function ImagePage() {
                     }
                   }
                 }}
-                className="h-auto min-h-0 w-full resize-none overflow-y-hidden rounded-none border-0 bg-transparent px-1 py-2 text-sm leading-6 text-stone-100 shadow-none placeholder:text-stone-500 focus-visible:ring-0 sm:px-2 sm:py-3 sm:text-[15px] sm:leading-7"
+                className="h-auto max-h-[22dvh] min-h-12 w-full resize-none overflow-y-auto rounded-none border-0 bg-transparent px-1 py-2 text-base leading-7 shadow-none placeholder:text-muted-foreground focus-visible:ring-0 sm:px-2 sm:py-3"
               />
 
-              <div className="mt-2 flex flex-col gap-3 border-t border-white/8 pt-3">
-                <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-10 rounded-full border-white/10 bg-white/[0.04] px-4 text-stone-200 hover:bg-white/[0.08]"
-                    asChild
-                  >
-                    <Link href="/gallery">
-                      <Images className="size-4" />
-                      打开画廊
-                    </Link>
-                  </Button>
+              <div className="mt-1 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2 sm:flex-nowrap">
+                <button
+                  type="button"
+                  onClick={handleOpenInputImagePicker}
+                  disabled={isUploadingInputImage}
+                  title={
+                    inputImage
+                      ? "更换参考图"
+                      : isUploadingInputImage
+                        ? "图片上传中"
+                        : "上传参考图"
+                  }
+                  className={cn(
+                    "inline-flex size-10 shrink-0 items-center justify-center rounded-full border transition focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none",
+                    inputImage
+                      ? "border-primary bg-muted text-foreground"
+                      : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
+                    isUploadingInputImage
+                      ? "cursor-not-allowed opacity-60"
+                      : "",
+                  )}
+                  aria-label={
+                    inputImage
+                      ? "更换参考图"
+                      : isUploadingInputImage
+                        ? "图片上传中"
+                        : "上传参考图"
+                  }
+                >
+                  {isUploadingInputImage ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <CirclePlus className="size-5" />
+                  )}
+                </button>
 
-                  <button
-                    type="button"
-                    onClick={handleOpenInputImagePicker}
-                    disabled={isUploadingInputImage}
-                    className={cn(
-                      "inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/40",
-                      inputImage
-                        ? "border-amber-300/25 bg-amber-300/12 text-amber-100"
-                        : "border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/18 hover:text-stone-100",
-                      isUploadingInputImage
-                        ? "cursor-not-allowed opacity-60"
-                        : "",
-                    )}
-                  >
-                    {isUploadingInputImage ? (
-                      <LoaderCircle className="size-4 animate-spin" />
-                    ) : (
-                      <ImagePlus className="size-4" />
-                    )}
-                    {isUploadingInputImage
-                      ? "上传中"
-                      : inputImage
-                        ? "更换图片"
-                        : "上传图片"}
-                  </button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="size-10 shrink-0 rounded-full"
+                  title="打开画廊"
+                  aria-label="打开画廊"
+                  asChild
+                >
+                  <Link href="/gallery">
+                    <Images className="size-4" />
+                  </Link>
+                </Button>
 
+                <div className="flex items-center gap-1 rounded-full border border-border bg-background p-1">
                   {IMAGE_COUNT_OPTIONS.map((count) => {
                     const active = imageCount === count;
                     return (
@@ -1620,71 +2042,114 @@ export default function ImagePage() {
                         aria-pressed={active}
                         onClick={() => setImageCount(count)}
                         className={cn(
-                          "cursor-pointer rounded-full border px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/40",
+                          "h-8 cursor-pointer rounded-full px-3 text-sm transition focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none",
                           active
-                            ? "border-white/15 bg-white/14 text-white"
-                            : "border-white/10 bg-white/[0.04] text-stone-300 hover:border-white/18 hover:text-stone-100",
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground",
                         )}
                       >
                         {count} 张
                       </button>
                     );
                   })}
-
-                  <div className="ml-auto">
-                    <Button
-                      type="button"
-                      onClick={() => void handleGenerateImage()}
-                      disabled={
-                        isComposerGenerating ||
-                        isQuotaInsufficient ||
-                        isUploadingInputImage
-                      }
-                      className="size-11 rounded-full bg-stone-50 p-0 text-stone-950 hover:bg-white disabled:bg-white/20 disabled:text-stone-500"
-                      aria-label="发送"
-                    >
-                      {isComposerGenerating ? (
-                        <LoaderCircle className="size-4 animate-spin" />
-                      ) : (
-                        <ArrowUp className="size-4" />
-                      )}
-                    </Button>
-                  </div>
                 </div>
 
                 <div
                   className={cn(
-                    "mt-3 text-xs",
-                    isQuotaInsufficient ? "text-rose-400" : "text-stone-400",
+                    "hidden min-w-0 flex-1 truncate px-1 text-xs sm:block",
+                    isQuotaInsufficient
+                      ? "text-rose-600 dark:text-rose-300"
+                      : "text-muted-foreground",
                   )}
                 >
-                  {isQuotaInsufficient
-                    ? `至少需要 ${requestCost} 额度`
-                    : isUploadingInputImage
-                      ? "图片上传中"
-                      : inputImage
-                        ? "已附加 1 张参考图，回车发送"
-                        : "回车发送"}
+                  {composerStatusText}
                 </div>
+
+                <Button
+                  type="button"
+                  onClick={() => void handleGenerateImage()}
+                  disabled={
+                    isComposerGenerating ||
+                    isQuotaInsufficient ||
+                    isUploadingInputImage
+                  }
+                  className="ml-auto size-10 shrink-0 rounded-full p-0 disabled:opacity-50"
+                  aria-label="发送"
+                >
+                  {isComposerGenerating ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <ArrowUp className="size-4" />
+                  )}
+                </Button>
               </div>
-            </div>
+              <div
+                className={cn(
+                  "px-1 pt-2 text-xs leading-5 sm:hidden",
+                  isQuotaInsufficient
+                    ? "text-rose-600 dark:text-rose-300"
+                    : "text-muted-foreground",
+                )}
+              >
+                {composerStatusText}
+              </div>
+            </motion.div>
           </div>
         </div>
 
+        <ImageInspirationRail
+          items={galleryItems}
+          imageDimensions={galleryImageDimensions}
+          isHidden={isInspirationRailHidden}
+          isLoading={isGalleryDataLoading}
+          shouldReduceMotion={Boolean(shouldReduceMotion)}
+          onHide={() => setIsInspirationRailHidden(true)}
+          onOpenPreview={setGalleryPreviewItem}
+        />
       </section>
 
+      <Dialog
+        open={isClearHistoryDialogOpen}
+        onOpenChange={setIsClearHistoryDialogOpen}
+      >
+        <DialogContent className="w-[min(92vw,440px)] p-5">
+          <DialogTitle>确认清空历史记录</DialogTitle>
+          <DialogDescription>
+            此操作会删除当前密钥下保存的全部图片会话历史，删除后无法在页面内恢复。
+          </DialogDescription>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setIsClearHistoryDialogOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              className="border border-rose-700 bg-rose-600 text-white hover:bg-rose-700"
+              onClick={() => void handleClearHistory()}
+            >
+              <Trash2 className="size-4" />
+              确认清空
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isSizeDialogOpen} onOpenChange={setIsSizeDialogOpen}>
-        <DialogContent className="w-[min(94vw,520px)] bg-[rgba(18,18,24,0.98)] p-5 text-stone-100">
+        <DialogContent className="w-[min(94vw,520px)] p-5">
+          <DialogTitle className="sr-only">画面配置</DialogTitle>
           <div className="space-y-5">
             <div>
               <div className="text-sm font-semibold">画面配置</div>
-              <div className="mt-1 text-xs text-stone-400">
+              <div className="mt-1 text-xs text-muted-foreground">
                 当前：{formatImagePreferenceLabel(imagePreference)}
               </div>
             </div>
 
             <div className="space-y-2">
-              <div className="text-xs text-stone-400">画面分辨率</div>
+              <div className="text-xs text-muted-foreground">画面分辨率</div>
               <div className="grid grid-cols-3 gap-2">
                 {IMAGE_RESOLUTION_PRESETS.map((preset) => (
                   <button
@@ -1699,8 +2164,8 @@ export default function ImagePage() {
                     className={cn(
                       "rounded-lg border px-3 py-2 text-sm transition",
                       sizeDraft.resolution === preset.value
-                        ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
-                        : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-background text-foreground hover:bg-muted",
                     )}
                   >
                     {preset.label}
@@ -1710,7 +2175,7 @@ export default function ImagePage() {
             </div>
 
             <div className="space-y-2">
-              <div className="text-xs text-stone-400">图片比例</div>
+              <div className="text-xs text-muted-foreground">图片比例</div>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {IMAGE_ASPECT_RATIO_PRESETS.map((preset) => (
                   <button
@@ -1725,8 +2190,8 @@ export default function ImagePage() {
                     className={cn(
                       "rounded-lg border px-3 py-2 text-sm transition",
                       sizeDraft.ratio === preset.value
-                        ? "border-amber-300/50 bg-amber-300/14 text-amber-100"
-                        : "border-white/10 bg-white/[0.04] text-stone-300 hover:bg-white/[0.08]",
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-background text-foreground hover:bg-muted",
                     )}
                   >
                     {preset.label}
@@ -1735,7 +2200,7 @@ export default function ImagePage() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 text-xs leading-5 text-stone-400">
+            <div className="rounded-lg border border-border bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
               本次将使用：{formatImagePreferenceLabel(sizeDraft)}
             </div>
 
@@ -1743,7 +2208,6 @@ export default function ImagePage() {
               <Button
                 type="button"
                 variant="outline"
-                className="border-white/12 bg-white/[0.04] text-stone-200 hover:bg-white/[0.08]"
                 onClick={() => setIsSizeDialogOpen(false)}
               >
                 取消
@@ -1760,15 +2224,16 @@ export default function ImagePage() {
         open={Boolean(previewImage)}
         onOpenChange={(open) => (!open ? setPreviewImageId(null) : null)}
       >
-        <DialogContent className="w-[min(96vw,1120px)] bg-[rgba(10,10,15,0.96)] p-2 sm:p-4">
+        <DialogContent className="w-[min(96vw,1120px)] p-2 sm:p-4">
+          <DialogTitle className="sr-only">图片预览</DialogTitle>
           {previewImage ? (
             <div className="space-y-3">
-              <div className="flex flex-col gap-3 rounded-[18px] bg-white/6 px-3 py-2 text-sm text-stone-200 sm:flex-row sm:items-center sm:justify-between sm:px-4">
-                <div className="flex items-center gap-2 text-stone-300">
-                  <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium">
+              <div className="flex flex-col gap-3 rounded-xl bg-muted px-3 py-2 text-sm text-foreground sm:flex-row sm:items-center sm:justify-between sm:px-4">
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <span className="rounded-full bg-background px-3 py-1 text-xs font-medium">
                     {previewImageIndex + 1} / {previewableImages.length}
                   </span>
-                  <span className="hidden text-xs text-stone-400 sm:inline">
+                  <span className="hidden text-xs text-muted-foreground sm:inline">
                     当前会话成功图片预览
                   </span>
                 </div>
@@ -1779,7 +2244,6 @@ export default function ImagePage() {
                     variant="outline"
                     size="sm"
                     onClick={handleDownloadPreviewImage}
-                    className="border-white/15 bg-white/8 text-stone-100 hover:bg-white/14"
                   >
                     <Download className="size-4" />
                     下载
@@ -1790,7 +2254,6 @@ export default function ImagePage() {
                     size="sm"
                     onClick={() => handlePreviewStep(-1)}
                     disabled={!hasPreviousPreviewImage}
-                    className="border-white/15 bg-white/8 text-stone-100 hover:bg-white/14"
                   >
                     <ArrowLeft className="size-4" />
                     上一张
@@ -1801,7 +2264,6 @@ export default function ImagePage() {
                     size="sm"
                     onClick={() => handlePreviewStep(1)}
                     disabled={!hasNextPreviewImage}
-                    className="border-white/15 bg-white/8 text-stone-100 hover:bg-white/14"
                   >
                     下一张
                     <ArrowRight className="size-4" />
@@ -1809,12 +2271,100 @@ export default function ImagePage() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-center overflow-hidden rounded-[20px] bg-black/60">
+              <div className="flex items-center justify-center overflow-hidden rounded-xl bg-muted">
                 <img
                   src={previewImage.src}
                   alt={previewImage.alt}
                   className="h-auto max-h-[82vh] w-auto max-w-full object-contain"
                 />
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(galleryPreviewItem)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setGalleryPreviewItem(null);
+          }
+        }}
+      >
+        <DialogContent className="w-[min(96vw,1180px)] p-2 sm:p-4">
+          <DialogTitle className="sr-only">画廊图片预览</DialogTitle>
+          {galleryPreviewItem ? (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_340px]">
+              <div className="flex items-center justify-center overflow-hidden rounded-xl bg-muted">
+                <img
+                  src={galleryPreviewItem.imageUrl}
+                  alt={galleryPreviewItem.title}
+                  className="h-auto max-h-[82vh] w-auto max-w-full object-contain"
+                />
+              </div>
+
+              <div className="minimal-panel-soft flex min-h-0 flex-col p-4">
+                <div className="min-w-0">
+                  <div className="text-base font-semibold text-foreground">
+                    第 {galleryPreviewItem.postNumber} 层 / @
+                    {galleryPreviewItem.username}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {galleryPreviewItem.title}
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      if (!galleryPreviewItem.hasPrompt) {
+                        toast.error("这张图没有 prompt");
+                        return;
+                      }
+                      try {
+                        await navigator.clipboard.writeText(
+                          galleryPreviewItem.prompt,
+                        );
+                        toast.success("prompt 已复制");
+                      } catch {
+                        toast.error("复制失败");
+                      }
+                    }}
+                  >
+                    <Copy className="size-4" />
+                    复制 prompt
+                  </Button>
+                  {galleryPreviewItem.hasPrompt ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => {
+                        applyPromptToComposer(galleryPreviewItem.prompt);
+                        setGalleryPreviewItem(null);
+                      }}
+                    >
+                      带入 prompt
+                    </Button>
+                  ) : null}
+                </div>
+
+                <div
+                  className={cn(
+                    "mt-4 min-h-0 flex-1 overflow-y-auto rounded-lg border px-4 py-4 text-left text-sm leading-6",
+                    galleryPreviewItem.hasPrompt
+                      ? "border-border bg-muted/45 text-foreground"
+                      : "border-border bg-muted/35 text-muted-foreground",
+                  )}
+                >
+                  <div className="whitespace-pre-wrap">
+                    {galleryPreviewItem.hasPrompt
+                      ? galleryPreviewItem.prompt
+                      : "未提供"}
+                  </div>
+                </div>
               </div>
             </div>
           ) : null}

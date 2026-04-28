@@ -2,7 +2,7 @@ FROM node:22-alpine AS web-build
 
 WORKDIR /app/web
 
-COPY web/package.json web/bun.lock ./
+COPY web/package.json web/package-lock.json ./
 RUN npm install
 
 COPY VERSION /app/VERSION

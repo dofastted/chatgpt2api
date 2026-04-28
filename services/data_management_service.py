@@ -357,7 +357,54 @@ class DataManagementService:
         key = f"{prefix}/{backup_path.name}" if prefix else backup_path.name
         client.upload_file(str(backup_path), bucket, key)
 
-    def list_conversations(self, auth_token: str) -> list[dict[str, Any]]:
+    def _build_conversation_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        turns = payload.get("turns")
+        if isinstance(turns, list) and turns:
+            valid_turns = [turn for turn in turns if isinstance(turn, dict)]
+            latest_turn = valid_turns[-1] if valid_turns else {}
+            turn_count = len(valid_turns)
+        else:
+            latest_turn = payload
+            turn_count = 1
+        conversation_id = _clean_text(payload.get("id"))
+        latest_summary = {
+            "id": _clean_text(latest_turn.get("id")) or f"{conversation_id or 'conversation'}-turn-1",
+            "prompt": _clean_text(latest_turn.get("prompt")),
+            "model": _clean_text(latest_turn.get("model")),
+            "count": latest_turn.get("count"),
+            "size": _clean_text(latest_turn.get("size")),
+            "createdAt": _clean_text(latest_turn.get("createdAt")),
+            "status": _clean_text(latest_turn.get("status")),
+            "error": _clean_text(latest_turn.get("error")),
+            "queueRequestId": _clean_text(latest_turn.get("queueRequestId")),
+            "requestStartedAt": _clean_text(latest_turn.get("requestStartedAt")),
+            "requestFinishedAt": _clean_text(latest_turn.get("requestFinishedAt")),
+            "lastError": _clean_text(latest_turn.get("lastError")),
+            "responseId": _clean_text(latest_turn.get("responseId")),
+            "images": [],
+        }
+        return {
+            "id": conversation_id,
+            "clientConversationId": _clean_text(payload.get("clientConversationId") or conversation_id),
+            "title": _clean_text(payload.get("title")),
+            "createdAt": _clean_text(payload.get("createdAt")),
+            "turns": [latest_summary],
+            "prompt": latest_summary.get("prompt"),
+            "model": latest_summary.get("model"),
+            "count": latest_summary.get("count"),
+            "size": latest_summary.get("size"),
+            "status": latest_summary.get("status"),
+            "queueRequestId": latest_summary.get("queueRequestId"),
+            "requestStartedAt": latest_summary.get("requestStartedAt"),
+            "requestFinishedAt": latest_summary.get("requestFinishedAt"),
+            "lastError": latest_summary.get("lastError"),
+            "error": latest_summary.get("error"),
+            "responseId": latest_summary.get("responseId"),
+            "turnCount": turn_count,
+            "isSummary": True,
+        }
+
+    def list_conversations(self, auth_token: str, *, summary: bool = False) -> list[dict[str, Any]]:
         owner_id = UploadedImageService.build_owner_id(auth_token)
         if not owner_id:
             return []
@@ -378,8 +425,30 @@ class DataManagementService:
             except json.JSONDecodeError:
                 continue
             if isinstance(payload, dict):
-                items.append(payload)
+                items.append(self._build_conversation_summary(payload) if summary else payload)
         return items
+
+    def get_conversation(self, auth_token: str, conversation_id: str) -> dict[str, Any] | None:
+        owner_id = UploadedImageService.build_owner_id(auth_token)
+        normalized_id = _clean_text(conversation_id)
+        if not owner_id or not normalized_id:
+            return None
+        with sqlite_store.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload
+                FROM image_conversations
+                WHERE owner_id = ? AND conversation_id = ?
+                """,
+                (owner_id, normalized_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(str(row["payload"]))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def upsert_conversation(self, auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
         settings = self.get_settings(masked=False)

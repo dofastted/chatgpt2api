@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
   Ban,
@@ -90,6 +90,7 @@ import {
   type DataManagementStatus,
   type ImageRequestRecord,
   type ImageRequestStatus,
+  type ImageModel,
   type ProxyItem,
   type ProxyProtocol,
   type RedeemCode,
@@ -168,7 +169,11 @@ const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
   "gpt-image-2-4K": 8,
 };
 
-const imageModels: ImageModel[] = ["gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K"];
+const imageModels: ImageModel[] = [
+  "gpt-image-2",
+  "gpt-image-2-2K",
+  "gpt-image-2-4K",
+];
 
 const ADMIN_SECONDARY_PAGE_SIZE = 10;
 
@@ -331,10 +336,7 @@ function downloadRedeemCodes(
   downloadTextFile(content, `${filenamePrefix}-${Date.now()}.txt`);
 }
 
-function downloadUserKeys(
-  userKeys: UserKey[],
-  filenamePrefix = "user-keys",
-) {
+function downloadUserKeys(userKeys: UserKey[], filenamePrefix = "user-keys") {
   if (userKeys.length === 0) {
     toast.error("没有可下载的用户 key");
     return;
@@ -366,16 +368,25 @@ export default function AccountsPage() {
   const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
   const [proxies, setProxies] = useState<ProxyItem[]>([]);
   const [activeProxyUrl, setActiveProxyUrl] = useState<string>("");
-  const [dataStatus, setDataStatus] = useState<DataManagementStatus | null>(null);
-  const [dataSettings, setDataSettings] = useState<DataManagementSettings | null>(null);
+  const [dataStatus, setDataStatus] = useState<DataManagementStatus | null>(
+    null,
+  );
+  const [dataSettings, setDataSettings] =
+    useState<DataManagementSettings | null>(null);
   const [dataBackups, setDataBackups] = useState<DataBackupRecord[]>([]);
   const [dataLogs, setDataLogs] = useState<DataManagementLogItem[]>([]);
   const [imageRequests, setImageRequests] = useState<ImageRequestRecord[]>([]);
-  const [selectedImageRequest, setSelectedImageRequest] = useState<ImageRequestRecord | null>(null);
+  const [selectedImageRequest, setSelectedImageRequest] =
+    useState<ImageRequestRecord | null>(null);
   const [imageRequestQuery, setImageRequestQuery] = useState("");
-  const [imageRequestStatusFilter, setImageRequestStatusFilter] = useState<ImageRequestStatus | "all">("all");
-  const [imageRequestModelFilter, setImageRequestModelFilter] = useState<ImageModel | "all">("all");
-  const [imageRequestEndpointFilter, setImageRequestEndpointFilter] = useState<string>("all");
+  const [imageRequestStatusFilter, setImageRequestStatusFilter] = useState<
+    ImageRequestStatus | "all"
+  >("all");
+  const [imageRequestModelFilter, setImageRequestModelFilter] = useState<
+    ImageModel | "all"
+  >("all");
+  const [imageRequestEndpointFilter, setImageRequestEndpointFilter] =
+    useState<string>("all");
   const [activeTab, setActiveTab] = useState<AdminTab>("accounts");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedUserKeyIds, setSelectedUserKeyIds] = useState<string[]>([]);
@@ -469,9 +480,7 @@ export default function AccountsPage() {
     "20" | "100"
   >("20");
   const [newRedeemCodeLabel, setNewRedeemCodeLabel] = useState("");
-  const [lastCreatedUserKeys, setLastCreatedUserKeys] = useState<UserKey[]>(
-    [],
-  );
+  const [lastCreatedUserKeys, setLastCreatedUserKeys] = useState<UserKey[]>([]);
   const [userKeyExport, setUserKeyExport] = useState<UserKeyExportState>({
     open: false,
     title: "用户 key 下载",
@@ -489,151 +498,189 @@ export default function AccountsPage() {
   const [proxyPassword, setProxyPassword] = useState("");
   const [editingProxyId, setEditingProxyId] = useState<string | null>(null);
 
-  function handleAdminRouteFailure(message: string) {
-    const normalizedMessage = String(message || "").toLowerCase();
-    if (normalizedMessage.includes("authorization is invalid")) {
-      router.replace("/login");
-      return true;
-    }
-    if (normalizedMessage.includes("admin authorization is required")) {
-      toast.error("当前密钥没有号池管理权限");
-      router.replace("/image");
-      return true;
-    }
-    return false;
-  }
-
-  async function loadAccounts(silent = false) {
-    if (!silent) {
-      setIsLoading(true);
-    }
-    try {
-      const data = await fetchAccounts({ redirectOnUnauthorized: false });
-      setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) =>
-        prev.filter((id) => data.items.some((item) => item.id === id)),
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载账户失败";
-      if (!handleAdminRouteFailure(message)) {
-        toast.error(message);
+  const handleAdminRouteFailure = useCallback(
+    (message: string) => {
+      const normalizedMessage = String(message || "").toLowerCase();
+      if (normalizedMessage.includes("authorization is invalid")) {
+        router.replace("/login");
+        return true;
       }
-    } finally {
+      if (normalizedMessage.includes("admin authorization is required")) {
+        toast.error("当前密钥没有号池管理权限");
+        router.replace("/image");
+        return true;
+      }
+      return false;
+    },
+    [router],
+  );
+
+  const loadAccounts = useCallback(
+    async (silent = false) => {
       if (!silent) {
-        setIsLoading(false);
+        setIsLoading(true);
       }
-    }
-  }
+      try {
+        const data = await fetchAccounts({ redirectOnUnauthorized: false });
+        setAccounts(normalizeAccounts(data.items));
+        setSelectedIds((prev) =>
+          prev.filter((id) => data.items.some((item) => item.id === id)),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "加载账户失败";
+        if (!handleAdminRouteFailure(message)) {
+          toast.error(message);
+        }
+      } finally {
+        if (!silent) {
+          setIsLoading(false);
+        }
+      }
+    },
+    [handleAdminRouteFailure],
+  );
 
-  async function loadUserKeys(silent = false) {
-    if (!silent) {
-      setIsLoadingUserKeys(true);
-    }
-    try {
-      const data = await fetchUserKeys({ redirectOnUnauthorized: false });
-      setUserKeys(data.items);
-      setSelectedUserKeyIds((prev) =>
-        prev.filter((id) => data.items.some((item) => item.id === id)),
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "加载用户 key 失败";
-      if (!handleAdminRouteFailure(message)) {
-        toast.error(message);
-      }
-    } finally {
+  const loadUserKeys = useCallback(
+    async (silent = false) => {
       if (!silent) {
-        setIsLoadingUserKeys(false);
+        setIsLoadingUserKeys(true);
       }
-    }
-  }
+      try {
+        const data = await fetchUserKeys({ redirectOnUnauthorized: false });
+        setUserKeys(data.items);
+        setSelectedUserKeyIds((prev) =>
+          prev.filter((id) => data.items.some((item) => item.id === id)),
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "加载用户 key 失败";
+        if (!handleAdminRouteFailure(message)) {
+          toast.error(message);
+        }
+      } finally {
+        if (!silent) {
+          setIsLoadingUserKeys(false);
+        }
+      }
+    },
+    [handleAdminRouteFailure],
+  );
 
-  async function loadRedeemCodes(silent = false) {
-    if (!silent) {
-      setIsLoadingRedeemCodes(true);
-    }
-    try {
-      const data = await fetchRedeemCodes({ redirectOnUnauthorized: false });
-      setRedeemCodes(data.items);
-      setSelectedRedeemCodeIds((prev) =>
-        prev.filter((id) => data.items.some((item) => item.id === id)),
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载兑换码失败";
-      if (!handleAdminRouteFailure(message)) {
-        toast.error(message);
-      }
-    } finally {
+  const loadRedeemCodes = useCallback(
+    async (silent = false) => {
       if (!silent) {
-        setIsLoadingRedeemCodes(false);
+        setIsLoadingRedeemCodes(true);
       }
-    }
-  }
+      try {
+        const data = await fetchRedeemCodes({ redirectOnUnauthorized: false });
+        setRedeemCodes(data.items);
+        setSelectedRedeemCodeIds((prev) =>
+          prev.filter((id) => data.items.some((item) => item.id === id)),
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "加载兑换码失败";
+        if (!handleAdminRouteFailure(message)) {
+          toast.error(message);
+        }
+      } finally {
+        if (!silent) {
+          setIsLoadingRedeemCodes(false);
+        }
+      }
+    },
+    [handleAdminRouteFailure],
+  );
 
-  async function loadProxies(silent = false) {
-    try {
-      const data = await fetchProxies({ redirectOnUnauthorized: false });
-      setProxies(data.items);
-      setActiveProxyUrl(String(data.active_proxy_url || ""));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载代理失败";
-      if (!handleAdminRouteFailure(message)) {
-        toast.error(message);
+  const loadProxies = useCallback(
+    async (silent = false) => {
+      try {
+        const data = await fetchProxies({ redirectOnUnauthorized: false });
+        setProxies(data.items);
+        setActiveProxyUrl(String(data.active_proxy_url || ""));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "加载代理失败";
+        if (!handleAdminRouteFailure(message)) {
+          toast.error(message);
+        }
       }
-    }
-  }
+    },
+    [handleAdminRouteFailure],
+  );
 
-  async function loadDataManagement(silent = false) {
-    if (!silent) {
-      setIsLoadingDataManagement(true);
-    }
-    try {
-      const [status, settings, backups, logs] = await Promise.all([
-        fetchDataManagementStatus({ redirectOnUnauthorized: false }),
-        fetchDataManagementSettings({ redirectOnUnauthorized: false }),
-        fetchDataBackups(),
-        fetchDataManagementLogs(),
-      ]);
-      setDataStatus(status);
-      setDataSettings(settings);
-      setDataBackups(backups.items);
-      setDataLogs(logs.items);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载数据管理失败";
-      if (!handleAdminRouteFailure(message)) {
-        toast.error(message);
-      }
-    } finally {
+  const loadDataManagement = useCallback(
+    async (silent = false) => {
       if (!silent) {
-        setIsLoadingDataManagement(false);
+        setIsLoadingDataManagement(true);
       }
-    }
-  }
+      try {
+        const [status, settings, backups, logs] = await Promise.all([
+          fetchDataManagementStatus({ redirectOnUnauthorized: false }),
+          fetchDataManagementSettings({ redirectOnUnauthorized: false }),
+          fetchDataBackups(),
+          fetchDataManagementLogs(),
+        ]);
+        setDataStatus(status);
+        setDataSettings(settings);
+        setDataBackups(backups.items);
+        setDataLogs(logs.items);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "加载数据管理失败";
+        if (!handleAdminRouteFailure(message)) {
+          toast.error(message);
+        }
+      } finally {
+        if (!silent) {
+          setIsLoadingDataManagement(false);
+        }
+      }
+    },
+    [handleAdminRouteFailure],
+  );
 
-  async function loadImageRequests(silent = false) {
-    if (!silent) {
-      setIsLoadingImageRequests(true);
-    }
-    try {
-      const data = await fetchImageRequests({
-        limit: 80,
-        ...(imageRequestQuery.trim() ? { request_id: imageRequestQuery.trim() } : {}),
-        ...(imageRequestStatusFilter !== "all" ? { status: imageRequestStatusFilter } : {}),
-        ...(imageRequestModelFilter !== "all" ? { model: imageRequestModelFilter } : {}),
-        ...(imageRequestEndpointFilter !== "all" ? { endpoint: imageRequestEndpointFilter } : {}),
-      });
-      setImageRequests(data.items);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载请求记录失败";
-      if (!handleAdminRouteFailure(message)) {
-        toast.error(message);
-      }
-    } finally {
+  const loadImageRequests = useCallback(
+    async (silent = false) => {
       if (!silent) {
-        setIsLoadingImageRequests(false);
+        setIsLoadingImageRequests(true);
       }
-    }
-  }
+      try {
+        const data = await fetchImageRequests({
+          limit: 80,
+          ...(imageRequestQuery.trim()
+            ? { request_id: imageRequestQuery.trim() }
+            : {}),
+          ...(imageRequestStatusFilter !== "all"
+            ? { status: imageRequestStatusFilter }
+            : {}),
+          ...(imageRequestModelFilter !== "all"
+            ? { model: imageRequestModelFilter }
+            : {}),
+          ...(imageRequestEndpointFilter !== "all"
+            ? { endpoint: imageRequestEndpointFilter }
+            : {}),
+        });
+        setImageRequests(data.items);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "加载请求记录失败";
+        if (!handleAdminRouteFailure(message)) {
+          toast.error(message);
+        }
+      } finally {
+        if (!silent) {
+          setIsLoadingImageRequests(false);
+        }
+      }
+    },
+    [
+      handleAdminRouteFailure,
+      imageRequestEndpointFilter,
+      imageRequestModelFilter,
+      imageRequestQuery,
+      imageRequestStatusFilter,
+    ],
+  );
 
   useEffect(() => {
     if (didLoadRef.current) {
@@ -683,7 +730,16 @@ export default function AccountsPage() {
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [
+    handleAdminRouteFailure,
+    loadAccounts,
+    loadDataManagement,
+    loadImageRequests,
+    loadProxies,
+    loadRedeemCodes,
+    loadUserKeys,
+    router,
+  ]);
 
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -1181,7 +1237,9 @@ export default function AccountsPage() {
     filenamePrefix: string,
     downloadNow = false,
   ) => {
-    const keys = items.map((item) => String(item.key || "").trim()).filter(Boolean);
+    const keys = items
+      .map((item) => String(item.key || "").trim())
+      .filter(Boolean);
     if (keys.length === 0) {
       toast.error("没有可下载的用户 key");
       return;
@@ -1327,16 +1385,28 @@ export default function AccountsPage() {
       updates.status = batchEditUserKeyStatus;
     }
     if (batchEditUserKeyPriceImage2.trim() !== "") {
-      pricingOverrides["gpt-image-2"] = Math.max(0, Number(batchEditUserKeyPriceImage2 || 0));
+      pricingOverrides["gpt-image-2"] = Math.max(
+        0,
+        Number(batchEditUserKeyPriceImage2 || 0),
+      );
     }
     if (batchEditUserKeyPriceImage2K.trim() !== "") {
-      pricingOverrides["gpt-image-2-2K"] = Math.max(0, Number(batchEditUserKeyPriceImage2K || 0));
+      pricingOverrides["gpt-image-2-2K"] = Math.max(
+        0,
+        Number(batchEditUserKeyPriceImage2K || 0),
+      );
     }
     if (batchEditUserKeyPriceImage4K.trim() !== "") {
-      pricingOverrides["gpt-image-2-4K"] = Math.max(0, Number(batchEditUserKeyPriceImage4K || 0));
+      pricingOverrides["gpt-image-2-4K"] = Math.max(
+        0,
+        Number(batchEditUserKeyPriceImage4K || 0),
+      );
     }
 
-    if (Object.keys(updates).length === 0 && Object.keys(pricingOverrides).length === 0) {
+    if (
+      Object.keys(updates).length === 0 &&
+      Object.keys(pricingOverrides).length === 0
+    ) {
       toast.error("请至少填写一项批量修改内容");
       return;
     }
@@ -1442,7 +1512,8 @@ export default function AccountsPage() {
       await loadDataManagement(true);
       toast.success("数据管理设置已保存");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "保存数据管理设置失败";
+      const message =
+        error instanceof Error ? error.message : "保存数据管理设置失败";
       toast.error(message);
     } finally {
       setIsSavingDataSettings(false);
@@ -1483,7 +1554,10 @@ export default function AccountsPage() {
     }
   };
 
-  const updateDataS3Field = (key: keyof DataManagementSettings["s3"], value: string | boolean) => {
+  const updateDataS3Field = (
+    key: keyof DataManagementSettings["s3"],
+    value: string | boolean,
+  ) => {
     setDataSettings((prev) =>
       prev
         ? {
@@ -1895,11 +1969,15 @@ export default function AccountsPage() {
           }))
         }
       >
-        <DialogContent showCloseButton={false} className="max-w-2xl rounded-2xl p-6">
+        <DialogContent
+          showCloseButton={false}
+          className="max-w-2xl rounded-2xl p-6"
+        >
           <DialogHeader className="gap-2">
             <DialogTitle>{userKeyExport.title}</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              共 {userKeyExport.keys.length} 个用户 key，一行一个。可直接下载 txt，也可复制全部。
+              共 {userKeyExport.keys.length} 个用户 key，一行一个。可直接下载
+              txt，也可复制全部。
             </DialogDescription>
           </DialogHeader>
           <Textarea
@@ -2201,438 +2279,440 @@ export default function AccountsPage() {
 
           <section className="minimal-fade-soft grid gap-4 xl:grid-cols-[minmax(0,1.8fr)_380px] [animation-delay:180ms]">
             <div className="space-y-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex items-center gap-3">
-                <h2 className="text-lg font-semibold tracking-tight">
-                  账户列表
-                </h2>
-                <Badge
-                  variant="secondary"
-                  className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700"
-                >
-                  {filteredAccounts.length}
-                </Badge>
-              </div>
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-lg font-semibold tracking-tight">
+                    账户列表
+                  </h2>
+                  <Badge
+                    variant="secondary"
+                    className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700"
+                  >
+                    {filteredAccounts.length}
+                  </Badge>
+                </div>
 
-              <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-                <div className="relative min-w-[260px]">
-                  <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
-                  <Input
-                    value={query}
-                    onChange={(event) => {
-                      setQuery(event.target.value);
+                <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+                  <div className="relative min-w-[260px]">
+                    <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+                    <Input
+                      value={query}
+                      onChange={(event) => {
+                        setQuery(event.target.value);
+                        setPage(1);
+                      }}
+                      placeholder="搜索邮箱"
+                      className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                    />
+                  </div>
+                  <Select
+                    value={categoryFilter}
+                    onValueChange={(value) => {
+                      setCategoryFilter(value as AccountCategory | "all");
                       setPage(1);
                     }}
-                    placeholder="搜索邮箱"
-                    className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
-                  />
+                  >
+                    <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accountCategoryOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={typeFilter}
+                    onValueChange={(value) => {
+                      setTypeFilter(value as AccountType | "all");
+                      setPage(1);
+                    }}
+                  >
+                    <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accountTypeOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={statusFilter}
+                    onValueChange={(value) => {
+                      setStatusFilter(value as AccountStatus | "all");
+                      setPage(1);
+                    }}
+                  >
+                    <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accountStatusOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-                <Select
-                  value={categoryFilter}
-                  onValueChange={(value) => {
-                    setCategoryFilter(value as AccountCategory | "all");
-                    setPage(1);
-                  }}
-                >
-                  <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {accountCategoryOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={typeFilter}
-                  onValueChange={(value) => {
-                    setTypeFilter(value as AccountType | "all");
-                    setPage(1);
-                  }}
-                >
-                  <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {accountTypeOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select
-                  value={statusFilter}
-                  onValueChange={(value) => {
-                    setStatusFilter(value as AccountStatus | "all");
-                    setPage(1);
-                  }}
-                >
-                  <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {accountStatusOptions.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
               </div>
-            </div>
 
-            {isLoading && accounts.length === 0 ? (
-              <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
-                <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                    <LoaderCircle className="size-5 animate-spin" />
+              {isLoading && accounts.length === 0 ? (
+                <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+                  <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                    <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                      <LoaderCircle className="size-5 animate-spin" />
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium text-stone-700">
+                        正在加载账户
+                      </p>
+                      <p className="text-sm text-stone-500">
+                        从后端同步账号列表和状态。
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              <Card
+                className={cn(
+                  "minimal-surface-hover overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
+                  isLoading && accounts.length === 0 ? "hidden" : "",
+                )}
+              >
+                <CardContent className="space-y-0 p-0">
+                  <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                        onClick={() =>
+                          void handleRefreshAccounts(selectedTokens)
+                        }
+                        disabled={selectedTokens.length === 0 || isRefreshing}
+                      >
+                        {isRefreshing ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="size-4" />
+                        )}
+                        刷新选中账号信息和额度
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                        onClick={() => void handleDeleteTokens(abnormalTokens)}
+                        disabled={abnormalTokens.length === 0 || isDeleting}
+                      >
+                        {isDeleting ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-4" />
+                        )}
+                        移除异常账号
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                        onClick={() => void handleDeleteTokens(selectedTokens)}
+                        disabled={selectedTokens.length === 0 || isDeleting}
+                      >
+                        {isDeleting ? (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="size-4" />
+                        )}
+                        删除所选
+                      </Button>
+                      {selectedIds.length > 0 ? (
+                        <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                          已选择 {selectedIds.length} 项
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium text-stone-700">
-                      正在加载账户
-                    </p>
-                    <p className="text-sm text-stone-500">
-                      从后端同步账号列表和状态。
-                    </p>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[920px] text-left">
+                      <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+                        <tr>
+                          <th className="w-12 px-4 py-3">
+                            <Checkbox
+                              checked={allCurrentSelected}
+                              onCheckedChange={(checked) =>
+                                toggleSelectAll(Boolean(checked))
+                              }
+                            />
+                          </th>
+                          <th className="w-56 px-4 py-3">token</th>
+                          <th className="w-24 px-4 py-3">来源</th>
+                          <th className="w-28 px-4 py-3">类型</th>
+                          <th className="w-24 px-4 py-3">状态</th>
+                          <th className="w-56 px-4 py-3">账号信息</th>
+                          <th className="w-24 px-4 py-3">额度</th>
+                          <th className="w-40 px-4 py-3">恢复时间</th>
+                          <th className="w-18 px-4 py-3">成功</th>
+                          <th className="w-18 px-4 py-3">失败</th>
+                          <th className="w-24 px-4 py-3">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {currentRows.map((account) => {
+                          const status = statusMeta[account.status];
+                          const StatusIcon = status.icon;
+
+                          return (
+                            <tr
+                              key={account.id}
+                              className="minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                            >
+                              <td className="px-4 py-3">
+                                <Checkbox
+                                  checked={selectedIds.includes(account.id)}
+                                  onCheckedChange={(checked) => {
+                                    setSelectedIds((prev) =>
+                                      checked
+                                        ? Array.from(
+                                            new Set([...prev, account.id]),
+                                          )
+                                        : prev.filter(
+                                            (item) => item !== account.id,
+                                          ),
+                                    );
+                                  }}
+                                />
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium tracking-tight text-stone-700">
+                                    {maskToken(account.access_token)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                                    onClick={() => {
+                                      void navigator.clipboard.writeText(
+                                        account.access_token,
+                                      );
+                                      toast.success("token 已复制");
+                                    }}
+                                  >
+                                    <Copy className="size-4" />
+                                  </button>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <Badge
+                                  variant={
+                                    account.category === "捐赠"
+                                      ? "info"
+                                      : "secondary"
+                                  }
+                                  className="rounded-md"
+                                >
+                                  {account.category}
+                                </Badge>
+                              </td>
+                              <td className="px-4 py-3">
+                                <Badge
+                                  variant="secondary"
+                                  className="rounded-md bg-stone-100 text-stone-700"
+                                >
+                                  {account.type}
+                                </Badge>
+                              </td>
+                              <td className="px-4 py-3">
+                                <Badge
+                                  variant={status.badge}
+                                  className="inline-flex items-center gap-1 rounded-md px-2 py-1"
+                                >
+                                  <StatusIcon className="size-3.5" />
+                                  {account.status}
+                                </Badge>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="text-xs leading-5 text-stone-500">
+                                  {account.email ?? "—"}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <Badge variant="info" className="rounded-md">
+                                  {formatQuota(account.quota)}
+                                </Badge>
+                              </td>
+                              <td className="px-4 py-3 text-xs leading-5 text-stone-500">
+                                {(() => {
+                                  const restore = formatRestoreAt(
+                                    account.restoreAt,
+                                  );
+                                  return (
+                                    <div className="space-y-0.5">
+                                      {restore.relative ? (
+                                        <div className="font-medium text-stone-700">
+                                          {restore.relative}
+                                        </div>
+                                      ) : null}
+                                      <div>{restore.absolute}</div>
+                                    </div>
+                                  );
+                                })()}
+                              </td>
+                              <td className="px-4 py-3 text-stone-500">
+                                {account.success}
+                              </td>
+                              <td className="px-4 py-3 text-stone-500">
+                                {account.fail}
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-1 text-stone-400">
+                                  <button
+                                    type="button"
+                                    className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                                    onClick={() => openEditDialog(account)}
+                                    disabled={isUpdating}
+                                  >
+                                    <Pencil className="size-4" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                                    onClick={() =>
+                                      void handleRefreshAccounts([
+                                        account.access_token,
+                                      ])
+                                    }
+                                    disabled={isRefreshing}
+                                  >
+                                    <RefreshCw
+                                      className={cn(
+                                        "size-4",
+                                        isRefreshing ? "animate-spin" : "",
+                                      )}
+                                    />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
+                                    onClick={() =>
+                                      void handleDeleteTokens([
+                                        account.access_token,
+                                      ])
+                                    }
+                                    disabled={isDeleting}
+                                  >
+                                    <Trash2 className="size-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+
+                    {!isLoading && currentRows.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                        <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                          <Search className="size-5" />
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium text-stone-700">
+                            没有匹配的账户
+                          </p>
+                          <p className="text-sm text-stone-500">
+                            调整筛选条件或搜索关键字后重试。
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="border-t border-stone-100 px-4 py-4">
+                    <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
+                      <div className="shrink-0 text-sm text-stone-500">
+                        显示第{" "}
+                        {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
+                        {Math.min(
+                          startIndex + Number(pageSize),
+                          filteredAccounts.length,
+                        )}{" "}
+                        条，共 {filteredAccounts.length} 条
+                      </div>
+
+                      <span className="shrink-0 text-sm leading-none text-stone-500">
+                        {safePage} / {pageCount} 页
+                      </span>
+                      <Select
+                        value={pageSize}
+                        onValueChange={(value) => {
+                          setPageSize(value);
+                          setPage(1);
+                        }}
+                      >
+                        <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="10">10 / 页</SelectItem>
+                          <SelectItem value="20">20 / 页</SelectItem>
+                          <SelectItem value="50">50 / 页</SelectItem>
+                          <SelectItem value="100">100 / 页</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
+                        disabled={safePage <= 1}
+                        onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                      >
+                        <ChevronLeft className="size-4" />
+                      </Button>
+                      {paginationItems.map((item, index) =>
+                        item === "..." ? (
+                          <span
+                            key={`ellipsis-${index}`}
+                            className="px-1 text-sm text-stone-400"
+                          >
+                            ...
+                          </span>
+                        ) : (
+                          <Button
+                            key={item}
+                            variant={item === safePage ? "default" : "outline"}
+                            className={cn(
+                              "h-10 min-w-10 shrink-0 rounded-lg px-3",
+                              item === safePage
+                                ? "bg-stone-950 text-white hover:bg-stone-800"
+                                : "border-stone-200 bg-white text-stone-700",
+                            )}
+                            onClick={() => setPage(item)}
+                          >
+                            {item}
+                          </Button>
+                        ),
+                      )}
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
+                        disabled={safePage >= pageCount}
+                        onClick={() =>
+                          setPage((prev) => Math.min(pageCount, prev + 1))
+                        }
+                      >
+                        <ChevronRight className="size-4" />
+                      </Button>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
-            ) : null}
-
-            <Card
-              className={cn(
-                "minimal-surface-hover overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
-                isLoading && accounts.length === 0 ? "hidden" : "",
-              )}
-            >
-              <CardContent className="space-y-0 p-0">
-                <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
-                    <Button
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                      onClick={() => void handleRefreshAccounts(selectedTokens)}
-                      disabled={selectedTokens.length === 0 || isRefreshing}
-                    >
-                      {isRefreshing ? (
-                        <LoaderCircle className="size-4 animate-spin" />
-                      ) : (
-                        <RefreshCw className="size-4" />
-                      )}
-                      刷新选中账号信息和额度
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                      onClick={() => void handleDeleteTokens(abnormalTokens)}
-                      disabled={abnormalTokens.length === 0 || isDeleting}
-                    >
-                      {isDeleting ? (
-                        <LoaderCircle className="size-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="size-4" />
-                      )}
-                      移除异常账号
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                      onClick={() => void handleDeleteTokens(selectedTokens)}
-                      disabled={selectedTokens.length === 0 || isDeleting}
-                    >
-                      {isDeleting ? (
-                        <LoaderCircle className="size-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="size-4" />
-                      )}
-                      删除所选
-                    </Button>
-                    {selectedIds.length > 0 ? (
-                      <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
-                        已选择 {selectedIds.length} 项
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[920px] text-left">
-                    <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
-                      <tr>
-                        <th className="w-12 px-4 py-3">
-                          <Checkbox
-                            checked={allCurrentSelected}
-                            onCheckedChange={(checked) =>
-                              toggleSelectAll(Boolean(checked))
-                            }
-                          />
-                        </th>
-                        <th className="w-56 px-4 py-3">token</th>
-                        <th className="w-24 px-4 py-3">来源</th>
-                        <th className="w-28 px-4 py-3">类型</th>
-                        <th className="w-24 px-4 py-3">状态</th>
-                        <th className="w-56 px-4 py-3">账号信息</th>
-                        <th className="w-24 px-4 py-3">额度</th>
-                        <th className="w-40 px-4 py-3">恢复时间</th>
-                        <th className="w-18 px-4 py-3">成功</th>
-                        <th className="w-18 px-4 py-3">失败</th>
-                        <th className="w-24 px-4 py-3">操作</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {currentRows.map((account) => {
-                        const status = statusMeta[account.status];
-                        const StatusIcon = status.icon;
-
-                        return (
-                          <tr
-                            key={account.id}
-                            className="minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
-                          >
-                            <td className="px-4 py-3">
-                              <Checkbox
-                                checked={selectedIds.includes(account.id)}
-                                onCheckedChange={(checked) => {
-                                  setSelectedIds((prev) =>
-                                    checked
-                                      ? Array.from(
-                                          new Set([...prev, account.id]),
-                                        )
-                                      : prev.filter(
-                                          (item) => item !== account.id,
-                                        ),
-                                  );
-                                }}
-                              />
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium tracking-tight text-stone-700">
-                                  {maskToken(account.access_token)}
-                                </span>
-                                <button
-                                  type="button"
-                                  className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                                  onClick={() => {
-                                    void navigator.clipboard.writeText(
-                                      account.access_token,
-                                    );
-                                    toast.success("token 已复制");
-                                  }}
-                                >
-                                  <Copy className="size-4" />
-                                </button>
-                              </div>
-                            </td>
-                            <td className="px-4 py-3">
-                              <Badge
-                                variant={
-                                  account.category === "捐赠"
-                                    ? "info"
-                                    : "secondary"
-                                }
-                                className="rounded-md"
-                              >
-                                {account.category}
-                              </Badge>
-                            </td>
-                            <td className="px-4 py-3">
-                              <Badge
-                                variant="secondary"
-                                className="rounded-md bg-stone-100 text-stone-700"
-                              >
-                                {account.type}
-                              </Badge>
-                            </td>
-                            <td className="px-4 py-3">
-                              <Badge
-                                variant={status.badge}
-                                className="inline-flex items-center gap-1 rounded-md px-2 py-1"
-                              >
-                                <StatusIcon className="size-3.5" />
-                                {account.status}
-                              </Badge>
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="text-xs leading-5 text-stone-500">
-                                {account.email ?? "—"}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3">
-                              <Badge variant="info" className="rounded-md">
-                                {formatQuota(account.quota)}
-                              </Badge>
-                            </td>
-                            <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                              {(() => {
-                                const restore = formatRestoreAt(
-                                  account.restoreAt,
-                                );
-                                return (
-                                  <div className="space-y-0.5">
-                                    {restore.relative ? (
-                                      <div className="font-medium text-stone-700">
-                                        {restore.relative}
-                                      </div>
-                                    ) : null}
-                                    <div>{restore.absolute}</div>
-                                  </div>
-                                );
-                              })()}
-                            </td>
-                            <td className="px-4 py-3 text-stone-500">
-                              {account.success}
-                            </td>
-                            <td className="px-4 py-3 text-stone-500">
-                              {account.fail}
-                            </td>
-                            <td className="px-4 py-3">
-                              <div className="flex items-center gap-1 text-stone-400">
-                                <button
-                                  type="button"
-                                  className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                                  onClick={() => openEditDialog(account)}
-                                  disabled={isUpdating}
-                                >
-                                  <Pencil className="size-4" />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                                  onClick={() =>
-                                    void handleRefreshAccounts([
-                                      account.access_token,
-                                    ])
-                                  }
-                                  disabled={isRefreshing}
-                                >
-                                  <RefreshCw
-                                    className={cn(
-                                      "size-4",
-                                      isRefreshing ? "animate-spin" : "",
-                                    )}
-                                  />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                                  onClick={() =>
-                                    void handleDeleteTokens([
-                                      account.access_token,
-                                    ])
-                                  }
-                                  disabled={isDeleting}
-                                >
-                                  <Trash2 className="size-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-
-                  {!isLoading && currentRows.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                      <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                        <Search className="size-5" />
-                      </div>
-                      <div className="space-y-1">
-                        <p className="text-sm font-medium text-stone-700">
-                          没有匹配的账户
-                        </p>
-                        <p className="text-sm text-stone-500">
-                          调整筛选条件或搜索关键字后重试。
-                        </p>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="border-t border-stone-100 px-4 py-4">
-                  <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
-                    <div className="shrink-0 text-sm text-stone-500">
-                      显示第{" "}
-                      {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                      {Math.min(
-                        startIndex + Number(pageSize),
-                        filteredAccounts.length,
-                      )}{" "}
-                      条，共 {filteredAccounts.length} 条
-                    </div>
-
-                    <span className="shrink-0 text-sm leading-none text-stone-500">
-                      {safePage} / {pageCount} 页
-                    </span>
-                    <Select
-                      value={pageSize}
-                      onValueChange={(value) => {
-                        setPageSize(value);
-                        setPage(1);
-                      }}
-                    >
-                      <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="10">10 / 页</SelectItem>
-                        <SelectItem value="20">20 / 页</SelectItem>
-                        <SelectItem value="50">50 / 页</SelectItem>
-                        <SelectItem value="100">100 / 页</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                      disabled={safePage <= 1}
-                      onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-                    >
-                      <ChevronLeft className="size-4" />
-                    </Button>
-                    {paginationItems.map((item, index) =>
-                      item === "..." ? (
-                        <span
-                          key={`ellipsis-${index}`}
-                          className="px-1 text-sm text-stone-400"
-                        >
-                          ...
-                        </span>
-                      ) : (
-                        <Button
-                          key={item}
-                          variant={item === safePage ? "default" : "outline"}
-                          className={cn(
-                            "h-10 min-w-10 shrink-0 rounded-lg px-3",
-                            item === safePage
-                              ? "bg-stone-950 text-white hover:bg-stone-800"
-                              : "border-stone-200 bg-white text-stone-700",
-                          )}
-                          onClick={() => setPage(item)}
-                        >
-                          {item}
-                        </Button>
-                      ),
-                    )}
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                      disabled={safePage >= pageCount}
-                      onClick={() =>
-                        setPage((prev) => Math.min(pageCount, prev + 1))
-                      }
-                    >
-                      <ChevronRight className="size-4" />
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
             </div>
 
             <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
@@ -2723,7 +2803,9 @@ export default function AccountsPage() {
                       </label>
                       <Input
                         value={proxyUsername}
-                        onChange={(event) => setProxyUsername(event.target.value)}
+                        onChange={(event) =>
+                          setProxyUsername(event.target.value)
+                        }
                         placeholder="可留空"
                         className="h-11 rounded-xl border-stone-200 bg-white"
                       />
@@ -2734,7 +2816,9 @@ export default function AccountsPage() {
                       </label>
                       <Input
                         value={proxyPassword}
-                        onChange={(event) => setProxyPassword(event.target.value)}
+                        onChange={(event) =>
+                          setProxyPassword(event.target.value)
+                        }
                         placeholder="可留空"
                         className="h-11 rounded-xl border-stone-200 bg-white"
                       />
@@ -2792,13 +2876,17 @@ export default function AccountsPage() {
                                   {item.name}
                                 </div>
                                 {item.enabled ? (
-                                  <Badge variant="success" className="rounded-md">
+                                  <Badge
+                                    variant="success"
+                                    className="rounded-md"
+                                  >
                                     已启用
                                   </Badge>
                                 ) : null}
                               </div>
                               <div className="text-xs text-stone-500">
-                                {item.protocol.toUpperCase()} · {item.host}:{item.port}
+                                {item.protocol.toUpperCase()} · {item.host}:
+                                {item.port}
                               </div>
                               <div className="text-xs break-all text-stone-400">
                                 {item.url || "—"}
@@ -3747,7 +3835,14 @@ export default function AccountsPage() {
                 }}
                 disabled={isLoadingDataManagement || isLoadingImageRequests}
               >
-                <RefreshCw className={cn("size-4", isLoadingDataManagement || isLoadingImageRequests ? "animate-spin" : "")} />
+                <RefreshCw
+                  className={cn(
+                    "size-4",
+                    isLoadingDataManagement || isLoadingImageRequests
+                      ? "animate-spin"
+                      : "",
+                  )}
+                />
                 刷新
               </Button>
               <Button
@@ -3755,7 +3850,11 @@ export default function AccountsPage() {
                 onClick={() => void handleCreateDataBackup()}
                 disabled={isCreatingBackup}
               >
-                {isCreatingBackup ? <LoaderCircle className="size-4 animate-spin" /> : <HardDrive className="size-4" />}
+                {isCreatingBackup ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <HardDrive className="size-4" />
+                )}
                 手动备份
               </Button>
             </div>
@@ -3798,12 +3897,19 @@ export default function AccountsPage() {
                   </div>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {Object.entries(dataStatus?.tables || {}).map(([name, count]) => (
-                    <div key={name} className="flex items-center justify-between rounded-lg border border-stone-100 px-3 py-2 text-sm">
-                      <span className="text-stone-500">{name}</span>
-                      <span className="font-medium text-stone-900">{count}</span>
-                    </div>
-                  ))}
+                  {Object.entries(dataStatus?.tables || {}).map(
+                    ([name, count]) => (
+                      <div
+                        key={name}
+                        className="flex items-center justify-between rounded-lg border border-stone-100 px-3 py-2 text-sm"
+                      >
+                        <span className="text-stone-500">{name}</span>
+                        <span className="font-medium text-stone-900">
+                          {count}
+                        </span>
+                      </div>
+                    ),
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -3817,7 +3923,11 @@ export default function AccountsPage() {
                   <Checkbox
                     checked={Boolean(dataSettings?.backup_enabled)}
                     onCheckedChange={(checked) =>
-                      setDataSettings((prev) => (prev ? { ...prev, backup_enabled: Boolean(checked) } : prev))
+                      setDataSettings((prev) =>
+                        prev
+                          ? { ...prev, backup_enabled: Boolean(checked) }
+                          : prev,
+                      )
                     }
                   />
                   开启定时备份
@@ -3826,7 +3936,14 @@ export default function AccountsPage() {
                   <Checkbox
                     checked={Boolean(dataSettings?.save_image_conversations)}
                     onCheckedChange={(checked) =>
-                      setDataSettings((prev) => (prev ? { ...prev, save_image_conversations: Boolean(checked) } : prev))
+                      setDataSettings((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              save_image_conversations: Boolean(checked),
+                            }
+                          : prev,
+                      )
                     }
                   />
                   保存图片会话
@@ -3835,7 +3952,9 @@ export default function AccountsPage() {
                   <Checkbox
                     checked={Boolean(dataSettings?.save_logs)}
                     onCheckedChange={(checked) =>
-                      setDataSettings((prev) => (prev ? { ...prev, save_logs: Boolean(checked) } : prev))
+                      setDataSettings((prev) =>
+                        prev ? { ...prev, save_logs: Boolean(checked) } : prev,
+                      )
                     }
                   />
                   保存运行日志
@@ -3847,7 +3966,15 @@ export default function AccountsPage() {
                     value={dataSettings?.backup_interval_minutes ?? 0}
                     onChange={(event) =>
                       setDataSettings((prev) =>
-                        prev ? { ...prev, backup_interval_minutes: Math.max(0, Number(event.target.value || 0)) } : prev,
+                        prev
+                          ? {
+                              ...prev,
+                              backup_interval_minutes: Math.max(
+                                0,
+                                Number(event.target.value || 0),
+                              ),
+                            }
+                          : prev,
                       )
                     }
                     className="h-10 rounded-xl border-stone-200"
@@ -3859,7 +3986,15 @@ export default function AccountsPage() {
                     value={dataSettings?.backup_max_bytes ?? 1}
                     onChange={(event) =>
                       setDataSettings((prev) =>
-                        prev ? { ...prev, backup_max_bytes: Math.max(1, Number(event.target.value || 1)) } : prev,
+                        prev
+                          ? {
+                              ...prev,
+                              backup_max_bytes: Math.max(
+                                1,
+                                Number(event.target.value || 1),
+                              ),
+                            }
+                          : prev,
                       )
                     }
                     className="h-10 rounded-xl border-stone-200"
@@ -3871,7 +4006,11 @@ export default function AccountsPage() {
                   onClick={() => void handleSaveDataSettings()}
                   disabled={isSavingDataSettings || !dataSettings}
                 >
-                  {isSavingDataSettings ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+                  {isSavingDataSettings ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Save className="size-4" />
+                  )}
                   保存设置
                 </Button>
               </CardContent>
@@ -3896,24 +4035,79 @@ export default function AccountsPage() {
                     onClick={() => void handleTestDataS3()}
                     disabled={isTestingS3 || !dataSettings}
                   >
-                    {isTestingS3 ? <LoaderCircle className="size-4 animate-spin" /> : null}
+                    {isTestingS3 ? (
+                      <LoaderCircle className="size-4 animate-spin" />
+                    ) : null}
                     测试 S3
                   </Button>
                 </div>
               </div>
               <div className="grid gap-3 md:grid-cols-4">
-                <Input value={dataSettings?.s3.endpoint || ""} onChange={(event) => updateDataS3Field("endpoint", event.target.value)} placeholder="endpoint" className="h-10 rounded-xl border-stone-200" />
-                <Input value={dataSettings?.s3.region || ""} onChange={(event) => updateDataS3Field("region", event.target.value)} placeholder="region" className="h-10 rounded-xl border-stone-200" />
-                <Input value={dataSettings?.s3.bucket || ""} onChange={(event) => updateDataS3Field("bucket", event.target.value)} placeholder="bucket" className="h-10 rounded-xl border-stone-200" />
-                <Input value={dataSettings?.s3.prefix || ""} onChange={(event) => updateDataS3Field("prefix", event.target.value)} placeholder="prefix" className="h-10 rounded-xl border-stone-200" />
-                <Input value={dataSettings?.s3.access_key_id || ""} onChange={(event) => updateDataS3Field("access_key_id", event.target.value)} placeholder="access key id" className="h-10 rounded-xl border-stone-200" />
-                <Input value={dataSettings?.s3.secret_access_key || ""} onChange={(event) => updateDataS3Field("secret_access_key", event.target.value)} placeholder="secret access key" type="password" className="h-10 rounded-xl border-stone-200" />
+                <Input
+                  value={dataSettings?.s3.endpoint || ""}
+                  onChange={(event) =>
+                    updateDataS3Field("endpoint", event.target.value)
+                  }
+                  placeholder="endpoint"
+                  className="h-10 rounded-xl border-stone-200"
+                />
+                <Input
+                  value={dataSettings?.s3.region || ""}
+                  onChange={(event) =>
+                    updateDataS3Field("region", event.target.value)
+                  }
+                  placeholder="region"
+                  className="h-10 rounded-xl border-stone-200"
+                />
+                <Input
+                  value={dataSettings?.s3.bucket || ""}
+                  onChange={(event) =>
+                    updateDataS3Field("bucket", event.target.value)
+                  }
+                  placeholder="bucket"
+                  className="h-10 rounded-xl border-stone-200"
+                />
+                <Input
+                  value={dataSettings?.s3.prefix || ""}
+                  onChange={(event) =>
+                    updateDataS3Field("prefix", event.target.value)
+                  }
+                  placeholder="prefix"
+                  className="h-10 rounded-xl border-stone-200"
+                />
+                <Input
+                  value={dataSettings?.s3.access_key_id || ""}
+                  onChange={(event) =>
+                    updateDataS3Field("access_key_id", event.target.value)
+                  }
+                  placeholder="access key id"
+                  className="h-10 rounded-xl border-stone-200"
+                />
+                <Input
+                  value={dataSettings?.s3.secret_access_key || ""}
+                  onChange={(event) =>
+                    updateDataS3Field("secret_access_key", event.target.value)
+                  }
+                  placeholder="secret access key"
+                  type="password"
+                  className="h-10 rounded-xl border-stone-200"
+                />
                 <label className="flex items-center gap-2 rounded-xl border border-stone-100 px-3 text-sm text-stone-700">
-                  <Checkbox checked={Boolean(dataSettings?.s3.enabled)} onCheckedChange={(checked) => updateDataS3Field("enabled", Boolean(checked))} />
+                  <Checkbox
+                    checked={Boolean(dataSettings?.s3.enabled)}
+                    onCheckedChange={(checked) =>
+                      updateDataS3Field("enabled", Boolean(checked))
+                    }
+                  />
                   启用上传
                 </label>
                 <label className="flex items-center gap-2 rounded-xl border border-stone-100 px-3 text-sm text-stone-700">
-                  <Checkbox checked={Boolean(dataSettings?.s3.force_path_style)} onCheckedChange={(checked) => updateDataS3Field("force_path_style", Boolean(checked))} />
+                  <Checkbox
+                    checked={Boolean(dataSettings?.s3.force_path_style)}
+                    onCheckedChange={(checked) =>
+                      updateDataS3Field("force_path_style", Boolean(checked))
+                    }
+                  />
                   path style
                 </label>
               </div>
@@ -3938,7 +4132,12 @@ export default function AccountsPage() {
                   onClick={() => void loadImageRequests()}
                   disabled={isLoadingImageRequests}
                 >
-                  <RefreshCw className={cn("size-4", isLoadingImageRequests ? "animate-spin" : "")} />
+                  <RefreshCw
+                    className={cn(
+                      "size-4",
+                      isLoadingImageRequests ? "animate-spin" : "",
+                    )}
+                  />
                   刷新记录
                 </Button>
               </div>
@@ -3950,20 +4149,40 @@ export default function AccountsPage() {
                   placeholder="请求 id"
                   className="h-10 rounded-xl border-stone-200"
                 />
-                <Select value={imageRequestStatusFilter} onValueChange={(value) => setImageRequestStatusFilter(value as ImageRequestStatus | "all")}>
+                <Select
+                  value={imageRequestStatusFilter}
+                  onValueChange={(value) =>
+                    setImageRequestStatusFilter(
+                      value as ImageRequestStatus | "all",
+                    )
+                  }
+                >
                   <SelectTrigger className="h-10 rounded-xl border-stone-200">
                     <SelectValue placeholder="状态" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部状态</SelectItem>
-                    {["accepted", "waiting", "assigning_account", "running", "finished", "failed", "rejected"].map((status) => (
+                    {[
+                      "accepted",
+                      "waiting",
+                      "assigning_account",
+                      "running",
+                      "finished",
+                      "failed",
+                      "rejected",
+                    ].map((status) => (
                       <SelectItem key={status} value={status}>
                         {status}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Select value={imageRequestModelFilter} onValueChange={(value) => setImageRequestModelFilter(value as ImageModel | "all")}>
+                <Select
+                  value={imageRequestModelFilter}
+                  onValueChange={(value) =>
+                    setImageRequestModelFilter(value as ImageModel | "all")
+                  }
+                >
                   <SelectTrigger className="h-10 rounded-xl border-stone-200">
                     <SelectValue placeholder="模型" />
                   </SelectTrigger>
@@ -3976,15 +4195,22 @@ export default function AccountsPage() {
                     ))}
                   </SelectContent>
                 </Select>
-                <Select value={imageRequestEndpointFilter} onValueChange={setImageRequestEndpointFilter}>
+                <Select
+                  value={imageRequestEndpointFilter}
+                  onValueChange={setImageRequestEndpointFilter}
+                >
                   <SelectTrigger className="h-10 rounded-xl border-stone-200">
                     <SelectValue placeholder="入口" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">全部入口</SelectItem>
                     <SelectItem value="/v1/responses">/v1/responses</SelectItem>
-                    <SelectItem value="/v1/images/generations">/v1/images/generations</SelectItem>
-                    <SelectItem value="/v1/images/edits">/v1/images/edits</SelectItem>
+                    <SelectItem value="/v1/images/generations">
+                      /v1/images/generations
+                    </SelectItem>
+                    <SelectItem value="/v1/images/edits">
+                      /v1/images/edits
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -4032,22 +4258,51 @@ export default function AccountsPage() {
                           className="cursor-pointer hover:bg-stone-50"
                           onClick={() => setSelectedImageRequest(item)}
                         >
-                          <td className="px-3 py-2 text-stone-600">{formatDateTime(item.created_at)}</td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {formatDateTime(item.created_at)}
+                          </td>
                           <td className="px-3 py-2">
-                            <Badge variant={item.status === "finished" ? "success" : item.status === "failed" || item.status === "rejected" ? "danger" : "secondary"}>
+                            <Badge
+                              variant={
+                                item.status === "finished"
+                                  ? "success"
+                                  : item.status === "failed" ||
+                                      item.status === "rejected"
+                                    ? "danger"
+                                    : "secondary"
+                              }
+                            >
                               {item.status}
                             </Badge>
                           </td>
-                          <td className="px-3 py-2 text-stone-600">{item.endpoint}</td>
-                          <td className="px-3 py-2 text-stone-900">{item.model || "—"}</td>
-                          <td className="px-3 py-2 text-stone-600">{item.size || "auto"}</td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {item.endpoint}
+                          </td>
+                          <td className="px-3 py-2 text-stone-900">
+                            {item.model || "—"}
+                          </td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {item.size || "auto"}
+                          </td>
                           <td className="px-3 py-2 text-stone-600">{item.n}</td>
-                          <td className="px-3 py-2 text-stone-600">{formatDurationMs(item.total_ms)}</td>
-                          <td className="px-3 py-2 text-stone-600">{formatDurationMs(item.queue_wait_ms)}</td>
-                          <td className="px-3 py-2 text-stone-600">{formatDurationMs(item.running_ms)}</td>
-                          <td className="px-3 py-2 text-stone-600">{item.charged_quota ?? "—"}</td>
-                          <td className="px-3 py-2 text-stone-600">{item.user_key_label || item.auth_type}</td>
-                          <td className="max-w-[180px] truncate px-3 py-2 font-mono text-xs text-stone-500">{item.request_id}</td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {formatDurationMs(item.total_ms)}
+                          </td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {formatDurationMs(item.queue_wait_ms)}
+                          </td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {formatDurationMs(item.running_ms)}
+                          </td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {item.charged_quota ?? "—"}
+                          </td>
+                          <td className="px-3 py-2 text-stone-600">
+                            {item.user_key_label || item.auth_type}
+                          </td>
+                          <td className="max-w-[180px] truncate px-3 py-2 font-mono text-xs text-stone-500">
+                            {item.request_id}
+                          </td>
                         </tr>
                       ))
                     )}
@@ -4070,14 +4325,29 @@ export default function AccountsPage() {
                     <div className="p-5 text-sm text-stone-500">暂无备份</div>
                   ) : (
                     dataBackups.slice(0, 8).map((item) => (
-                      <div key={item.id} className="flex items-center justify-between gap-3 px-5 py-3 text-sm">
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between gap-3 px-5 py-3 text-sm"
+                      >
                         <div className="min-w-0">
-                          <div className="truncate font-medium text-stone-900">{item.id}</div>
-                          <div className="truncate text-xs text-stone-500">{item.path}</div>
+                          <div className="truncate font-medium text-stone-900">
+                            {item.id}
+                          </div>
+                          <div className="truncate text-xs text-stone-500">
+                            {item.path}
+                          </div>
                         </div>
                         <div className="shrink-0 text-right">
-                          <Badge variant={item.status === "success" ? "success" : "danger"}>{item.status}</Badge>
-                          <div className="mt-1 text-xs text-stone-500">{formatBytes(item.size_bytes)}</div>
+                          <Badge
+                            variant={
+                              item.status === "success" ? "success" : "danger"
+                            }
+                          >
+                            {item.status}
+                          </Badge>
+                          <div className="mt-1 text-xs text-stone-500">
+                            {formatBytes(item.size_bytes)}
+                          </div>
                         </div>
                       </div>
                     ))
@@ -4100,10 +4370,16 @@ export default function AccountsPage() {
                     dataLogs.slice(0, 10).map((item) => (
                       <div key={item.id} className="px-5 py-3 text-sm">
                         <div className="flex items-center justify-between gap-3">
-                          <div className="font-medium text-stone-900">{item.component}</div>
-                          <span className="text-xs text-stone-500">{formatDateTime(item.created_at)}</span>
+                          <div className="font-medium text-stone-900">
+                            {item.component}
+                          </div>
+                          <span className="text-xs text-stone-500">
+                            {formatDateTime(item.created_at)}
+                          </span>
                         </div>
-                        <div className="mt-1 text-stone-600">{item.message}</div>
+                        <div className="mt-1 text-stone-600">
+                          {item.message}
+                        </div>
                       </div>
                     ))
                   )}
@@ -4114,7 +4390,10 @@ export default function AccountsPage() {
         </section>
       ) : null}
 
-      <Dialog open={Boolean(selectedImageRequest)} onOpenChange={(open) => !open && setSelectedImageRequest(null)}>
+      <Dialog
+        open={Boolean(selectedImageRequest)}
+        onOpenChange={(open) => !open && setSelectedImageRequest(null)}
+      >
         <DialogContent className="max-w-3xl rounded-2xl border-stone-200 bg-white">
           <DialogHeader>
             <DialogTitle>请求详情</DialogTitle>
@@ -4126,46 +4405,97 @@ export default function AccountsPage() {
             <div className="grid gap-4 text-sm md:grid-cols-2">
               <div className="space-y-2 rounded-xl border border-stone-100 p-3">
                 <div className="font-medium text-stone-900">阶段时间</div>
-                <div className="text-stone-600">接收：{formatDateTime(selectedImageRequest.accepted_at)}</div>
-                <div className="text-stone-600">排队：{formatDateTime(selectedImageRequest.queued_at)}</div>
-                <div className="text-stone-600">分配账号：{formatDateTime(selectedImageRequest.started_at)}</div>
-                <div className="text-stone-600">运行：{formatDateTime(selectedImageRequest.running_at)}</div>
-                <div className="text-stone-600">结束：{formatDateTime(selectedImageRequest.finished_at)}</div>
+                <div className="text-stone-600">
+                  接收：{formatDateTime(selectedImageRequest.accepted_at)}
+                </div>
+                <div className="text-stone-600">
+                  排队：{formatDateTime(selectedImageRequest.queued_at)}
+                </div>
+                <div className="text-stone-600">
+                  分配账号：{formatDateTime(selectedImageRequest.started_at)}
+                </div>
+                <div className="text-stone-600">
+                  运行：{formatDateTime(selectedImageRequest.running_at)}
+                </div>
+                <div className="text-stone-600">
+                  结束：{formatDateTime(selectedImageRequest.finished_at)}
+                </div>
               </div>
               <div className="space-y-2 rounded-xl border border-stone-100 p-3">
                 <div className="font-medium text-stone-900">耗时</div>
-                <div className="text-stone-600">等待：{formatDurationMs(selectedImageRequest.queue_wait_ms)}</div>
-                <div className="text-stone-600">分配：{formatDurationMs(selectedImageRequest.assigning_ms)}</div>
-                <div className="text-stone-600">运行：{formatDurationMs(selectedImageRequest.running_ms)}</div>
-                <div className="text-stone-600">总计：{formatDurationMs(selectedImageRequest.total_ms)}</div>
+                <div className="text-stone-600">
+                  等待：{formatDurationMs(selectedImageRequest.queue_wait_ms)}
+                </div>
+                <div className="text-stone-600">
+                  分配：{formatDurationMs(selectedImageRequest.assigning_ms)}
+                </div>
+                <div className="text-stone-600">
+                  运行：{formatDurationMs(selectedImageRequest.running_ms)}
+                </div>
+                <div className="text-stone-600">
+                  总计：{formatDurationMs(selectedImageRequest.total_ms)}
+                </div>
               </div>
               <div className="space-y-2 rounded-xl border border-stone-100 p-3">
                 <div className="font-medium text-stone-900">计费</div>
-                <div className="text-stone-600">请求张数：{selectedImageRequest.requested_count ?? selectedImageRequest.n}</div>
-                <div className="text-stone-600">成功：{selectedImageRequest.succeeded_count ?? "—"}</div>
-                <div className="text-stone-600">失败：{selectedImageRequest.failed_count ?? "—"}</div>
-                <div className="text-stone-600">单价：{selectedImageRequest.unit_cost ?? "—"}</div>
-                <div className="text-stone-600">扣费：{selectedImageRequest.charged_quota ?? "—"}</div>
-                <div className="text-stone-600">剩余：{selectedImageRequest.remaining_quota ?? "—"}</div>
+                <div className="text-stone-600">
+                  请求张数：
+                  {selectedImageRequest.requested_count ??
+                    selectedImageRequest.n}
+                </div>
+                <div className="text-stone-600">
+                  成功：{selectedImageRequest.succeeded_count ?? "—"}
+                </div>
+                <div className="text-stone-600">
+                  失败：{selectedImageRequest.failed_count ?? "—"}
+                </div>
+                <div className="text-stone-600">
+                  单价：{selectedImageRequest.unit_cost ?? "—"}
+                </div>
+                <div className="text-stone-600">
+                  扣费：{selectedImageRequest.charged_quota ?? "—"}
+                </div>
+                <div className="text-stone-600">
+                  剩余：{selectedImageRequest.remaining_quota ?? "—"}
+                </div>
               </div>
               <div className="space-y-2 rounded-xl border border-stone-100 p-3">
                 <div className="font-medium text-stone-900">路线</div>
-                <div className="text-stone-600">账号类型：{selectedImageRequest.account_type || "—"}</div>
-                <div className="text-stone-600">路线：{selectedImageRequest.route || "—"}</div>
-                <div className="text-stone-600">尝试次数：{selectedImageRequest.attempt_count ?? "—"}</div>
-                <div className="text-stone-600">使用回退：{selectedImageRequest.fallback_used ? "是" : "否"}</div>
-                <div className="truncate text-stone-600">账号哈希：{selectedImageRequest.account_token_hash || "—"}</div>
+                <div className="text-stone-600">
+                  账号类型：{selectedImageRequest.account_type || "—"}
+                </div>
+                <div className="text-stone-600">
+                  路线：{selectedImageRequest.route || "—"}
+                </div>
+                <div className="text-stone-600">
+                  尝试次数：{selectedImageRequest.attempt_count ?? "—"}
+                </div>
+                <div className="text-stone-600">
+                  使用回退：{selectedImageRequest.fallback_used ? "是" : "否"}
+                </div>
+                <div className="truncate text-stone-600">
+                  账号哈希：{selectedImageRequest.account_token_hash || "—"}
+                </div>
               </div>
               <div className="space-y-2 rounded-xl border border-stone-100 p-3 md:col-span-2">
                 <div className="font-medium text-stone-900">内容摘要</div>
-                <div className="text-stone-600">prompt 摘要：{selectedImageRequest.prompt_preview || "—"}</div>
-                <div className="break-all font-mono text-xs text-stone-500">prompt_hash：{selectedImageRequest.prompt_hash || "—"}</div>
+                <div className="text-stone-600">
+                  prompt 摘要：{selectedImageRequest.prompt_preview || "—"}
+                </div>
+                <div className="break-all font-mono text-xs text-stone-500">
+                  prompt_hash：{selectedImageRequest.prompt_hash || "—"}
+                </div>
               </div>
-              {(selectedImageRequest.error_message || selectedImageRequest.upstream_error) ? (
+              {selectedImageRequest.error_message ||
+              selectedImageRequest.upstream_error ? (
                 <div className="space-y-2 rounded-xl border border-red-100 bg-red-50 p-3 md:col-span-2">
                   <div className="font-medium text-red-900">错误</div>
-                  <div className="text-red-700">{selectedImageRequest.error_message || "—"}</div>
-                  <div className="text-red-700">{selectedImageRequest.upstream_error || ""}</div>
+                  <div className="text-red-700">
+                    {selectedImageRequest.error_message || "—"}
+                  </div>
+                  <div className="text-red-700">
+                    {selectedImageRequest.upstream_error || ""}
+                  </div>
                 </div>
               ) : null}
             </div>

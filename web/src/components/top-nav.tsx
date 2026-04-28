@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Gift, LoaderCircle, Ticket, Upload } from "lucide-react";
+import { Gift, LoaderCircle, LogOut, Ticket, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -279,29 +279,52 @@ export function TopNav() {
   const isUserKey = sessionState.authType === "user_key";
 
   return (
-    <header className="minimal-topnav minimal-nav-enter">
-      <div className="relative flex min-h-[84px] flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex flex-1 items-center gap-3">
+    <header className="minimal-topnav sticky top-0 z-30 -mx-4 px-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+      <div className="mx-auto flex min-h-14 max-w-[1440px] min-w-0 items-center gap-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
           <Link
             href="/image"
-            className="minimal-surface-hover relative rounded-full px-3 py-2 font-[var(--font-heading)] text-lg font-semibold tracking-[-0.03em] text-stone-100 transition hover:text-amber-100"
+            className="rounded-lg px-2 py-2 text-base font-semibold text-foreground transition hover:bg-muted"
           >
             chatgpt2api
           </Link>
+        </div>
+
+        <nav className="hide-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          {visibleNavItems.map((item) => {
+            const active = pathname === item.href;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  "shrink-0 rounded-lg px-3 py-2 text-sm transition focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20",
+                  active
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="flex shrink-0 items-center gap-2">
           <Dialog open={centerOpen} onOpenChange={setCenterOpen}>
             <DialogTrigger asChild>
               <button
                 type="button"
-                className="minimal-surface-hover inline-flex items-center gap-2 rounded-full border border-white/12 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-amber-300/25 hover:bg-amber-300/10"
+                className="inline-flex h-10 items-center gap-2 rounded-lg border border-border bg-background px-3 text-sm text-foreground transition hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20"
                 aria-label="打开兑换中心"
               >
                 <Ticket className="size-4" />
-                <span>兑换中心</span>
+                <span className="hidden sm:inline">兑换中心</span>
               </button>
             </DialogTrigger>
             <DialogContent
               showCloseButton={false}
-              className="rounded-[24px] p-6"
+              className="p-5 sm:p-6"
             >
               <DialogHeader className="gap-2">
                 <DialogTitle>兑换中心</DialogTitle>
@@ -311,9 +334,9 @@ export function TopNav() {
               </DialogHeader>
 
               <div className="space-y-4">
-                <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                  <div className="text-xs text-stone-500">当前额度</div>
-                  <div className="mt-1 text-2xl font-semibold tracking-tight text-stone-900">
+                <div className="rounded-xl border border-border bg-muted/45 p-4">
+                  <div className="text-xs text-muted-foreground">当前额度</div>
+                  <div className="mt-1 text-2xl font-semibold tracking-tight text-foreground">
                     {sessionState.remainingQuota ?? "—"}
                   </div>
                 </div>
@@ -331,14 +354,14 @@ export function TopNav() {
                   }
                 />
 
-                <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.04] p-4">
+                <div className="rounded-xl border border-dashed border-border bg-muted/35 p-4">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="space-y-1">
-                      <div className="flex items-center gap-2 text-sm font-medium text-stone-200">
+                      <div className="flex items-center gap-2 text-sm font-medium text-foreground">
                         <Gift className="size-4" />
                         捐赠换积分
                       </div>
-                      <p className="text-xs leading-5 text-stone-400">
+                      <p className="text-xs leading-5 text-muted-foreground">
                         支持标准账号 JSON 和 CPA 格式 JSON。只有成功入池并识别成
                         Free 的账号才会给当前用户 key 发放 `20 积分`。
                       </p>
@@ -360,9 +383,9 @@ export function TopNav() {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                <div className="rounded-xl border border-border bg-muted/35 p-4">
                   <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-sm font-medium text-stone-200">
+                    <div className="flex items-center gap-2 text-sm font-medium text-foreground">
                       <Ticket className="size-4" />
                       购买兑换码
                     </div>
@@ -373,34 +396,34 @@ export function TopNav() {
                           href={item.href}
                           target="_blank"
                           rel="noreferrer"
-                          className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm transition hover:border-amber-300/20 hover:bg-white/[0.07]"
+                          className="rounded-lg border border-border bg-background px-4 py-3 text-sm transition hover:bg-muted"
                         >
-                          <div className="font-semibold text-stone-100">
+                          <div className="font-semibold text-foreground">
                             {item.label}
                           </div>
-                          <div className="mt-1 text-xs text-stone-400">
+                          <div className="mt-1 text-xs text-muted-foreground">
                             直达购买页面，购买后回来输入兑换码。
                           </div>
                         </a>
                       ))}
                     </div>
                     {!isUserKey ? (
-                      <p className="text-xs leading-5 text-stone-500">
+                      <p className="text-xs leading-5 text-muted-foreground">
                         只有用户 key 才能在这里兑换额度。
                       </p>
                     ) : null}
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                <div className="rounded-xl border border-border bg-muted/35 p-4">
                   <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-sm font-medium text-stone-200">
+                    <div className="flex items-center gap-2 text-sm font-medium text-foreground">
                       <Ticket className="size-4" />
                       兑换码
                     </div>
                     <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
                       <div className="space-y-2">
-                        <label className="text-xs text-stone-400">
+                        <label className="text-xs text-muted-foreground">
                           输入兑换码
                         </label>
                         <Input
@@ -425,7 +448,7 @@ export function TopNav() {
                         兑换
                       </Button>
                     </div>
-                    <p className="text-xs leading-5 text-stone-400">
+                    <p className="text-xs leading-5 text-muted-foreground">
                       兑换成功后，会在当前用户 key 的剩余额度上增加对应额度。
                     </p>
                   </div>
@@ -444,36 +467,17 @@ export function TopNav() {
               </DialogFooter>
             </DialogContent>
           </Dialog>
-        </div>
-        <div className="flex flex-wrap items-end justify-center gap-4 lg:gap-5">
-          {visibleNavItems.map((item) => {
-            const active = pathname === item.href;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "relative border-b px-1 pb-2 text-sm transition",
-                  active
-                    ? "border-amber-300/70 text-amber-100"
-                    : "border-transparent text-stone-400 hover:border-white/18 hover:text-stone-100",
-                )}
-              >
-                {item.label}
-              </Link>
-            );
-          })}
-        </div>
-        <div className="flex flex-1 items-center justify-end gap-3">
-          <span className="minimal-surface-hover rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] text-stone-400">
+          <span className="hidden rounded-lg border border-border bg-background px-2.5 py-1.5 text-[11px] text-muted-foreground md:inline-flex">
             v{webConfig.appVersion}
           </span>
           <button
             type="button"
-            className="minimal-surface-hover rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-stone-200 transition hover:border-rose-400/20 hover:bg-rose-400/10 hover:text-rose-200"
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-border bg-background px-3 text-sm text-foreground transition hover:bg-muted focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring/20"
             onClick={() => void handleLogout()}
+            aria-label="退出"
           >
-            退出
+            <LogOut className="size-4" />
+            <span className="hidden sm:inline">退出</span>
           </button>
         </div>
       </div>

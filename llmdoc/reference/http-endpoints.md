@@ -60,9 +60,10 @@
 - `GET /api/image-requests`，管理员查询生图请求记录。支持 `request_id`、`owner_id`、`auth_type`、`status`、`model`、`endpoint`、`since`、`until`、`limit`、`cursor`。
 - `GET /api/image-requests/{request_id}`，管理员读取单条生图请求记录。记录只含摘要、哈希、耗时、扣费、错误和路线字段。
 - `GET /api/image-queue/admin`，管理员查看当前所有活动队列 ticket 和全局限制。
-- `GET /api/image-conversations`，读取当前 Bearer Token 的图片会话。
-- `POST /api/image-conversations`，保存或更新当前 Bearer Token 的图片会话。
-- `DELETE /api/image-conversations`，按 `id` 或 `conversation_id` 删除当前 Bearer Token 的图片会话。
+- `GET /api/image-conversations`，读取当前 Bearer Token 的图片会话；传 `summary=true` 时只返回轻量摘要，只含最新 turn、`turnCount` 和状态字段，不带生成图 base64。
+- `GET /api/image-conversations/{conversation_id}`，读取当前 Bearer Token 下单条图片会话的完整内容。
+- `POST /api/image-conversations`，保存或更新当前 Bearer Token 的图片会话；返回的 `items` 使用轻量摘要，避免保存后再传回完整图片列表。
+- `DELETE /api/image-conversations`，按 `id` 或 `conversation_id` 删除当前 Bearer Token 的图片会话；返回的 `items` 使用轻量摘要。
 
 前端对应封装：
 

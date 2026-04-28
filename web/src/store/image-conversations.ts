@@ -5,6 +5,7 @@ import localforage from "localforage";
 import { detectImageMimeType } from "@/lib/image-data";
 import {
   deleteImageConversationFromServer,
+  fetchImageConversation,
   fetchImageConversations,
   saveImageConversationToServer,
   type ImageConversationPayload,
@@ -75,6 +76,8 @@ export type ImageConversation = {
   requestFinishedAt?: string;
   lastError?: string;
   responseId?: string;
+  isSummary?: boolean;
+  turnCount?: number;
 };
 
 const imageConversationStorage = localforage.createInstance({
@@ -113,6 +116,29 @@ function buildPreferenceStorageKey(scope: string): string {
 
 function buildServerMigrationKey(scope: string): string {
   return `${IMAGE_SERVER_MIGRATION_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
+}
+
+async function readLocalConversations(scope: string): Promise<ImageConversation[]> {
+  const localItems =
+    (await imageConversationStorage.getItem<ImageConversation[]>(buildConversationStorageKey(scope))) || [];
+  return localItems
+    .map(normalizeConversation)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+async function migrateLocalConversationsIfNeeded(
+  scope: string,
+  normalizedLocalItems: ImageConversation[],
+): Promise<boolean> {
+  const migrated = Boolean(await imageConversationStorage.getItem<boolean>(buildServerMigrationKey(scope)));
+  if (!migrated && normalizedLocalItems.length > 0) {
+    for (const item of normalizedLocalItems) {
+      await saveImageConversationToServer(item as unknown as ImageConversationPayload);
+    }
+    await imageConversationStorage.setItem(buildServerMigrationKey(scope), true);
+    return true;
+  }
+  return migrated;
 }
 
 function enqueueConversationWrite<T>(scope: string, operation: () => Promise<T>): Promise<T> {
@@ -248,23 +274,15 @@ function normalizeConversation(conversation: ImageConversation): ImageConversati
     lastError: latestTurn.lastError,
     error: latestTurn.error,
     responseId: latestTurn.responseId,
+    isSummary: Boolean(conversation.isSummary) || undefined,
+    turnCount: Math.max(Number(conversation.turnCount || turns.length) || turns.length, turns.length),
   };
 }
 
 export async function listImageConversations(scope: string): Promise<ImageConversation[]> {
-  const localItems =
-    (await imageConversationStorage.getItem<ImageConversation[]>(buildConversationStorageKey(scope))) || [];
-  const normalizedLocalItems = localItems
-    .map(normalizeConversation)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const normalizedLocalItems = await readLocalConversations(scope);
   try {
-    const migrated = Boolean(await imageConversationStorage.getItem<boolean>(buildServerMigrationKey(scope)));
-    if (!migrated && normalizedLocalItems.length > 0) {
-      for (const item of normalizedLocalItems) {
-        await saveImageConversationToServer(item as unknown as ImageConversationPayload);
-      }
-      await imageConversationStorage.setItem(buildServerMigrationKey(scope), true);
-    }
+    const migrated = await migrateLocalConversationsIfNeeded(scope, normalizedLocalItems);
     const response = await fetchImageConversations();
     const serverItems = (response.items || [])
       .map((item) => normalizeConversation(item as unknown as ImageConversation))
@@ -279,9 +297,46 @@ export async function listImageConversations(scope: string): Promise<ImageConver
   return normalizedLocalItems;
 }
 
+export async function listImageConversationSummaries(scope: string): Promise<ImageConversation[]> {
+  const normalizedLocalItems = await readLocalConversations(scope);
+  try {
+    const migrated = await migrateLocalConversationsIfNeeded(scope, normalizedLocalItems);
+    const response = await fetchImageConversations({ summary: true });
+    const serverItems = (response.items || [])
+      .map((item) => normalizeConversation(item as unknown as ImageConversation))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (serverItems.length > 0 || migrated) {
+      await imageConversationStorage.setItem(buildConversationStorageKey(scope), serverItems);
+      return serverItems;
+    }
+  } catch {
+    return normalizedLocalItems;
+  }
+  return normalizedLocalItems;
+}
+
+export async function getImageConversationDetail(scope: string, id: string): Promise<ImageConversation> {
+  try {
+    const response = await fetchImageConversation(id);
+    const item = normalizeConversation(response.item as unknown as ImageConversation);
+    const localItems = await readLocalConversations(scope);
+    const nextItems = [item, ...localItems.filter((conversation) => conversation.id !== item.id)].sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    );
+    await imageConversationStorage.setItem(buildConversationStorageKey(scope), nextItems);
+    return item;
+  } catch (error) {
+    const fallback = (await readLocalConversations(scope)).find((item) => item.id === id);
+    if (fallback) {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
 export async function saveImageConversation(scope: string, conversation: ImageConversation): Promise<void> {
   await enqueueConversationWrite(scope, async () => {
-    const items = await listImageConversations(scope);
+    const items = await readLocalConversations(scope);
     const nextItems = [normalizeConversation(conversation), ...items.filter((item) => item.id !== conversation.id)];
     nextItems.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     await imageConversationStorage.setItem(buildConversationStorageKey(scope), nextItems);
@@ -310,7 +365,7 @@ export async function replaceImageConversations(scope: string, conversations: Im
 
 export async function deleteImageConversation(scope: string, id: string): Promise<void> {
   await enqueueConversationWrite(scope, async () => {
-    const items = await listImageConversations(scope);
+    const items = await readLocalConversations(scope);
     await imageConversationStorage.setItem(
       buildConversationStorageKey(scope),
       items.filter((item) => item.id !== id),
