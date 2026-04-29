@@ -66,6 +66,22 @@ class ImageQueueServiceTests(unittest.TestCase):
         self.assertEqual(finished_snapshot["user"], {"waiting": 0, "running": 0, "active": 0})
         self.assertEqual(finished_snapshot["request"]["status"], "finished")
 
+    def test_finish_stale_tickets_releases_running_count(self) -> None:
+        with patch("services.image_queue_service.time", side_effect=[100.0, 100.0, 100.0]):
+            self.service.create_ticket("user-1", "req-1")
+            self.service.wait_for_turn("req-1")
+        self.service.mark_status("req-1", "running")
+
+        with patch("services.image_queue_service.time", return_value=401.0):
+            stale_ids = self.service.finish_stale_tickets(max_age_seconds=300, error="timed out")
+
+        self.assertEqual(stale_ids, ["req-1"])
+        with patch("services.image_queue_service.time", return_value=402.0):
+            snapshot = self.service.snapshot("user-1", request_id="req-1")
+        self.assertEqual(snapshot["user"], {"waiting": 0, "running": 0, "active": 0})
+        self.assertEqual(snapshot["request"]["status"], "failed")
+        self.assertEqual(snapshot["request"]["error"], "timed out")
+
     def test_global_start_limit_keeps_extra_requests_waiting(self) -> None:
         self.service.GLOBAL_START_LIMIT = 1
         self.service.GLOBAL_START_WINDOW_SECONDS = 60.0

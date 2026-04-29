@@ -371,6 +371,7 @@ def create_image_request_record(
 
 
 async def register_image_queue_request(auth_token: str, request_id: str, title: str) -> None:
+    reconcile_stale_image_queue_tickets()
     try:
         await run_in_threadpool(image_queue_service.create_ticket, auth_token, request_id, title)
         image_request_log_service.mark_waiting(request_id)
@@ -393,6 +394,23 @@ def build_queue_background_task(request_id: str) -> BackgroundTask:
 
 def fail_queue_request(request_id: str, error: str | None = None) -> None:
     image_queue_service.finish_ticket(request_id, error=error)
+
+
+def reconcile_stale_image_queue_tickets() -> list[str]:
+    stale_ids = image_queue_service.finish_stale_tickets(
+        max_age_seconds=IMAGE_GENERATION_TIMEOUT_SECONDS,
+        error=f"image generation timed out after {IMAGE_GENERATION_TIMEOUT_SECONDS}s",
+    )
+    for request_id in stale_ids:
+        record = image_request_log_service.get_record(request_id)
+        if not record or str(record.get("status") or "") in {"finished", "failed", "rejected"}:
+            continue
+        image_request_log_service.mark_failed(
+            request_id,
+            error=build_image_generation_timeout_error(),
+            http_status=504,
+        )
+    return stale_ids
 
 
 def extract_image_result_items(result: dict[str, object], *, request_index: int | None = None) -> list[dict[str, object]]:
@@ -1422,6 +1440,7 @@ def create_app() -> FastAPI:
     ):
         require_auth_key(authorization)
         auth_token = extract_bearer_token(authorization)
+        reconcile_stale_image_queue_tickets()
         snapshot = image_queue_service.snapshot(auth_token, request_id=request_id)
         if request_id and snapshot.get("request"):
             record = image_request_log_service.get_record(request_id)
@@ -1435,12 +1454,14 @@ def create_app() -> FastAPI:
     @router.get("/api/image-queue/admin")
     async def get_admin_image_queue(authorization: str | None = Header(default=None)):
         require_admin_auth_key(authorization)
+        reconcile_stale_image_queue_tickets()
         return image_queue_service.snapshot_all()
 
     @router.api_route("/v1/responses", methods=["GET", "HEAD"])
     async def check_responses_endpoint(authorization: str | None = Header(default=None)):
         context = require_auth_key(authorization)
         auth_token = extract_bearer_token(authorization)
+        reconcile_stale_image_queue_tickets()
         queue_snapshot = image_queue_service.snapshot(auth_token)
         return {
             "object": "list",

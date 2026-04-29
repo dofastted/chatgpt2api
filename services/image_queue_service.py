@@ -129,6 +129,39 @@ class ImageQueueService:
             self._condition.notify_all()
             return ImageQueueTicket(**ticket.__dict__)
 
+    def finish_stale_tickets(self, *, max_age_seconds: int, error: str) -> list[str]:
+        max_age = max(1, int(max_age_seconds or 1))
+        now_value = time()
+        cutoff = now_value - max_age
+        stale_ids: list[str] = []
+        with self._condition:
+            for request_id, ticket in list(self._tickets.items()):
+                reference_time = ticket.started_at or ticket.created_at
+                if reference_time <= cutoff:
+                    stale_ids.append(request_id)
+            for request_id in stale_ids:
+                ticket = self._tickets.pop(request_id, None)
+                if ticket is None:
+                    continue
+                if ticket.status == "waiting":
+                    try:
+                        self._waiting_order.remove(request_id)
+                    except ValueError:
+                        pass
+                    self._decrement_user_waiting_locked(ticket.auth_token)
+                else:
+                    self._decrement_user_running_locked(ticket.auth_token)
+                    self._global_running = max(0, self._global_running - 1)
+                ticket.status = "failed"
+                ticket.error = self._clean_text(error) or None
+                ticket.finished_at = now_value
+                ticket.updated_at = now_value
+                self._recent[request_id] = ticket
+            if stale_ids:
+                self._cleanup_recent_locked()
+                self._condition.notify_all()
+        return stale_ids
+
     def wait_for_turn(self, request_id: str) -> ImageQueueTicket:
         normalized_request_id = self._clean_text(request_id)
         with self._condition:
