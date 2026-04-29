@@ -286,7 +286,6 @@ export function ImageGalleryPanel({
   const [promptStats, setPromptStats] = useState<GalleryPromptStats>({});
   const [promptDraft, setPromptDraft] = useState("");
   const [randomRanks, setRandomRanks] = useState<Record<string, number>>({});
-  const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const autoScrollTopRef = useRef(0);
@@ -492,7 +491,7 @@ export function ImageGalleryPanel({
   };
 
   useEffect(() => {
-    if (!scrollContainerRef.current || isLoading || visibleItems.length === 0 || previewItem || isAutoScrollPaused) {
+    if (!scrollContainerRef.current || isLoading || visibleItems.length === 0 || previewItem) {
       return;
     }
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -530,7 +529,7 @@ export function ImageGalleryPanel({
     };
     frameId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frameId);
-  }, [filteredItems.length, isAutoScrollPaused, isLoading, previewItem, renderCount, visibleItems.length]);
+  }, [filteredItems.length, isLoading, previewItem, renderCount, visibleItems.length]);
 
   return (
     <>
@@ -557,6 +556,8 @@ export function ImageGalleryPanel({
               onChange={(event) => {
                 setKeyword(event.target.value);
                 setRenderCount(INITIAL_RENDER_COUNT);
+                autoScrollTopRef.current = 0;
+                scrollContainerRef.current?.scrollTo({ top: 0 });
               }}
               placeholder="搜索楼层 / 用户 / prompt"
               className="w-full border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
@@ -584,11 +585,8 @@ export function ImageGalleryPanel({
 
         <div
           ref={scrollContainerRef}
-          onMouseEnter={() => setIsAutoScrollPaused(true)}
-          onMouseLeave={() => setIsAutoScrollPaused(false)}
-          onFocus={() => setIsAutoScrollPaused(true)}
-          onBlur={() => setIsAutoScrollPaused(false)}
-          className="hide-scrollbar max-h-[calc(100dvh-18.5rem)] overflow-y-auto px-3 py-3 sm:px-4"
+          className="hide-scrollbar h-[calc(100dvh-18.5rem)] min-h-[320px] overflow-y-auto overscroll-contain px-3 py-3 sm:px-4"
+          style={{ touchAction: "pan-y" }}
         >
           {isLoading ? (
             <div className="flex min-h-[240px] items-center justify-center gap-2 text-sm text-muted-foreground">
