@@ -56,7 +56,7 @@ const INITIAL_RENDER_COUNT = 24;
 const RENDER_CHUNK_SIZE = 24;
 const IMAGE_PRELOAD_MARGIN = "1400px 0px";
 const DEFAULT_ASPECT_RATIO = 0.8;
-const AUTO_SCROLL_PIXELS_PER_SECOND = 18;
+const AUTO_SCROLL_PIXELS_PER_SECOND = 48;
 
 function normalizeSearchText(value: string) {
   return value.trim().toLowerCase();
@@ -289,6 +289,7 @@ export function ImageGalleryPanel({
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const autoScrollTopRef = useRef(0);
+  const autoScrollRemainderRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -474,6 +475,7 @@ export function ImageGalleryPanel({
       await reloadUserPromptData(galleryScope);
       setRenderCount(INITIAL_RENDER_COUNT);
       autoScrollTopRef.current = 0;
+      autoScrollRemainderRef.current = 0;
       scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       toast.success("已添加到画廊");
     } catch (error) {
@@ -492,10 +494,6 @@ export function ImageGalleryPanel({
 
   useEffect(() => {
     if (!scrollContainerRef.current || isLoading || visibleItems.length === 0 || previewItem) {
-      return;
-    }
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduceMotion) {
       return;
     }
     let frameId = 0;
@@ -520,9 +518,15 @@ export function ImageGalleryPanel({
         } else {
           if (Math.abs(element.scrollTop - autoScrollTopRef.current) > 2) {
             autoScrollTopRef.current = element.scrollTop;
+            autoScrollRemainderRef.current = 0;
           }
-          autoScrollTopRef.current += (AUTO_SCROLL_PIXELS_PER_SECOND * elapsed) / 1000;
-          element.scrollTop = autoScrollTopRef.current;
+          autoScrollRemainderRef.current += (AUTO_SCROLL_PIXELS_PER_SECOND * elapsed) / 1000;
+          const wholePixels = Math.floor(autoScrollRemainderRef.current);
+          if (wholePixels > 0) {
+            autoScrollRemainderRef.current -= wholePixels;
+            autoScrollTopRef.current = Math.min(maxScroll, element.scrollTop + wholePixels);
+            element.scrollTop = autoScrollTopRef.current;
+          }
         }
       }
       frameId = window.requestAnimationFrame(tick);
@@ -557,6 +561,7 @@ export function ImageGalleryPanel({
                 setKeyword(event.target.value);
                 setRenderCount(INITIAL_RENDER_COUNT);
                 autoScrollTopRef.current = 0;
+                autoScrollRemainderRef.current = 0;
                 scrollContainerRef.current?.scrollTo({ top: 0 });
               }}
               placeholder="搜索楼层 / 用户 / prompt"
@@ -585,6 +590,7 @@ export function ImageGalleryPanel({
 
         <div
           ref={scrollContainerRef}
+          data-auto-scroll="running"
           className="hide-scrollbar h-[calc(100dvh-18.5rem)] min-h-[320px] overflow-y-auto overscroll-contain px-3 py-3 sm:px-4"
           style={{ touchAction: "pan-y" }}
         >

@@ -110,6 +110,8 @@ const activeGenerationKeys = new Set<string>();
 const GALLERY_PROMPT_SUGGESTION_COUNT = 8;
 const GALLERY_RAIL_ITEM_COUNT = 48;
 const DEFAULT_GALLERY_ASPECT_RATIO = 0.8;
+const GALLERY_RAIL_AUTO_SCROLL_PIXELS_PER_SECOND = 48;
+const GALLERY_RAIL_COLUMN_WIDTH_ESTIMATE = 128;
 const INTERRUPTED_GENERATION_MESSAGE =
   "页面已重新打开，未找回这个请求。请重新发送。";
 
@@ -326,9 +328,69 @@ function ImageInspirationRail({
     () => items.filter((item) => item.imageUrl).slice(0, GALLERY_RAIL_ITEM_COUNT),
     [items],
   );
+  const scrollViewportRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollTopRef = useRef(0);
+  const autoScrollRemainderRef = useRef(0);
   const transition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
+  const railColumns = useMemo(() => {
+    const columns: GallerySeedItem[][] = [[], []];
+    const columnHeights = [0, 0];
+    for (const item of railItems) {
+      const aspectRatio =
+        imageDimensions[String(item.id)]?.aspectRatio ||
+        DEFAULT_GALLERY_ASPECT_RATIO;
+      const targetColumn = columnHeights[0] <= columnHeights[1] ? 0 : 1;
+      columns[targetColumn].push(item);
+      columnHeights[targetColumn] +=
+        GALLERY_RAIL_COLUMN_WIDTH_ESTIMATE / Math.max(0.2, aspectRatio) +
+        (item.hasPrompt ? 48 : 28);
+    }
+    return columns;
+  }, [imageDimensions, railItems]);
+
+  useEffect(() => {
+    const element = scrollViewportRef.current;
+    if (!element || isHidden || isLoading || railItems.length === 0) {
+      return;
+    }
+    let frameId = 0;
+    let previousTime = performance.now();
+    const tick = (time: number) => {
+      const viewport = scrollViewportRef.current;
+      if (!viewport) {
+        frameId = window.requestAnimationFrame(tick);
+        return;
+      }
+      const elapsed = Math.max(0, time - previousTime);
+      previousTime = time;
+      const maxScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      if (maxScroll > 0) {
+        if (viewport.scrollTop >= maxScroll - 4) {
+          autoScrollTopRef.current = 0;
+          autoScrollRemainderRef.current = 0;
+          viewport.scrollTop = 0;
+        } else {
+          if (Math.abs(viewport.scrollTop - autoScrollTopRef.current) > 2) {
+            autoScrollTopRef.current = viewport.scrollTop;
+            autoScrollRemainderRef.current = 0;
+          }
+          autoScrollRemainderRef.current +=
+            (GALLERY_RAIL_AUTO_SCROLL_PIXELS_PER_SECOND * elapsed) / 1000;
+          const wholePixels = Math.floor(autoScrollRemainderRef.current);
+          if (wholePixels > 0) {
+            autoScrollRemainderRef.current -= wholePixels;
+            autoScrollTopRef.current = Math.min(maxScroll, viewport.scrollTop + wholePixels);
+            viewport.scrollTop = autoScrollTopRef.current;
+          }
+        }
+      }
+      frameId = window.requestAnimationFrame(tick);
+    };
+    frameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [isHidden, isLoading, railItems.length]);
 
   return (
     <motion.aside
@@ -365,7 +427,12 @@ function ImageInspirationRail({
           </Button>
         </div>
 
-        <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-2.5 py-3">
+        <div
+          ref={scrollViewportRef}
+          className="hide-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 py-3"
+          data-auto-scroll="image-inspiration-rail"
+          style={{ touchAction: "pan-y" }}
+        >
           {isLoading ? (
             <div className="flex min-h-[200px] items-center justify-center gap-2 text-sm text-muted-foreground">
               <LoaderCircle className="size-4 animate-spin" />
@@ -376,43 +443,47 @@ function ImageInspirationRail({
               暂无图片
             </div>
           ) : (
-            <div className="columns-2 gap-2 [column-fill:_balance]">
-              {railItems.map((item) => {
-                const aspectRatio =
-                  imageDimensions[String(item.id)]?.aspectRatio ||
-                  DEFAULT_GALLERY_ASPECT_RATIO;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => onOpenPreview(item)}
-                    className="group mb-2 block w-full break-inside-avoid overflow-hidden rounded-lg border border-border bg-muted text-left transition hover:border-primary/60 focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none"
-                    aria-label={`预览第 ${item.postNumber} 层图片`}
-                  >
-                    <div
-                      className="relative w-full overflow-hidden"
-                      style={{ aspectRatio: String(aspectRatio) }}
-                    >
-                      <img
-                        src={item.imageUrl}
-                        alt={item.title}
-                        loading="lazy"
-                        className="absolute inset-0 h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
-                      />
-                    </div>
-                    <div className="px-2 py-1.5">
-                      <div className="truncate text-[11px] font-medium text-foreground">
-                        #{item.postNumber} / 图 {item.imageIndex}
-                      </div>
-                      {item.hasPrompt ? (
-                        <div className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-muted-foreground">
-                          {item.promptPreview || item.prompt}
+            <div className="grid grid-cols-2 items-start gap-2">
+              {railColumns.map((column, columnIndex) => (
+                <div key={columnIndex} className="flex min-w-0 flex-col gap-2">
+                  {column.map((item) => {
+                    const aspectRatio =
+                      imageDimensions[String(item.id)]?.aspectRatio ||
+                      DEFAULT_GALLERY_ASPECT_RATIO;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => onOpenPreview(item)}
+                        className="group block w-full overflow-hidden rounded-lg border border-border bg-muted text-left transition hover:border-primary/60 focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none"
+                        aria-label={`预览第 ${item.postNumber} 层图片`}
+                      >
+                        <div
+                          className="relative w-full overflow-hidden"
+                          style={{ aspectRatio: String(aspectRatio) }}
+                        >
+                          <img
+                            src={item.imageUrl}
+                            alt={item.title}
+                            loading="lazy"
+                            className="absolute inset-0 h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+                          />
                         </div>
-                      ) : null}
-                    </div>
-                  </button>
-                );
-              })}
+                        <div className="px-2 py-1.5">
+                          <div className="truncate text-[11px] font-medium text-foreground">
+                            #{item.postNumber} / 图 {item.imageIndex}
+                          </div>
+                          {item.hasPrompt ? (
+                            <div className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-muted-foreground">
+                              {item.promptPreview || item.prompt}
+                            </div>
+                          ) : null}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
           )}
         </div>
