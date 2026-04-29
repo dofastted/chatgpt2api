@@ -68,12 +68,16 @@ import {
 } from "@/store/image-conversations";
 import { getStoredAuthKey } from "@/store/auth";
 import {
+  addUserGalleryWaterfallItem,
+  buildPromptPreview,
   listUserGalleryPrompts,
+  listUserGalleryWaterfallItems,
   loadGalleryPromptStats,
   promptKey,
   recordGalleryPromptUse,
   type GalleryPromptStats,
   type UserGalleryPrompt,
+  type UserGalleryWaterfallItem,
 } from "@/store/gallery-prompts";
 import { cn } from "@/lib/utils";
 import {
@@ -129,6 +133,8 @@ type GallerySeedItem = {
   hasPrompt: boolean;
   useCount?: number;
   randomRank?: number;
+  aspectRatio?: number;
+  isUserGenerated?: boolean;
 };
 
 type GalleryImageDimension = {
@@ -153,6 +159,32 @@ function buildUserPromptSuggestion(item: UserGalleryPrompt): GallerySeedItem {
     hasPrompt: true,
     useCount: item.useCount,
   };
+}
+
+function buildUserWaterfallSeedItem(item: UserGalleryWaterfallItem): GallerySeedItem {
+  return {
+    id: item.id,
+    postNumber: 0,
+    username: "我",
+    imageIndex: 0,
+    title: "我的作品",
+    imageUrl: item.imageUrl,
+    downloadPath: "",
+    postUrl: "",
+    prompt: item.prompt,
+    promptPreview: item.promptPreview,
+    hasPrompt: Boolean(item.prompt),
+    aspectRatio: item.aspectRatio,
+    isUserGenerated: true,
+  };
+}
+
+function buildWaterfallSourceImageId(
+  conversationId: string,
+  turnId: string,
+  imageId: string,
+) {
+  return `${conversationId}:${turnId}:${imageId}`;
 }
 
 function buildConversationTitle(prompt: string) {
@@ -331,6 +363,8 @@ function ImageInspirationRail({
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const autoScrollTopRef = useRef(0);
   const autoScrollRemainderRef = useRef(0);
+  const resumeTimerRef = useRef<number | null>(null);
+  const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
   const transition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
@@ -339,6 +373,7 @@ function ImageInspirationRail({
     const columnHeights = [0, 0];
     for (const item of railItems) {
       const aspectRatio =
+        item.aspectRatio ||
         imageDimensions[String(item.id)]?.aspectRatio ||
         DEFAULT_GALLERY_ASPECT_RATIO;
       const targetColumn = columnHeights[0] <= columnHeights[1] ? 0 : 1;
@@ -350,9 +385,42 @@ function ImageInspirationRail({
     return columns;
   }, [imageDimensions, railItems]);
 
+  const pauseAutoScroll = useCallback(() => {
+    if (resumeTimerRef.current !== null) {
+      window.clearTimeout(resumeTimerRef.current);
+      resumeTimerRef.current = null;
+    }
+    setIsAutoScrollPaused(true);
+  }, []);
+
+  const scheduleAutoScrollResume = useCallback(() => {
+    if (resumeTimerRef.current !== null) {
+      window.clearTimeout(resumeTimerRef.current);
+    }
+    resumeTimerRef.current = window.setTimeout(() => {
+      setIsAutoScrollPaused(false);
+      resumeTimerRef.current = null;
+    }, 3000);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (resumeTimerRef.current !== null) {
+        window.clearTimeout(resumeTimerRef.current);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     const element = scrollViewportRef.current;
-    if (!element || isHidden || isLoading || railItems.length === 0) {
+    if (
+      !element ||
+      isHidden ||
+      isLoading ||
+      isAutoScrollPaused ||
+      railItems.length === 0
+    ) {
       return;
     }
     let frameId = 0;
@@ -390,7 +458,7 @@ function ImageInspirationRail({
     };
     frameId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frameId);
-  }, [isHidden, isLoading, railItems.length]);
+  }, [isAutoScrollPaused, isHidden, isLoading, railItems.length]);
 
   return (
     <motion.aside
@@ -431,6 +499,8 @@ function ImageInspirationRail({
           ref={scrollViewportRef}
           className="hide-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 py-3"
           data-auto-scroll="image-inspiration-rail"
+          onMouseEnter={pauseAutoScroll}
+          onMouseLeave={scheduleAutoScrollResume}
           style={{ touchAction: "pan-y" }}
         >
           {isLoading ? (
@@ -448,15 +518,19 @@ function ImageInspirationRail({
                 <div key={columnIndex} className="flex min-w-0 flex-col gap-2">
                   {column.map((item) => {
                     const aspectRatio =
+                      item.aspectRatio ||
                       imageDimensions[String(item.id)]?.aspectRatio ||
                       DEFAULT_GALLERY_ASPECT_RATIO;
+                    const itemLabel = item.isUserGenerated
+                      ? "我的作品"
+                      : `#${item.postNumber} / 图 ${item.imageIndex}`;
                     return (
                       <button
                         key={item.id}
                         type="button"
                         onClick={() => onOpenPreview(item)}
                         className="group block w-full overflow-hidden rounded-lg border border-border bg-muted text-left transition hover:border-primary/60 focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none"
-                        aria-label={`预览第 ${item.postNumber} 层图片`}
+                        aria-label={`预览${itemLabel}`}
                       >
                         <div
                           className="relative w-full overflow-hidden"
@@ -471,7 +545,7 @@ function ImageInspirationRail({
                         </div>
                         <div className="px-2 py-1.5">
                           <div className="truncate text-[11px] font-medium text-foreground">
-                            #{item.postNumber} / 图 {item.imageIndex}
+                            {itemLabel}
                           </div>
                           {item.hasPrompt ? (
                             <div className="mt-0.5 line-clamp-2 text-[10px] leading-4 text-muted-foreground">
@@ -679,6 +753,9 @@ export default function ImagePage() {
     Record<string, GalleryImageDimension>
   >({});
   const [userGalleryPrompts, setUserGalleryPrompts] = useState<UserGalleryPrompt[]>([]);
+  const [userGalleryWaterfallItems, setUserGalleryWaterfallItems] = useState<
+    UserGalleryWaterfallItem[]
+  >([]);
   const [galleryPromptStats, setGalleryPromptStats] = useState<GalleryPromptStats>({});
   const [galleryRandomRanks, setGalleryRandomRanks] = useState<Record<string, number>>({});
   const [isGalleryDataLoading, setIsGalleryDataLoading] = useState(true);
@@ -813,18 +890,21 @@ export default function ImagePage() {
     let cancelled = false;
     const loadGalleryPromptData = async () => {
       try {
-        const [nextPrompts, nextStats] = await Promise.all([
+        const [nextPrompts, nextStats, nextWaterfallItems] = await Promise.all([
           listUserGalleryPrompts(conversationScope),
           loadGalleryPromptStats(conversationScope),
+          listUserGalleryWaterfallItems(conversationScope),
         ]);
         if (!cancelled) {
           setUserGalleryPrompts(nextPrompts);
           setGalleryPromptStats(nextStats);
+          setUserGalleryWaterfallItems(nextWaterfallItems);
         }
       } catch {
         if (!cancelled) {
           setUserGalleryPrompts([]);
           setGalleryPromptStats({});
+          setUserGalleryWaterfallItems([]);
         }
       }
     };
@@ -1004,8 +1084,9 @@ export default function ImagePage() {
     [galleryItems, galleryPromptStats, galleryRandomRanks, userGalleryPrompts],
   );
   const rankedGalleryItems = useMemo(
-    () =>
-      galleryItems
+    () => {
+      const userItems = userGalleryWaterfallItems.map(buildUserWaterfallSeedItem);
+      const seedItems = galleryItems
         .map((item) => ({
           ...item,
           useCount: item.hasPrompt ? Math.max(0, Number(galleryPromptStats[promptKey(item.prompt)] || 0)) : 0,
@@ -1017,8 +1098,24 @@ export default function ImagePage() {
             return usageDiff;
           }
           return Number(a.randomRank || 0) - Number(b.randomRank || 0);
-        }),
-    [galleryItems, galleryPromptStats, galleryRandomRanks],
+        });
+      return [...userItems, ...seedItems];
+    },
+    [
+      galleryItems,
+      galleryPromptStats,
+      galleryRandomRanks,
+      userGalleryWaterfallItems,
+    ],
+  );
+  const userWaterfallSourceImageIds = useMemo(
+    () =>
+      new Set(
+        userGalleryWaterfallItems
+          .map((item) => String(item.sourceImageId || "").trim())
+          .filter(Boolean),
+      ),
+    [userGalleryWaterfallItems],
   );
   const currentQueueRequest = useMemo(() => {
     if (!selectedTurn?.queueRequestId) {
@@ -1829,6 +1926,46 @@ export default function ImagePage() {
     );
   };
 
+  const handleAddImageToWaterfall = async (
+    conversation: ImageConversation,
+    turn: ImageConversationTurn,
+    image: StoredImage,
+  ) => {
+    if (!conversationScope) {
+      toast.error("当前登录信息还在初始化，请稍后再试");
+      return;
+    }
+    if (image.status !== "success" || !image.b64_json) {
+      toast.error("图片还没有生成成功");
+      return;
+    }
+    const prompt = String(turn.prompt || "").trim();
+    const mimeType =
+      String(image.mimeType || "").trim() || detectImageMimeType(image.b64_json);
+    try {
+      await addUserGalleryWaterfallItem(conversationScope, {
+        prompt,
+        promptPreview: buildPromptPreview(prompt),
+        imageUrl: buildImageDataUrl(image.b64_json, mimeType),
+        mimeType,
+        sourceConversationId: conversation.id,
+        sourceTurnId: turn.id,
+        sourceImageId: buildWaterfallSourceImageId(
+          conversation.id,
+          turn.id,
+          image.id,
+        ),
+      });
+      const nextItems =
+        await listUserGalleryWaterfallItems(conversationScope);
+      setUserGalleryWaterfallItems(nextItems);
+      toast.success("已添加到瀑布流");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "添加失败";
+      toast.error(message);
+    }
+  };
+
   return (
     <>
       <section className="minimal-page-shell minimal-image-shell mx-auto flex h-[calc(100dvh-4.75rem)] min-h-[520px] w-full max-w-[1440px] overflow-hidden rounded-none border border-transparent bg-background lg:rounded-xl lg:border-border">
@@ -2210,69 +2347,105 @@ export default function ImagePage() {
                             : "grid-cols-1 sm:grid-cols-2",
                         )}
                       >
-                        {turn.images.map((image, index) => (
-                          <motion.div
-                            key={image.id}
-                            layout
-                            initial={
-                              shouldReduceMotion
-                                ? false
-                                : { opacity: 0, y: 14, scale: 0.98 }
-                            }
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            transition={listTransition}
-                            className="overflow-hidden rounded-xl"
-                          >
-                            {image.status === "success" && image.b64_json ? (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenPreview(image.id)}
-                                className="group flex w-full items-center justify-center overflow-hidden rounded-xl bg-muted text-left"
-                                aria-label={`预览第 ${index + 1} 张图片`}
-                              >
-                                <img
-                                  src={buildImageDataUrl(
-                                    image.b64_json,
-                                    image.mimeType,
-                                  )}
-                                  alt={`Generated result ${index + 1}`}
-                                  loading="lazy"
+                        {turn.images.map((image, index) => {
+                          const isSuccessImage =
+                            image.status === "success" && Boolean(image.b64_json);
+                          const waterfallSourceImageId = buildWaterfallSourceImageId(
+                            selectedConversation.id,
+                            turn.id,
+                            image.id,
+                          );
+                          const isAlreadyInWaterfall =
+                            userWaterfallSourceImageIds.has(
+                              waterfallSourceImageId,
+                            );
+                          return (
+                            <motion.div
+                              key={image.id}
+                              layout
+                              initial={
+                                shouldReduceMotion
+                                  ? false
+                                  : { opacity: 0, y: 14, scale: 0.98 }
+                              }
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              transition={listTransition}
+                              className="overflow-hidden rounded-xl"
+                            >
+                              {isSuccessImage && image.b64_json ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenPreview(image.id)}
+                                    className="group flex w-full items-center justify-center overflow-hidden rounded-xl bg-muted text-left"
+                                    aria-label={`预览第 ${index + 1} 张图片`}
+                                  >
+                                    <img
+                                      src={buildImageDataUrl(
+                                        image.b64_json,
+                                        image.mimeType,
+                                      )}
+                                      alt={`Generated result ${index + 1}`}
+                                      loading="lazy"
+                                      className={cn(
+                                        "block h-auto w-full object-contain transition duration-200 group-hover:scale-[1.01]",
+                                        turn.images.length === 1
+                                          ? "max-h-[72dvh]"
+                                          : "max-h-[54dvh]",
+                                      )}
+                                    />
+                                  </button>
+                                  <div className="flex justify-end px-1 pt-2">
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      disabled={isAlreadyInWaterfall}
+                                      className="h-8 rounded-full px-3 text-xs disabled:opacity-70"
+                                      onClick={() =>
+                                        void handleAddImageToWaterfall(
+                                          selectedConversation,
+                                          turn,
+                                          image,
+                                        )
+                                      }
+                                    >
+                                      <CirclePlus className="size-3.5" />
+                                      {isAlreadyInWaterfall
+                                        ? "已在瀑布流"
+                                        : "添加到瀑布流"}
+                                    </Button>
+                                  </div>
+                                </>
+                              ) : image.status === "error" ? (
+                                <div
                                   className={cn(
-                                    "block h-auto w-full object-contain transition duration-200 group-hover:scale-[1.01]",
+                                    "flex items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200",
                                     turn.images.length === 1
-                                      ? "max-h-[72dvh]"
-                                      : "max-h-[54dvh]",
+                                      ? "min-h-[min(520px,60dvh)]"
+                                      : "min-h-[280px]",
                                   )}
-                                />
-                              </button>
-                            ) : image.status === "error" ? (
-                              <div
-                                className={cn(
-                                  "flex items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200",
-                                  turn.images.length === 1
-                                    ? "min-h-[min(520px,60dvh)]"
-                                    : "min-h-[280px]",
-                                )}
-                              >
-                                {image.error || "生成失败"}
-                              </div>
-                            ) : (
-                              <div
-                                className={cn(
-                                  "flex flex-col items-center justify-center gap-3 bg-muted px-6 py-8 text-center text-muted-foreground",
-                                  turn.images.length === 1
-                                    ? "min-h-[min(520px,60dvh)]"
-                                    : "min-h-[280px]",
-                                )}
-                              >
-                                <div className="rounded-full bg-background p-3 shadow-sm">
-                                  <LoaderCircle className="size-5 animate-spin" />
+                                >
+                                  {image.error || "生成失败"}
                                 </div>
-                                <p className="text-sm">正在生成图片...</p>
-                              </div>
-                            )}
-                          </motion.div>
-                        ))}
+                              ) : (
+                                <div
+                                  className={cn(
+                                    "flex flex-col items-center justify-center gap-3 bg-muted px-6 py-8 text-center text-muted-foreground",
+                                    turn.images.length === 1
+                                      ? "min-h-[min(520px,60dvh)]"
+                                      : "min-h-[280px]",
+                                  )}
+                                >
+                                  <div className="rounded-full bg-background p-3 shadow-sm">
+                                    <LoaderCircle className="size-5 animate-spin" />
+                                  </div>
+                                  <p className="text-sm">正在生成图片...</p>
+                                </div>
+                              )}
+                            </motion.div>
+                          );
+                        })}
                       </div>
                     ) : null}
 
@@ -2720,8 +2893,9 @@ export default function ImagePage() {
               <div className="minimal-panel-soft flex min-h-0 flex-col p-4">
                 <div className="min-w-0">
                   <div className="text-base font-semibold text-foreground">
-                    第 {galleryPreviewItem.postNumber} 层 / @
-                    {galleryPreviewItem.username}
+                    {galleryPreviewItem.isUserGenerated
+                      ? "我的作品"
+                      : `第 ${galleryPreviewItem.postNumber} 层 / @${galleryPreviewItem.username}`}
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     {galleryPreviewItem.title}
