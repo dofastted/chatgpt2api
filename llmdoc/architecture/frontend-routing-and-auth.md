@@ -41,6 +41,8 @@
 - 画图页右侧桌面端常驻画廊栏由 `web/src/app/image/page.tsx` 内部的 `ImageInspirationRail` 渲染。它动态读取 `web/src/data/gallery-ui-seed.json` 和 `web/src/data/gallery-image-dimensions.json`，两列展示小图，点击小图只打开预览弹窗，不直接改输入框。弹窗里提供复制 prompt 和“带入 prompt”，用户点“带入 prompt”后才写入 composer 并聚焦。右侧画廊栏可隐藏；隐藏状态只存在当前页面 state，不写后端。
 - 画图页空状态标题是“今天你想创造什么?”。标题下方展示 `gallery-ui-seed.json` 中有 prompt 的前 8 条快捷 prompt，点击后直接写入 composer 并聚焦输入框，不跳转。
 - 画图页 composer 在 `web/src/app/image/page.tsx` 中实现，结构接近 ChatGPT 输入栏：大圆角输入框，上方是 prompt textarea，下方是上传、画廊、张数切换、状态提示和圆形发送按钮。上传图预览仍在输入框内显示，Enter 发送、Shift+Enter 换行。
+- 画图页会把页面重新打开后遗留的 `queued`、`assigning_account`、`running` 和 `loading` 图片状态改成可重试错误态。composer 旁会显示“重置”按钮，用于手动清掉旧请求状态，避免发送按钮被旧运行态占用。
+- 画图页的聊天区图片按中间聊天栏宽度自适应。参考图在用户消息里使用 `object-contain`，结果图单张时占满聊天栏，多张时最多两列，避免右侧画廊栏显示时结果图被压得过小。
 - 前端发送时会先按当前 key 的模型单价和张数算成本，默认单价是 `1K=2`、`2K=2`、`4K=8`。画图页模型按钮提供 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`，默认模型是 `gpt-image-2`。
 - 前端画图页向 `/v1/responses` 发送请求时，会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。
 - 如果当前额度不够，发送按钮会禁用，并显示提示，位置在 `web/src/app/image/page.tsx:644` 和 `web/src/app/image/page.tsx:652`。

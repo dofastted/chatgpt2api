@@ -102,6 +102,8 @@ const activeGenerationKeys = new Set<string>();
 const GALLERY_PROMPT_SUGGESTION_COUNT = 8;
 const GALLERY_RAIL_ITEM_COUNT = 48;
 const DEFAULT_GALLERY_ASPECT_RATIO = 0.8;
+const INTERRUPTED_GENERATION_MESSAGE =
+  "页面已重新打开，未找回这个请求。请重新发送。";
 
 type GallerySeedItem = {
   id: number;
@@ -166,6 +168,14 @@ function formatConversationStatus(conversation: ImageConversation) {
     return "失败";
   }
   return "草稿";
+}
+
+function isPendingTurnStatus(status: ImageConversationTurn["status"]) {
+  return (
+    status === "queued" ||
+    status === "assigning_account" ||
+    status === "running"
+  );
 }
 
 function resolveImageModelFromPreference(
@@ -425,6 +435,102 @@ function updateConversationTurn(
   };
 }
 
+function buildGenerationKey(
+  scope: string,
+  conversationId: string,
+  turnId: string,
+) {
+  return `${scope}:${conversationId}:${turnId}`;
+}
+
+function isTurnActiveInCurrentSession(
+  scope: string,
+  conversation: ImageConversation,
+  turn: ImageConversationTurn,
+) {
+  return activeGenerationKeys.has(
+    buildGenerationKey(scope, conversation.id, turn.id),
+  );
+}
+
+function turnNeedsInterruptedReset(
+  scope: string | null,
+  conversation: ImageConversation,
+  turn: ImageConversationTurn,
+) {
+  if (!scope || isTurnActiveInCurrentSession(scope, conversation, turn)) {
+    return false;
+  }
+  return (
+    isPendingTurnStatus(turn.status) ||
+    (turn.images || []).some((image) => image.status === "loading")
+  );
+}
+
+function resetInterruptedTurn(
+  turn: ImageConversationTurn,
+  finishedAt: string,
+): ImageConversationTurn {
+  return {
+    ...turn,
+    status: "error",
+    error: turn.error || INTERRUPTED_GENERATION_MESSAGE,
+    lastError: turn.lastError || INTERRUPTED_GENERATION_MESSAGE,
+    requestFinishedAt: turn.requestFinishedAt || finishedAt,
+    images: (turn.images || []).map((image) =>
+      image.status === "loading"
+        ? {
+            ...image,
+            status: "error" as const,
+            error: image.error || INTERRUPTED_GENERATION_MESSAGE,
+          }
+        : image,
+    ),
+  };
+}
+
+function resetInterruptedConversation(
+  conversation: ImageConversation,
+  scope: string | null,
+  finishedAt = new Date().toISOString(),
+) {
+  let resetCount = 0;
+  const turns = getConversationTurns(conversation).map((turn) => {
+    if (!turnNeedsInterruptedReset(scope, conversation, turn)) {
+      return turn;
+    }
+    resetCount += 1;
+    return resetInterruptedTurn(turn, finishedAt);
+  });
+
+  if (resetCount === 0) {
+    return { conversation, resetCount };
+  }
+
+  const latestTurn = turns[turns.length - 1];
+  return {
+    conversation: {
+      ...conversation,
+      turns,
+      prompt: latestTurn?.prompt,
+      model: latestTurn?.model,
+      count: latestTurn?.count,
+      size: latestTurn?.size,
+      copiedText: latestTurn?.copiedText,
+      inputImage: latestTurn?.inputImage,
+      images: latestTurn?.images,
+      status: latestTurn?.status,
+      error: latestTurn?.error,
+      queueRequestId: latestTurn?.queueRequestId,
+      requestStartedAt: latestTurn?.requestStartedAt,
+      requestFinishedAt: latestTurn?.requestFinishedAt,
+      lastError: latestTurn?.lastError,
+      responseId: latestTurn?.responseId,
+    },
+    resetCount,
+  };
+}
+
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -660,19 +766,40 @@ export default function ImagePage() {
       Array.from(
         new Set(
           conversations
-            .flatMap((item) => getConversationTurns(item))
-            .filter(
-              (turn) =>
-                Boolean(turn.queueRequestId) &&
-                (turn.status === "queued" ||
-                  turn.status === "assigning_account" ||
-                  turn.status === "running"),
+            .flatMap((conversation) =>
+              getConversationTurns(conversation).map((turn) => ({
+                conversation,
+                turn,
+              })),
             )
-            .map((turn) => String(turn.queueRequestId || "").trim())
+            .filter(
+              ({ conversation, turn }) =>
+                conversationScope !== null &&
+                isTurnActiveInCurrentSession(
+                  conversationScope,
+                  conversation,
+                  turn,
+                ) &&
+                Boolean(turn.queueRequestId) &&
+                isPendingTurnStatus(turn.status),
+            )
+            .map(({ turn }) => String(turn.queueRequestId || "").trim())
             .filter(Boolean),
         ),
       ),
-    [conversations],
+    [conversationScope, conversations],
+  );
+  const interruptedRequestCount = useMemo(
+    () =>
+      conversations.reduce(
+        (count, conversation) =>
+          count +
+          getConversationTurns(conversation).filter((turn) =>
+            turnNeedsInterruptedReset(conversationScope, conversation, turn),
+          ).length,
+        0,
+      ),
+    [conversationScope, conversations],
   );
   const selectedConversationRequestId = selectedTurn?.queueRequestId || null;
   const isComposerGenerating = activeRequestIds.length > 0;
@@ -738,9 +865,11 @@ export default function ImagePage() {
     ? `至少需要 ${requestCost} 额度`
     : isUploadingInputImage
       ? "图片上传中"
-      : inputImage
-        ? "已附加参考图，Enter 发送"
-        : "Enter 发送，Shift + Enter 换行";
+      : interruptedRequestCount > 0
+        ? `${interruptedRequestCount} 个旧请求需要重置`
+        : inputImage
+          ? "已附加参考图，Enter 发送"
+          : "Enter 发送，Shift + Enter 换行";
   const sidebarTransition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
@@ -795,8 +924,14 @@ export default function ImagePage() {
     setPreviewImageId(null);
     try {
       const items = await listImageConversationSummaries(conversationScope);
-      conversationsRef.current = items;
-      setConversations(items);
+      const now = new Date().toISOString();
+      const normalizedItems = items.map(
+        (item) =>
+          resetInterruptedConversation(item, conversationScope, now)
+            .conversation,
+      );
+      conversationsRef.current = normalizedItems;
+      setConversations(normalizedItems);
       setHasLoadedHistory(true);
     } catch (error) {
       const message =
@@ -1075,11 +1210,16 @@ export default function ImagePage() {
         conversationScope,
         conversation.id,
       );
+      const { conversation: nextDetail, resetCount } =
+        resetInterruptedConversation(detail, conversationScope);
       conversationsRef.current = [
-        detail,
-        ...conversationsRef.current.filter((item) => item.id !== detail.id),
+        nextDetail,
+        ...conversationsRef.current.filter((item) => item.id !== nextDetail.id),
       ].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       setConversations(conversationsRef.current);
+      if (resetCount > 0) {
+        await saveImageConversation(conversationScope, nextDetail);
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "读取会话详情失败";
@@ -1155,6 +1295,54 @@ export default function ImagePage() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "画面配置无效");
     }
+  };
+
+  const handleResetInterruptedRequests = async () => {
+    if (!conversationScope) {
+      toast.error("当前登录信息还在初始化，请稍后再试");
+      return;
+    }
+
+    const now = new Date().toISOString();
+    let resetCount = 0;
+    const nextConversations = conversationsRef.current.map((conversation) => {
+      const result = resetInterruptedConversation(
+        conversation,
+        conversationScope,
+        now,
+      );
+      resetCount += result.resetCount;
+      return result.conversation;
+    });
+
+    if (resetCount === 0) {
+      toast.message("没有需要重置的请求");
+      return;
+    }
+
+    conversationsRef.current = nextConversations;
+    setConversations(nextConversations);
+    setQueueStatus(null);
+
+    const changedFullConversations = nextConversations.filter(
+      (conversation) =>
+        !conversation.isSummary &&
+        getConversationTurns(conversation).some(
+          (turn) =>
+            turn.lastError === INTERRUPTED_GENERATION_MESSAGE ||
+            turn.error === INTERRUPTED_GENERATION_MESSAGE ||
+            (turn.images || []).some(
+              (image) => image.error === INTERRUPTED_GENERATION_MESSAGE,
+            ),
+        ),
+    );
+
+    await Promise.all(
+      changedFullConversations.map((conversation) =>
+        saveImageConversation(conversationScope, conversation),
+      ),
+    );
+    toast.success(`已重置 ${resetCount} 个旧请求`);
   };
 
   const handleGenerateImage = async (retry?: {
@@ -1249,7 +1437,11 @@ export default function ImagePage() {
           createdAt: now,
           turns: [draftTurn],
         };
-    const activeGenerationKey = `${conversationScope}:${conversationRecordId}:${turnId}`;
+    const activeGenerationKey = buildGenerationKey(
+      conversationScope,
+      conversationRecordId,
+      turnId,
+    );
 
     setSelectedConversationId(conversationRecordId);
     if (!retry) {
@@ -1725,13 +1917,13 @@ export default function ImagePage() {
                     transition={listTransition}
                   >
                     <div className="flex justify-end">
-                      <div className="flex max-w-full flex-col items-end gap-3 sm:max-w-[80%]">
+                      <div className="flex w-full max-w-full flex-col items-end gap-3 sm:max-w-[80%]">
                         {turn.inputImage ? (
-                          <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+                          <div className="w-full max-w-[640px] overflow-hidden rounded-xl border border-border bg-card shadow-sm">
                             <img
                               src={turn.inputImage.dataUrl}
                               alt={turn.inputImage.fileName || "参考图"}
-                              className="block h-28 w-28 object-cover"
+                              className="block max-h-[48dvh] w-full object-contain"
                             />
                             <div className="border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
                               {turn.inputImage.fileName || "参考图"}
@@ -1829,7 +2021,14 @@ export default function ImagePage() {
                     ) : null}
 
                     {turn.images.length > 0 ? (
-                      <div className="columns-1 gap-4 space-y-4 sm:columns-2 xl:columns-3">
+                      <div
+                        className={cn(
+                          "grid gap-4",
+                          turn.images.length === 1
+                            ? "grid-cols-1"
+                            : "grid-cols-1 sm:grid-cols-2",
+                        )}
+                      >
                         {turn.images.map((image, index) => (
                           <motion.div
                             key={image.id}
@@ -1841,13 +2040,13 @@ export default function ImagePage() {
                             }
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             transition={listTransition}
-                            className="break-inside-avoid overflow-hidden rounded-xl"
+                            className="overflow-hidden rounded-xl"
                           >
                             {image.status === "success" && image.b64_json ? (
                               <button
                                 type="button"
                                 onClick={() => handleOpenPreview(image.id)}
-                                className="group block w-full overflow-hidden rounded-xl bg-muted text-left"
+                                className="group flex w-full items-center justify-center overflow-hidden rounded-xl bg-muted text-left"
                                 aria-label={`预览第 ${index + 1} 张图片`}
                               >
                                 <img
@@ -1857,15 +2056,34 @@ export default function ImagePage() {
                                   )}
                                   alt={`Generated result ${index + 1}`}
                                   loading="lazy"
-                                  className="block h-auto w-full transition duration-200 group-hover:scale-[1.01]"
+                                  className={cn(
+                                    "block h-auto w-full object-contain transition duration-200 group-hover:scale-[1.01]",
+                                    turn.images.length === 1
+                                      ? "max-h-[72dvh]"
+                                      : "max-h-[54dvh]",
+                                  )}
                                 />
                               </button>
                             ) : image.status === "error" ? (
-                              <div className="flex min-h-[320px] items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200">
+                              <div
+                                className={cn(
+                                  "flex items-center justify-center bg-rose-50 px-6 py-8 text-center text-sm leading-6 text-rose-700 dark:bg-rose-950/30 dark:text-rose-200",
+                                  turn.images.length === 1
+                                    ? "min-h-[min(520px,60dvh)]"
+                                    : "min-h-[280px]",
+                                )}
+                              >
                                 {image.error || "生成失败"}
                               </div>
                             ) : (
-                              <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 bg-muted px-6 py-8 text-center text-muted-foreground">
+                              <div
+                                className={cn(
+                                  "flex flex-col items-center justify-center gap-3 bg-muted px-6 py-8 text-center text-muted-foreground",
+                                  turn.images.length === 1
+                                    ? "min-h-[min(520px,60dvh)]"
+                                    : "min-h-[280px]",
+                                )}
+                              >
                                 <div className="rounded-full bg-background p-3 shadow-sm">
                                   <LoaderCircle className="size-5 animate-spin" />
                                 </div>
@@ -1932,7 +2150,7 @@ export default function ImagePage() {
                   <img
                     src={inputImage.dataUrl}
                     alt={inputImage.fileName}
-                    className="size-14 shrink-0 rounded-xl object-cover"
+                    className="h-20 w-24 shrink-0 rounded-xl bg-background object-contain sm:h-24 sm:w-32"
                   />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium text-foreground">
@@ -2064,6 +2282,21 @@ export default function ImagePage() {
                 >
                   {composerStatusText}
                 </div>
+
+                {interruptedRequestCount > 0 ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-10 shrink-0 rounded-full px-3"
+                    onClick={() => {
+                      void handleResetInterruptedRequests();
+                    }}
+                  >
+                    <RotateCcw className="size-4" />
+                    重置
+                  </Button>
+                ) : null}
 
                 <Button
                   type="button"
