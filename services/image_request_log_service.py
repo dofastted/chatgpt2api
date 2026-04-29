@@ -10,6 +10,7 @@ from services.sqlite_store import sqlite_store
 
 
 REQUEST_TERMINAL_STATUSES = {"finished", "failed", "rejected"}
+REQUEST_ACTIVE_STATUSES = ("accepted", "waiting", "assigning_account", "running")
 
 
 def _clean_text(value: Any) -> str:
@@ -309,6 +310,45 @@ class ImageRequestLogService:
                 "error_message": _clean_text(reason)[:500],
             },
         )
+
+    def mark_stale_active_failed(self, *, max_age_seconds: int, reason: str) -> int:
+        cutoff = datetime.now() - timedelta(seconds=max(1, int(max_age_seconds or 1)))
+        now = _now_text()
+        status_placeholders = ", ".join("?" for _ in REQUEST_ACTIVE_STATUSES)
+        with sqlite_store.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT request_id, accepted_at, queued_at, started_at, running_at
+                FROM image_request_records
+                WHERE status IN ({status_placeholders})
+                """,
+                REQUEST_ACTIVE_STATUSES,
+            ).fetchall()
+        stale_rows = []
+        for row in rows:
+            record = dict(row)
+            reference_time = (
+                _parse_time(record.get("running_at"))
+                or _parse_time(record.get("started_at"))
+                or _parse_time(record.get("queued_at"))
+                or _parse_time(record.get("accepted_at"))
+            )
+            if reference_time is not None and reference_time <= cutoff:
+                stale_rows.append(record)
+        for record in stale_rows:
+            self._apply_update(
+                record["request_id"],
+                {
+                    "status": "failed",
+                    "finished_at": now,
+                    "running_ms": _duration_ms(record.get("running_at") or record.get("started_at"), now),
+                    "total_ms": _duration_ms(record.get("accepted_at"), now),
+                    "http_status": 504,
+                    "error_type": "TimeoutError",
+                    "error_message": _clean_text(reason)[:500],
+                },
+            )
+        return len(stale_rows)
 
     def get_record(self, request_id: str) -> dict[str, Any] | None:
         normalized_id = _clean_text(request_id)

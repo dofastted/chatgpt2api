@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, Expand, LoaderCircle, Search, Sparkles } from "lucide-react";
+import { Copy, Expand, LoaderCircle, Plus, Search, Sparkles, Trash2 } from "lucide-react";
 import NextImage from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -10,9 +10,20 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { getStoredAuthKey } from "@/store/auth";
+import {
+  addUserGalleryPrompt,
+  listUserGalleryPrompts,
+  loadGalleryPromptStats,
+  promptKey,
+  recordGalleryPromptUse,
+  removeUserGalleryPrompt,
+  type GalleryPromptStats,
+  type UserGalleryPrompt,
+} from "@/store/gallery-prompts";
 
 type GallerySeedItem = {
-  id: number;
+  id: number | string;
   postNumber: number;
   username: string;
   imageIndex: number;
@@ -23,10 +34,14 @@ type GallerySeedItem = {
   prompt: string;
   promptPreview: string;
   hasPrompt: boolean;
+  isUserPrompt?: boolean;
+  userPromptId?: string;
+  useCount?: number;
+  randomRank?: number;
 };
 
 type GalleryImageDimension = {
-  id: number;
+  id: number | string;
   width: number;
   height: number;
   aspectRatio: number;
@@ -41,21 +56,41 @@ const INITIAL_RENDER_COUNT = 24;
 const RENDER_CHUNK_SIZE = 24;
 const IMAGE_PRELOAD_MARGIN = "1400px 0px";
 const DEFAULT_ASPECT_RATIO = 0.8;
+const AUTO_SCROLL_PIXELS_PER_SECOND = 18;
 
 function normalizeSearchText(value: string) {
   return value.trim().toLowerCase();
+}
+
+function buildUserPromptGalleryItem(item: UserGalleryPrompt): GallerySeedItem {
+  return {
+    id: item.id,
+    postNumber: 0,
+    username: "我",
+    imageIndex: 0,
+    title: "我添加的 prompt",
+    imageUrl: "",
+    downloadPath: "",
+    postUrl: "",
+    prompt: item.prompt,
+    promptPreview: item.promptPreview,
+    hasPrompt: true,
+    isUserPrompt: true,
+    userPromptId: item.id,
+    useCount: item.useCount,
+  };
 }
 
 function GalleryCard({
   item,
   imageDimension,
   onOpenImage,
+  onRemoveUserPrompt,
 }: {
   item: GallerySeedItem;
   imageDimension?: GalleryImageDimension;
   onOpenImage: (item: GallerySeedItem) => void;
-  onApplyPrompt: (prompt: string) => void;
-  promptTargetHref?: string;
+  onRemoveUserPrompt: (item: GallerySeedItem) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [canRenderImage, setCanRenderImage] = useState(false);
@@ -106,10 +141,55 @@ function GalleryCard({
     };
   }, [canRenderImage, item.imageUrl]);
 
+  if (!item.imageUrl) {
+    return (
+      <article
+        ref={containerRef}
+        className="group mb-4 break-inside-avoid overflow-hidden rounded-xl border border-primary/30 bg-card"
+      >
+        <div className="space-y-3 px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <button
+              type="button"
+              onClick={() => onOpenImage(item)}
+              className="min-w-0 flex-1 rounded-lg px-1 py-1 text-left transition hover:bg-muted"
+            >
+              <div className="text-sm font-semibold text-foreground">
+                我添加的 prompt
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                使用 {Math.max(0, Number(item.useCount || 0))} 次
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => onRemoveUserPrompt(item)}
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-muted hover:text-rose-600"
+              aria-label="删除 prompt"
+              title="删除 prompt"
+            >
+              <Trash2 className="size-4" />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onOpenImage(item)}
+            className="block w-full rounded-lg border border-border bg-muted/45 px-3 py-3 text-left transition hover:bg-muted"
+          >
+            <div className="line-clamp-6 whitespace-pre-wrap text-sm leading-6 text-foreground">
+              {item.promptPreview || item.prompt}
+            </div>
+          </button>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <article
       ref={containerRef}
-      className="group overflow-hidden rounded-xl border border-border bg-card"
+      className="group mb-4 break-inside-avoid overflow-hidden rounded-xl border border-border bg-card"
     >
       <div className="relative">
         <button
@@ -194,14 +274,54 @@ export function ImageGalleryPanel({
   const router = useRouter();
   const [items, setItems] = useState<GallerySeedItem[]>([]);
   const [imageDimensions, setImageDimensions] = useState<
-    Record<number, GalleryImageDimension>
+    Record<string, GalleryImageDimension>
   >({});
   const [isLoading, setIsLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
   const [renderCount, setRenderCount] = useState(INITIAL_RENDER_COUNT);
   const [previewItem, setPreviewItem] = useState<GallerySeedItem | null>(null);
   const [isPreviewPromptExpanded, setIsPreviewPromptExpanded] = useState(false);
+  const [galleryScope, setGalleryScope] = useState<string | null>(null);
+  const [userPromptItems, setUserPromptItems] = useState<UserGalleryPrompt[]>([]);
+  const [promptStats, setPromptStats] = useState<GalleryPromptStats>({});
+  const [promptDraft, setPromptDraft] = useState("");
+  const [randomRanks, setRandomRanks] = useState<Record<string, number>>({});
+  const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollTopRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadScope = async () => {
+      try {
+        const authKey = await getStoredAuthKey();
+        if (!cancelled) {
+          setGalleryScope(String(authKey || "").trim() || "__anonymous__");
+        }
+      } catch {
+        if (!cancelled) {
+          setGalleryScope("__anonymous__");
+        }
+      }
+    };
+    void loadScope();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const reloadUserPromptData = async (scope = galleryScope) => {
+    if (!scope) {
+      return;
+    }
+    const [nextPrompts, nextStats] = await Promise.all([
+      listUserGalleryPrompts(scope),
+      loadGalleryPromptStats(scope),
+    ]);
+    setUserPromptItems(nextPrompts);
+    setPromptStats(nextStats);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -215,10 +335,14 @@ export function ImageGalleryPanel({
           })),
         ]);
         if (!cancelled) {
-          setItems((itemsMod.default || []) as GallerySeedItem[]);
+          const nextItems = (itemsMod.default || []) as GallerySeedItem[];
+          setItems(nextItems);
+          setRandomRanks(
+            Object.fromEntries(nextItems.map((item) => [String(item.id), Math.random()])),
+          );
           const nextDimensions = Object.fromEntries(
             ((dimensionsMod.default || []) as GalleryImageDimension[]).map(
-              (item) => [item.id, item],
+              (item) => [String(item.id), item],
             ),
           );
           setImageDimensions(nextDimensions);
@@ -235,17 +359,63 @@ export function ImageGalleryPanel({
     };
   }, []);
 
+  useEffect(() => {
+    if (!galleryScope) {
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [nextPrompts, nextStats] = await Promise.all([
+          listUserGalleryPrompts(galleryScope),
+          loadGalleryPromptStats(galleryScope),
+        ]);
+        if (!cancelled) {
+          setUserPromptItems(nextPrompts);
+          setPromptStats(nextStats);
+        }
+      } catch {
+        if (!cancelled) {
+          setUserPromptItems([]);
+          setPromptStats({});
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [galleryScope]);
+
+  const rankedItems = useMemo(() => {
+    const pinnedItems = userPromptItems.map(buildUserPromptGalleryItem);
+    const seedItems = items
+      .map((item) => ({
+        ...item,
+        useCount: item.hasPrompt ? Math.max(0, Number(promptStats[promptKey(item.prompt)] || 0)) : 0,
+        randomRank: randomRanks[String(item.id)] ?? 0,
+      }))
+      .sort((a, b) => {
+        const usageDiff = Math.max(0, Number(b.useCount || 0)) - Math.max(0, Number(a.useCount || 0));
+        if (usageDiff !== 0) {
+          return usageDiff;
+        }
+        return Number(a.randomRank || 0) - Number(b.randomRank || 0);
+      });
+    return [...pinnedItems, ...seedItems];
+  }, [items, promptStats, randomRanks, userPromptItems]);
+
   const filteredItems = useMemo(() => {
     const q = normalizeSearchText(keyword);
     if (!q) {
-      return items;
+      return rankedItems;
     }
-    return items.filter((item) =>
+    return rankedItems.filter((item) =>
       normalizeSearchText(
         `${item.postNumber} ${item.username} ${item.title} ${item.prompt}`,
       ).includes(q),
     );
-  }, [items, keyword]);
+  }, [keyword, rankedItems]);
 
   useEffect(() => {
     const element = sentinelRef.current;
@@ -281,6 +451,9 @@ export function ImageGalleryPanel({
       toast.error("这张图没有 prompt");
       return;
     }
+    if (galleryScope) {
+      void recordGalleryPromptUse(galleryScope, normalizedPrompt).then(() => reloadUserPromptData(galleryScope));
+    }
     onApplyPrompt(normalizedPrompt);
     if (promptTargetHref) {
       router.push(
@@ -290,6 +463,74 @@ export function ImageGalleryPanel({
     }
     toast.success("已填入 prompt");
   };
+
+  const handleAddUserPrompt = async () => {
+    if (!galleryScope) {
+      toast.error("当前登录信息还在初始化，请稍后再试");
+      return;
+    }
+    try {
+      await addUserGalleryPrompt(galleryScope, promptDraft);
+      setPromptDraft("");
+      await reloadUserPromptData(galleryScope);
+      setRenderCount(INITIAL_RENDER_COUNT);
+      autoScrollTopRef.current = 0;
+      scrollContainerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      toast.success("已添加到画廊");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "添加失败");
+    }
+  };
+
+  const handleRemoveUserPrompt = async (item: GallerySeedItem) => {
+    if (!galleryScope || !item.userPromptId) {
+      return;
+    }
+    await removeUserGalleryPrompt(galleryScope, item.userPromptId);
+    await reloadUserPromptData(galleryScope);
+    toast.success("已删除");
+  };
+
+  useEffect(() => {
+    if (!scrollContainerRef.current || isLoading || visibleItems.length === 0 || previewItem || isAutoScrollPaused) {
+      return;
+    }
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion) {
+      return;
+    }
+    let frameId = 0;
+    let previousTime = performance.now();
+    const tick = (time: number) => {
+      const element = scrollContainerRef.current;
+      if (!element) {
+        frameId = window.requestAnimationFrame(tick);
+        return;
+      }
+      const elapsed = Math.max(0, time - previousTime);
+      previousTime = time;
+      const maxScroll = Math.max(0, element.scrollHeight - element.clientHeight);
+      if (maxScroll > 0) {
+        if (element.scrollTop >= maxScroll - 4) {
+          if (renderCount < filteredItems.length) {
+            setRenderCount((count) => Math.min(count + RENDER_CHUNK_SIZE, filteredItems.length));
+          } else {
+            autoScrollTopRef.current = 0;
+            element.scrollTo({ top: 0 });
+          }
+        } else {
+          if (Math.abs(element.scrollTop - autoScrollTopRef.current) > 2) {
+            autoScrollTopRef.current = element.scrollTop;
+          }
+          autoScrollTopRef.current += (AUTO_SCROLL_PIXELS_PER_SECOND * elapsed) / 1000;
+          element.scrollTop = autoScrollTopRef.current;
+        }
+      }
+      frameId = window.requestAnimationFrame(tick);
+    };
+    frameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [filteredItems.length, isAutoScrollPaused, isLoading, previewItem, renderCount, visibleItems.length]);
 
   return (
     <>
@@ -321,9 +562,34 @@ export function ImageGalleryPanel({
               className="w-full border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
             />
           </label>
+
+          <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <textarea
+              value={promptDraft}
+              onChange={(event) => setPromptDraft(event.target.value)}
+              placeholder="添加自己的 prompt"
+              rows={2}
+              className="min-h-16 resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
+            />
+            <Button
+              type="button"
+              className="h-auto min-h-10 rounded-lg sm:min-w-24"
+              onClick={() => void handleAddUserPrompt()}
+            >
+              <Plus className="size-4" />
+              添加
+            </Button>
+          </div>
         </div>
 
-        <div className="hide-scrollbar max-h-[calc(100dvh-14rem)] overflow-y-auto px-3 py-3 sm:px-4">
+        <div
+          ref={scrollContainerRef}
+          onMouseEnter={() => setIsAutoScrollPaused(true)}
+          onMouseLeave={() => setIsAutoScrollPaused(false)}
+          onFocus={() => setIsAutoScrollPaused(true)}
+          onBlur={() => setIsAutoScrollPaused(false)}
+          className="hide-scrollbar max-h-[calc(100dvh-18.5rem)] overflow-y-auto px-3 py-3 sm:px-4"
+        >
           {isLoading ? (
             <div className="flex min-h-[240px] items-center justify-center gap-2 text-sm text-muted-foreground">
               <LoaderCircle className="size-4 animate-spin" />
@@ -334,15 +600,14 @@ export function ImageGalleryPanel({
               没有匹配结果
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            <div className="columns-1 gap-4 md:columns-2 xl:columns-3 2xl:columns-4">
               {visibleItems.map((item) => (
                 <GalleryCard
                   key={item.id}
                   item={item}
-                  imageDimension={imageDimensions[item.id]}
+                  imageDimension={imageDimensions[String(item.id)]}
                   onOpenImage={setPreviewItem}
-                  onApplyPrompt={handleApplyPrompt}
-                  promptTargetHref={promptTargetHref}
+                  onRemoveUserPrompt={handleRemoveUserPrompt}
                 />
               ))}
             </div>
@@ -365,22 +630,30 @@ export function ImageGalleryPanel({
           {previewItem ? (
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_380px]">
               <div className="flex items-center justify-center overflow-hidden rounded-xl bg-muted">
-                <NextImage
-                  src={previewItem.imageUrl}
-                  alt={previewItem.title}
-                  width={imageDimensions[previewItem.id]?.width || 1200}
-                  height={imageDimensions[previewItem.id]?.height || 1200}
-                  unoptimized
-                  sizes="min(96vw, 900px)"
-                  className="h-auto max-h-[84vh] w-auto max-w-full object-contain"
-                />
+                {previewItem.imageUrl ? (
+                  <NextImage
+                    src={previewItem.imageUrl}
+                    alt={previewItem.title}
+                    width={imageDimensions[String(previewItem.id)]?.width || 1200}
+                    height={imageDimensions[String(previewItem.id)]?.height || 1200}
+                    unoptimized
+                    sizes="min(96vw, 900px)"
+                    className="h-auto max-h-[84vh] w-auto max-w-full object-contain"
+                  />
+                ) : (
+                  <div className="flex min-h-[360px] w-full items-center justify-center px-8 text-center text-sm leading-7 text-muted-foreground">
+                    {previewItem.promptPreview || previewItem.prompt}
+                  </div>
+                )}
               </div>
 
               <div className="minimal-panel-soft flex min-h-0 flex-col p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="text-base font-semibold text-foreground">
-                      第 {previewItem.postNumber} 层 / @{previewItem.username}
+                      {previewItem.isUserPrompt
+                        ? "我添加的 prompt"
+                        : `第 ${previewItem.postNumber} 层 / @${previewItem.username}`}
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
                       {previewItem.title}
@@ -408,7 +681,7 @@ export function ImageGalleryPanel({
                     复制
                   </Button>
                 </div>
-                {previewItem.hasPrompt && promptTargetHref ? (
+                {previewItem.hasPrompt && promptTargetHref && !previewItem.isUserPrompt ? (
                   <Link
                     href={`${promptTargetHref}?prompt=${encodeURIComponent(previewItem.prompt)}&focus=prompt`}
                     className="mt-3 inline-flex h-9 items-center rounded-lg border border-border bg-background px-4 text-sm text-foreground transition hover:bg-muted"

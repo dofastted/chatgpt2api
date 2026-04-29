@@ -54,6 +54,7 @@ MAX_IMAGES_PER_REQUEST = 2
 DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
 MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_GENERATION_TIMEOUT_SECONDS = 300
 RESPONSES_STORE: dict[str, dict[str, object]] = {}
 RESPONSES_STORE_LOCK = Lock()
 
@@ -417,6 +418,20 @@ def generation_error_to_text(exc: Exception) -> str:
             return str(detail.get("error") or detail.get("message") or detail).strip()
         return str(detail).strip()
     return str(exc).strip() or exc.__class__.__name__
+
+
+def build_image_generation_timeout_error() -> HTTPException:
+    return HTTPException(
+        status_code=504,
+        detail={"error": f"image generation timed out after {IMAGE_GENERATION_TIMEOUT_SECONDS}s"},
+    )
+
+
+async def await_image_generation_payload(awaitable):
+    try:
+        return await asyncio.wait_for(awaitable, timeout=IMAGE_GENERATION_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise build_image_generation_timeout_error() from exc
 
 
 async def generate_image_payload(
@@ -1106,8 +1121,13 @@ async def iter_live_responses_generation_stream(
 
     task = asyncio.create_task(build_payload())
     try:
+        deadline = time() + IMAGE_GENERATION_TIMEOUT_SECONDS
         while not task.done():
-            await asyncio.sleep(10)
+            remaining_seconds = deadline - time()
+            if remaining_seconds <= 0:
+                task.cancel()
+                raise build_image_generation_timeout_error()
+            await asyncio.sleep(min(10, max(0.1, remaining_seconds)))
             if not task.done():
                 yield emit("response.in_progress", response=clone_json_value(pending_payload), heartbeat=True)
         payload = await task
@@ -1320,6 +1340,12 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         stop_event = Event()
+        stale_count = image_request_log_service.mark_stale_active_failed(
+            max_age_seconds=IMAGE_GENERATION_TIMEOUT_SECONDS,
+            reason=f"image generation timed out after service restart, max_age={IMAGE_GENERATION_TIMEOUT_SECONDS}s",
+        )
+        if stale_count:
+            print(f"[image-request-log] marked {stale_count} stale active requests as failed")
         thread = start_limited_account_watcher(stop_event)
         backup_thread = start_backup_scheduler(stop_event)
         try:
@@ -1479,7 +1505,7 @@ def create_app() -> FastAPI:
             )
 
         try:
-            payload = await build_generation_payload()
+            payload = await await_image_generation_payload(build_generation_payload())
             if not body.stream:
                 image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
         except Exception as exc:
@@ -1594,7 +1620,7 @@ def create_app() -> FastAPI:
             )
 
         try:
-            payload = await build_generation_payload()
+            payload = await await_image_generation_payload(build_generation_payload())
             if not stream:
                 image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
         except Exception as exc:
@@ -1754,7 +1780,7 @@ def create_app() -> FastAPI:
                 },
             )
         try:
-            payload = await build_generation_payload()
+            payload = await await_image_generation_payload(build_generation_payload())
             if not body.stream:
                 image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
         except Exception as exc:

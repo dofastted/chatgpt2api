@@ -67,6 +67,14 @@ import {
   type StoredImage,
 } from "@/store/image-conversations";
 import { getStoredAuthKey } from "@/store/auth";
+import {
+  listUserGalleryPrompts,
+  loadGalleryPromptStats,
+  promptKey,
+  recordGalleryPromptUse,
+  type GalleryPromptStats,
+  type UserGalleryPrompt,
+} from "@/store/gallery-prompts";
 import { cn } from "@/lib/utils";
 import {
   calculateImageSizeFromPreference,
@@ -106,7 +114,7 @@ const INTERRUPTED_GENERATION_MESSAGE =
   "页面已重新打开，未找回这个请求。请重新发送。";
 
 type GallerySeedItem = {
-  id: number;
+  id: number | string;
   postNumber: number;
   username: string;
   imageIndex: number;
@@ -117,14 +125,33 @@ type GallerySeedItem = {
   prompt: string;
   promptPreview: string;
   hasPrompt: boolean;
+  useCount?: number;
+  randomRank?: number;
 };
 
 type GalleryImageDimension = {
-  id: number;
+  id: number | string;
   width: number;
   height: number;
   aspectRatio: number;
 };
+
+function buildUserPromptSuggestion(item: UserGalleryPrompt): GallerySeedItem {
+  return {
+    id: item.id,
+    postNumber: 0,
+    username: "我",
+    imageIndex: 0,
+    title: "我添加的 prompt",
+    imageUrl: "",
+    downloadPath: "",
+    postUrl: "",
+    prompt: item.prompt,
+    promptPreview: item.promptPreview,
+    hasPrompt: true,
+    useCount: item.useCount,
+  };
+}
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -288,7 +315,7 @@ function ImageInspirationRail({
   onOpenPreview,
 }: {
   items: GallerySeedItem[];
-  imageDimensions: Record<number, GalleryImageDimension>;
+  imageDimensions: Record<string, GalleryImageDimension>;
   isHidden: boolean;
   isLoading: boolean;
   shouldReduceMotion: boolean;
@@ -352,7 +379,7 @@ function ImageInspirationRail({
             <div className="columns-2 gap-2 [column-fill:_balance]">
               {railItems.map((item) => {
                 const aspectRatio =
-                  imageDimensions[item.id]?.aspectRatio ||
+                  imageDimensions[String(item.id)]?.aspectRatio ||
                   DEFAULT_GALLERY_ASPECT_RATIO;
                 return (
                   <button
@@ -578,8 +605,11 @@ export default function ImagePage() {
     useState<GalleryPreviewItem | null>(null);
   const [galleryItems, setGalleryItems] = useState<GallerySeedItem[]>([]);
   const [galleryImageDimensions, setGalleryImageDimensions] = useState<
-    Record<number, GalleryImageDimension>
+    Record<string, GalleryImageDimension>
   >({});
+  const [userGalleryPrompts, setUserGalleryPrompts] = useState<UserGalleryPrompt[]>([]);
+  const [galleryPromptStats, setGalleryPromptStats] = useState<GalleryPromptStats>({});
+  const [galleryRandomRanks, setGalleryRandomRanks] = useState<Record<string, number>>({});
   const [isGalleryDataLoading, setIsGalleryDataLoading] = useState(true);
   const [conversationScope, setConversationScope] = useState<string | null>(
     null,
@@ -618,10 +648,20 @@ export default function ImagePage() {
         toast.error("这张图没有 prompt");
         return;
       }
+      if (conversationScope) {
+        void recordGalleryPromptUse(conversationScope, normalizedPrompt).then(async () => {
+          const [nextPrompts, nextStats] = await Promise.all([
+            listUserGalleryPrompts(conversationScope),
+            loadGalleryPromptStats(conversationScope),
+          ]);
+          setUserGalleryPrompts(nextPrompts);
+          setGalleryPromptStats(nextStats);
+        });
+      }
       setImagePrompt(normalizedPrompt);
       focusPromptInput();
     },
-    [focusPromptInput],
+    [conversationScope, focusPromptInput],
   );
 
   useEffect(() => {
@@ -675,11 +715,14 @@ export default function ImagePage() {
         const nextItems = (itemsMod.default || []) as GallerySeedItem[];
         const nextDimensions = Object.fromEntries(
           ((dimensionsMod.default || []) as GalleryImageDimension[]).map(
-            (item) => [item.id, item],
+            (item) => [String(item.id), item],
           ),
         );
         setGalleryItems(nextItems);
         setGalleryImageDimensions(nextDimensions);
+        setGalleryRandomRanks(
+          Object.fromEntries(nextItems.map((item) => [String(item.id), Math.random()])),
+        );
       } finally {
         if (!cancelled) {
           setIsGalleryDataLoading(false);
@@ -691,6 +734,34 @@ export default function ImagePage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!conversationScope) {
+      return;
+    }
+    let cancelled = false;
+    const loadGalleryPromptData = async () => {
+      try {
+        const [nextPrompts, nextStats] = await Promise.all([
+          listUserGalleryPrompts(conversationScope),
+          loadGalleryPromptStats(conversationScope),
+        ]);
+        if (!cancelled) {
+          setUserGalleryPrompts(nextPrompts);
+          setGalleryPromptStats(nextStats);
+        }
+      } catch {
+        if (!cancelled) {
+          setUserGalleryPrompts([]);
+          setGalleryPromptStats({});
+        }
+      }
+    };
+    void loadGalleryPromptData();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationScope]);
 
   useEffect(() => {
     const element = textareaRef.current;
@@ -841,11 +912,42 @@ export default function ImagePage() {
   const hasNextPreviewImage =
     previewImageIndex >= 0 && previewImageIndex < previewableImages.length - 1;
   const emptyPromptSuggestions = useMemo(
+    () => {
+      const userItems = userGalleryPrompts.map(buildUserPromptSuggestion);
+      const seedItems = galleryItems
+        .filter((item) => item.hasPrompt && String(item.prompt || "").trim())
+        .map((item) => ({
+          ...item,
+          useCount: Math.max(0, Number(galleryPromptStats[promptKey(item.prompt)] || 0)),
+          randomRank: galleryRandomRanks[String(item.id)] ?? 0,
+        }))
+        .sort((a, b) => {
+          const usageDiff = Math.max(0, Number(b.useCount || 0)) - Math.max(0, Number(a.useCount || 0));
+          if (usageDiff !== 0) {
+            return usageDiff;
+          }
+          return Number(a.randomRank || 0) - Number(b.randomRank || 0);
+        });
+      return [...userItems, ...seedItems].slice(0, GALLERY_PROMPT_SUGGESTION_COUNT);
+    },
+    [galleryItems, galleryPromptStats, galleryRandomRanks, userGalleryPrompts],
+  );
+  const rankedGalleryItems = useMemo(
     () =>
       galleryItems
-        .filter((item) => item.hasPrompt && String(item.prompt || "").trim())
-        .slice(0, GALLERY_PROMPT_SUGGESTION_COUNT),
-    [galleryItems],
+        .map((item) => ({
+          ...item,
+          useCount: item.hasPrompt ? Math.max(0, Number(galleryPromptStats[promptKey(item.prompt)] || 0)) : 0,
+          randomRank: galleryRandomRanks[String(item.id)] ?? 0,
+        }))
+        .sort((a, b) => {
+          const usageDiff = Math.max(0, Number(b.useCount || 0)) - Math.max(0, Number(a.useCount || 0));
+          if (usageDiff !== 0) {
+            return usageDiff;
+          }
+          return Number(a.randomRank || 0) - Number(b.randomRank || 0);
+        }),
+    [galleryItems, galleryPromptStats, galleryRandomRanks],
   );
   const currentQueueRequest = useMemo(() => {
     if (!selectedTurn?.queueRequestId) {
@@ -1442,6 +1544,14 @@ export default function ImagePage() {
       conversationRecordId,
       turnId,
     );
+    void recordGalleryPromptUse(conversationScope, prompt).then(async () => {
+      const [nextPrompts, nextStats] = await Promise.all([
+        listUserGalleryPrompts(conversationScope),
+        loadGalleryPromptStats(conversationScope),
+      ]);
+      setUserGalleryPrompts(nextPrompts);
+      setGalleryPromptStats(nextStats);
+    });
 
     setSelectedConversationId(conversationRecordId);
     if (!retry) {
@@ -2331,7 +2441,7 @@ export default function ImagePage() {
         </div>
 
         <ImageInspirationRail
-          items={galleryItems}
+          items={rankedGalleryItems}
           imageDimensions={galleryImageDimensions}
           isHidden={isInspirationRailHidden}
           isLoading={isGalleryDataLoading}

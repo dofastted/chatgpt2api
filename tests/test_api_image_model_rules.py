@@ -218,6 +218,18 @@ class ApiImageModelRuleTests(unittest.TestCase):
         self.assertTrue(payload["metadata"]["health_check"])
         self.assertEqual(service.last_call, {})
 
+    def test_await_image_generation_payload_returns_504_on_timeout(self) -> None:
+        async def slow_payload() -> dict:
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        with patch.object(api, "IMAGE_GENERATION_TIMEOUT_SECONDS", 0.001):
+            with self.assertRaises(api.HTTPException) as raised:
+                asyncio.run(api.await_image_generation_payload(slow_payload()))
+
+        self.assertEqual(raised.exception.status_code, 504)
+        self.assertIn("timed out", raised.exception.detail["error"])
+
     def test_user_key_takes_precedence_over_plain_auth_key(self) -> None:
         api.user_key_service.create_user_keys(count=1, quota=10, prefix="uk")
         user_key = api.user_key_service.list_user_keys()[0]["key"]
