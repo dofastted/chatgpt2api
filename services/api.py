@@ -54,7 +54,7 @@ MAX_IMAGES_PER_REQUEST = 2
 DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
 MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024
-IMAGE_GENERATION_TIMEOUT_SECONDS = 300
+IMAGE_GENERATION_TIMEOUT_SECONDS = max(60, int(config.image_generation_timeout_seconds or 900))
 RESPONSES_STORE: dict[str, dict[str, object]] = {}
 RESPONSES_STORE_LOCK = Lock()
 
@@ -1358,12 +1358,13 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         stop_event = Event()
-        stale_count = image_request_log_service.mark_stale_active_failed(
-            max_age_seconds=IMAGE_GENERATION_TIMEOUT_SECONDS,
-            reason=f"image generation timed out after service restart, max_age={IMAGE_GENERATION_TIMEOUT_SECONDS}s",
+        interrupted_count = image_request_log_service.mark_active_failed(
+            reason="image generation interrupted by service restart",
+            http_status=503,
+            error_type="ServiceRestart",
         )
-        if stale_count:
-            print(f"[image-request-log] marked {stale_count} stale active requests as failed")
+        if interrupted_count:
+            print(f"[image-request-log] marked {interrupted_count} active requests as interrupted")
         thread = start_limited_account_watcher(stop_event)
         backup_thread = start_backup_scheduler(stop_event)
         try:

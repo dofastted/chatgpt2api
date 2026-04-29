@@ -350,6 +350,40 @@ class ImageRequestLogService:
             )
         return len(stale_rows)
 
+    def mark_active_failed(
+        self,
+        *,
+        reason: str,
+        http_status: int = 503,
+        error_type: str = "Interrupted",
+    ) -> int:
+        now = _now_text()
+        status_placeholders = ", ".join("?" for _ in REQUEST_ACTIVE_STATUSES)
+        with sqlite_store.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT request_id, accepted_at, started_at, running_at
+                FROM image_request_records
+                WHERE status IN ({status_placeholders})
+                """,
+                REQUEST_ACTIVE_STATUSES,
+            ).fetchall()
+        for row in rows:
+            record = dict(row)
+            self._apply_update(
+                record["request_id"],
+                {
+                    "status": "failed",
+                    "finished_at": now,
+                    "running_ms": _duration_ms(record.get("running_at") or record.get("started_at"), now),
+                    "total_ms": _duration_ms(record.get("accepted_at"), now),
+                    "http_status": int(http_status),
+                    "error_type": _clean_text(error_type)[:100],
+                    "error_message": _clean_text(reason)[:500],
+                },
+            )
+        return len(rows)
+
     def get_record(self, request_id: str) -> dict[str, Any] | None:
         normalized_id = _clean_text(request_id)
         if not normalized_id:

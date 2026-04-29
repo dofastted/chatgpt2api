@@ -37,6 +37,7 @@ class AppSettings:
     image_queue_global_wait_limit: int
     image_queue_global_start_limit: int
     image_queue_global_start_window_seconds: int
+    image_generation_timeout_seconds: int
 
 
 def _parse_bool(value: object, *, default: bool) -> bool:
@@ -209,6 +210,14 @@ def _load_settings() -> AppSettings:
             ),
             default=60,
             name="image-queue-global-start-window-seconds",
+        ),
+        image_generation_timeout_seconds=_parse_int(
+            os.getenv(
+                "IMAGE_GENERATION_TIMEOUT_SECONDS",
+                raw_config.get("image-generation-timeout-seconds"),
+            ),
+            default=900,
+            name="image-generation-timeout-seconds",
         ),
     )
 
