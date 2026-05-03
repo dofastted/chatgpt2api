@@ -703,6 +703,40 @@ function resetInterruptedConversation(
   };
 }
 
+function buildQueueFailureMessage(item: ImageQueueItem) {
+  const error = String(item.error || "").trim();
+  if (error) {
+    return error;
+  }
+  return item.status === "rejected"
+    ? "图片请求被拒绝，请重新发送。"
+    : "图片生成失败，请重新发送。";
+}
+
+function failTurnFromQueueStatus(
+  turn: ImageConversationTurn,
+  item: ImageQueueItem,
+  finishedAt = new Date().toISOString(),
+): ImageConversationTurn {
+  const message = buildQueueFailureMessage(item);
+  return {
+    ...turn,
+    status: "error",
+    error: message,
+    lastError: message,
+    requestFinishedAt: turn.requestFinishedAt || finishedAt,
+    images: (turn.images || []).map((image) =>
+      image.status === "loading"
+        ? {
+            ...image,
+            status: "error" as const,
+            error: image.error || message,
+          }
+        : image,
+    ),
+  };
+}
+
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -1367,6 +1401,9 @@ export default function ImagePage() {
             ).values(),
           );
           const baseSnapshot = snapshots.find((snapshot) => snapshot) || null;
+          const terminalItems = uniqueItems.filter(
+            (item) => item.status === "failed" || item.status === "rejected",
+          );
           setQueueStatus(
             baseSnapshot
               ? {
@@ -1380,6 +1417,52 @@ export default function ImagePage() {
                 }
               : null,
           );
+          if (terminalItems.length > 0 && conversationScope) {
+            const terminalItemsByRequestId = new Map(
+              terminalItems.map((item) => [item.request_id, item]),
+            );
+            const finishedAt = new Date().toISOString();
+            const nextConversations = conversationsRef.current.map(
+              (conversation) => {
+                let changed = false;
+                const turns = getConversationTurns(conversation).map((turn) => {
+                  const requestId = String(turn.queueRequestId || "").trim();
+                  const terminalItem = terminalItemsByRequestId.get(requestId);
+                  if (!terminalItem || !isPendingTurnStatus(turn.status)) {
+                    return turn;
+                  }
+                  changed = true;
+                  return failTurnFromQueueStatus(turn, terminalItem, finishedAt);
+                });
+                if (!changed) {
+                  return conversation;
+                }
+                const latestTurn = turns[turns.length - 1];
+                return {
+                  ...conversation,
+                  turns,
+                  status: latestTurn?.status,
+                  error: latestTurn?.error,
+                  lastError: latestTurn?.lastError,
+                  requestFinishedAt: latestTurn?.requestFinishedAt,
+                  images: latestTurn?.images,
+                };
+              },
+            );
+            const changedConversations = nextConversations.filter(
+              (conversation, index) =>
+                conversation !== conversationsRef.current[index],
+            );
+            if (changedConversations.length > 0) {
+              conversationsRef.current = nextConversations;
+              setConversations(nextConversations);
+              await Promise.all(
+                changedConversations.map((conversation) =>
+                  saveImageConversation(conversationScope, conversation),
+                ),
+              );
+            }
+          }
         }
       } catch {
         if (!cancelled) {
@@ -1782,8 +1865,11 @@ export default function ImagePage() {
         (item) => item.status === "success",
       ).length;
       const failedCount = nextImages.length - successCount;
+      const returnedText = String(
+        data.text_content || data.copied_text || "",
+      ).trim();
 
-      if (successCount === 0) {
+      if (successCount === 0 && !returnedText) {
         throw new Error("生成图片失败");
       }
 
@@ -1793,13 +1879,17 @@ export default function ImagePage() {
           turnId,
           (turn) => ({
             ...turn,
-            copiedText: String(data.copied_text || "").trim() || undefined,
+            copiedText: returnedText || undefined,
             images: nextImages,
-            status: failedCount > 0 ? "error" : "success",
+            status: failedCount > 0 && !returnedText ? "error" : "success",
             error:
-              failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
+              failedCount > 0 && !returnedText
+                ? `其中 ${failedCount} 张生成失败`
+                : undefined,
             lastError:
-              failedCount > 0 ? `其中 ${failedCount} 张生成失败` : undefined,
+              failedCount > 0 && !returnedText
+                ? `其中 ${failedCount} 张生成失败`
+                : undefined,
             requestFinishedAt: new Date().toISOString(),
             responseId: String(data.id || "").trim() || turn.responseId,
           }),
@@ -1807,7 +1897,9 @@ export default function ImagePage() {
       );
       await loadQuota();
 
-      if (failedCount > 0) {
+      if (successCount === 0 && returnedText) {
+        toast.info("未返回图片，已显示上游文本");
+      } else if (failedCount > 0) {
         toast.error(
           `已完成 ${successCount} 张，另有 ${failedCount} 张未生成成功`,
         );

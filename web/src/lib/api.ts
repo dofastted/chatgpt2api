@@ -21,7 +21,13 @@ export type ImageBilling = {
   remaining_quota: number;
 };
 
-export type ImageQueueItemStatus = "waiting" | "assigning_account" | "running" | "finished" | "failed";
+export type ImageQueueItemStatus =
+  | "waiting"
+  | "assigning_account"
+  | "running"
+  | "finished"
+  | "failed"
+  | "rejected";
 export type ImageRequestStatus =
   | "accepted"
   | "waiting"
@@ -393,6 +399,15 @@ type ResponsesImageGenerationResponse = {
   };
 };
 
+type ResponsesImageGenerationOutputItem = NonNullable<ResponsesImageGenerationResponse["output"]>[number];
+
+type ResponsesStreamEventData = Record<string, unknown> & {
+  response?: ResponsesImageGenerationResponse;
+  item?: ResponsesImageGenerationOutputItem;
+  result?: string;
+  output_index?: number;
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<AuthSessionResponse>("/auth/login", {
@@ -751,6 +766,14 @@ function parseResponsesStreamEvent(rawEvent: string) {
   return { event, data: JSON.parse(dataText) as Record<string, unknown> };
 }
 
+function isResponsesStreamEventData(value: unknown): value is ResponsesStreamEventData {
+  return typeof value === "object" && value !== null;
+}
+
+function isResponsesImageItem(value: unknown): value is ResponsesImageGenerationOutputItem {
+  return typeof value === "object" && value !== null;
+}
+
 async function readResponsesImageGenerationStream(response: Response) {
   const reader = response.body?.getReader();
   if (!reader) {
@@ -759,16 +782,43 @@ async function readResponsesImageGenerationStream(response: Response) {
   const decoder = new TextDecoder();
   let buffer = "";
   let completedPayload: ResponsesImageGenerationResponse | null = null;
+  const streamedImageItems = new Map<number, ResponsesImageGenerationOutputItem>();
 
   const processRawEvent = (rawEvent: string) => {
     if (!rawEvent.trim()) {
       return;
     }
     const parsed = parseResponsesStreamEvent(rawEvent);
-    if (parsed.event === "response.completed" && typeof parsed.data === "object" && parsed.data) {
-      completedPayload = parsed.data.response as ResponsesImageGenerationResponse;
+    if (!isResponsesStreamEventData(parsed.data)) {
+      return;
     }
-    if (parsed.event === "response.failed" && typeof parsed.data === "object" && parsed.data) {
+    if (parsed.event === "response.completed") {
+      completedPayload = parsed.data.response || null;
+      return;
+    }
+    if (parsed.event === "response.image_generation_call.completed") {
+      const item = parsed.data.item;
+      const fallbackResult = String(parsed.data.result || "").trim();
+      const outputIndex = Math.max(0, Number(parsed.data.output_index || 0));
+      if (isResponsesImageItem(item)) {
+        streamedImageItems.set(outputIndex, item);
+      } else if (fallbackResult) {
+        streamedImageItems.set(outputIndex, {
+          type: "image_generation_call",
+          status: "completed",
+          result: fallbackResult,
+          index: outputIndex,
+        });
+      }
+    }
+    if (parsed.event === "response.output_item.done") {
+      const item = parsed.data.item;
+      if (isResponsesImageItem(item)) {
+        const outputIndex = Math.max(0, Number(parsed.data.output_index || 0));
+        streamedImageItems.set(outputIndex, item);
+      }
+    }
+    if (parsed.event === "response.failed") {
       const failedResponse = parsed.data.response as { error?: { message?: string } };
       throw new Error(String(failedResponse?.error?.message || "").trim() || "生成图片失败");
     }
@@ -792,6 +842,18 @@ async function readResponsesImageGenerationStream(response: Response) {
   processRawEvent(buffer);
 
   if (!completedPayload) {
+    const output = Array.from(streamedImageItems.entries())
+      .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
+      .map(([outputIndex, item]) => ({
+        ...item,
+        index: Number.isFinite(Number(item?.index)) ? Number(item?.index) : outputIndex,
+      }));
+    if (output.some((item) => String(item?.result || "").trim())) {
+      return {
+        created_at: Math.floor(Date.now() / 1000),
+        output,
+      };
+    }
     throw new Error("生成响应没有结束信号");
   }
   return completedPayload;

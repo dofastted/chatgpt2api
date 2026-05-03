@@ -391,6 +391,74 @@ class ApiImageModelRuleTests(unittest.TestCase):
         self.assertEqual(legacy_payload["copied_text"], "copied from chrome")
         self.assertEqual(responses_payload["copied_text"], "copied from chrome")
 
+    def test_build_responses_payload_returns_text_when_image_is_missing(self) -> None:
+        image_result = {
+            "created": 123,
+            "text_content": "cannot generate that image",
+            "copied_text": "cannot generate that image",
+            "data": [],
+        }
+
+        payload = api.build_responses_payload(
+            response_id="resp_text_only",
+            response_model="gpt-5.4",
+            image_result=image_result,
+            billing=None,
+        )
+
+        self.assertEqual(payload["text_content"], "cannot generate that image")
+        self.assertEqual(payload["output_text"], "cannot generate that image")
+        self.assertEqual(payload["output"][0]["type"], "message")
+        self.assertEqual(payload["output"][0]["content"][0]["text"], "cannot generate that image")
+
+    def test_generate_image_payload_returns_text_without_charging_when_image_is_missing(self) -> None:
+        created = api.user_key_service.create_user_keys(
+            count=1,
+            quota=12,
+            prefix="uk",
+        )
+        user_key = created["created_items"][0]["key"]
+        context = api.resolve_auth_context(f"Bearer {user_key}")
+        self.assertIsNotNone(context)
+        assert context is not None
+
+        class TextOnlyBackendService:
+            def generate_with_pool(self, prompt: str, model: str, n: int, input_images=None, queue_request_id=None, size=None) -> dict:
+                del prompt, model, n, input_images, queue_request_id, size
+                return {
+                    "created": 123,
+                    "copied_text": "cannot generate that image",
+                    "data": [],
+                }
+
+        async def fake_run_in_threadpool(func, *args):
+            return func(*args)
+
+        with patch.object(api, "run_in_threadpool", side_effect=fake_run_in_threadpool):
+            result, billing = asyncio.run(
+                api.generate_image_payload(
+                    service=TextOnlyBackendService(),
+                    context=context,
+                    authorization=f"Bearer {user_key}",
+                    prompt="draw a restricted image",
+                    model="gpt-image-2",
+                    n=1,
+                )
+            )
+
+        self.assertEqual(result["data"], [])
+        self.assertEqual(result["text_content"], "cannot generate that image")
+        self.assertEqual(result["copied_text"], "cannot generate that image")
+        self.assertIsNotNone(billing)
+        assert billing is not None
+        self.assertEqual(billing["charged_quota"], 0)
+        self.assertEqual(billing["succeeded_count"], 0)
+        self.assertEqual(billing["failed_count"], 1)
+        current_item = api.user_key_service.get_user_key(user_key)
+        self.assertIsNotNone(current_item)
+        assert current_item is not None
+        self.assertEqual(current_item["quota"], 12)
+
     def test_generate_image_payload_refunds_image_2_quota_when_backend_fails(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,

@@ -413,6 +413,13 @@ def reconcile_stale_image_queue_tickets() -> list[str]:
     return stale_ids
 
 
+def reconcile_stale_image_request_records() -> int:
+    return image_request_log_service.mark_stale_active_failed(
+        max_age_seconds=IMAGE_GENERATION_TIMEOUT_SECONDS,
+        reason=generation_error_to_text(build_image_generation_timeout_error()),
+    )
+
+
 def extract_image_result_items(result: dict[str, object], *, request_index: int | None = None) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for item in list(result.get("data") or []):
@@ -427,6 +434,25 @@ def extract_image_result_items(result: dict[str, object], *, request_index: int 
             next_item["index"] = int(request_index)
         items.append(next_item)
     return items
+
+
+def extract_generated_text(result: dict[str, object] | None) -> str:
+    payload = result or {}
+    for key in ("text_content", "copied_text", "output_text"):
+        text = str(payload.get(key) or "").strip()
+        if text:
+            return text
+    output_texts: list[str] = []
+    for item in list(payload.get("output") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip() == "message":
+            for content in list(item.get("content") or []):
+                if isinstance(content, dict) and str(content.get("type") or "").strip() == "output_text":
+                    text = str(content.get("text") or "").strip()
+                    if text:
+                        output_texts.append(text)
+    return "\n".join(output_texts).strip()
 
 
 def generation_error_to_text(exc: Exception) -> str:
@@ -492,16 +518,21 @@ async def generate_image_payload(
                 size,
             )
             success_items = extract_image_result_items(result, request_index=0)[:1]
-            if not success_items:
+            generated_text = extract_generated_text(result)
+            if not success_items and not generated_text:
                 raise ImageGenerationError("image generation returned no image data")
             result = {
                 **result,
                 "data": success_items,
             }
+            if generated_text:
+                result["text_content"] = generated_text
+                result["copied_text"] = str(result.get("copied_text") or generated_text).strip()
         else:
             created = int(time())
             success_items: list[dict[str, object]] = []
             copied_text = ""
+            text_content = ""
             first_error: Exception | None = None
             for request_index in range(requested_count):
                 try:
@@ -515,11 +546,21 @@ async def generate_image_payload(
                         size,
                     )
                     current_items = extract_image_result_items(current_result, request_index=request_index)[:1]
-                    if not current_items:
+                    current_text = extract_generated_text(current_result)
+                    if not current_items and not current_text:
                         raise ImageGenerationError("image generation returned no image data")
                     success_items.extend(current_items)
                     if not copied_text:
                         copied_text = str(current_result.get("copied_text") or "").strip()
+                    if not text_content and current_text:
+                        text_content = current_text
+                    if current_text and not current_items:
+                        partial_errors.append(
+                            {
+                                "index": request_index,
+                                "error": "image generation returned text instead of image",
+                            }
+                        )
                     created = int(current_result.get("created") or created)
                 except (ImageGenerationError, HTTPException) as exc:
                     if first_error is None:
@@ -531,7 +572,7 @@ async def generate_image_payload(
                         }
                     )
                     continue
-            if not success_items:
+            if not success_items and not text_content:
                 if isinstance(first_error, HTTPException):
                     raise first_error
                 if isinstance(first_error, ImageGenerationError):
@@ -543,6 +584,10 @@ async def generate_image_payload(
             }
             if copied_text:
                 result["copied_text"] = copied_text
+            if text_content:
+                result["text_content"] = text_content
+                if not copied_text:
+                    result["copied_text"] = text_content
             if partial_errors:
                 result["partial_errors"] = partial_errors
         succeeded_count = len(success_items)
@@ -912,6 +957,9 @@ def build_images_response_payload(
     copied_text = str(image_result.get("copied_text") or "").strip()
     if copied_text:
         payload["copied_text"] = copied_text
+    text_content = str(image_result.get("text_content") or "").strip()
+    if text_content:
+        payload["text_content"] = text_content
     partial_errors = list(image_result.get("partial_errors") or [])
     if partial_errors:
         payload["partial_errors"] = partial_errors
@@ -949,6 +997,23 @@ def build_responses_payload(
             }
         )
     copied_text = str(image_result.get("copied_text") or "").strip()
+    text_content = str(image_result.get("text_content") or "").strip()
+    if text_content:
+        output_items.append(
+            {
+                "id": f"msg_{uuid4().hex}",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text_content,
+                        "annotations": [],
+                    }
+                ],
+            }
+        )
     payload = {
         "id": response_id,
         "object": "response",
@@ -968,6 +1033,9 @@ def build_responses_payload(
     }
     if copied_text:
         payload["copied_text"] = copied_text
+    if text_content:
+        payload["text_content"] = text_content
+        payload["output_text"] = text_content
     partial_errors = list(image_result.get("partial_errors") or [])
     if partial_errors:
         payload["partial_errors"] = partial_errors
@@ -1442,20 +1510,44 @@ def create_app() -> FastAPI:
         require_auth_key(authorization)
         auth_token = extract_bearer_token(authorization)
         reconcile_stale_image_queue_tickets()
+        reconcile_stale_image_request_records()
         snapshot = image_queue_service.snapshot(auth_token, request_id=request_id)
+        owner_id = build_request_owner_id(auth_token)
         if request_id and snapshot.get("request"):
             record = image_request_log_service.get_record(request_id)
-            if record and record.get("owner_id") == build_request_owner_id(auth_token):
+            if record and record.get("owner_id") == owner_id:
                 request_payload = dict(snapshot["request"] or {})
                 for key in ("queue_wait_ms", "running_ms", "total_ms"):
                     request_payload[key] = record.get(key)
                 snapshot["request"] = request_payload
+        elif request_id:
+            record = image_request_log_service.get_record(request_id)
+            if record and record.get("owner_id") == owner_id:
+                record_status = str(record.get("status") or "").strip()
+                if record_status in {"finished", "failed", "rejected"}:
+                    request_payload = {
+                        "request_id": request_id,
+                        "title": str(record.get("prompt_preview") or "").strip(),
+                        "status": record_status,
+                        "position": None,
+                        "ahead": None,
+                        "created_at": record.get("accepted_at") or record.get("created_at"),
+                        "started_at": record.get("started_at"),
+                        "finished_at": record.get("finished_at"),
+                        "error": record.get("error_message"),
+                        "queue_wait_ms": record.get("queue_wait_ms"),
+                        "running_ms": record.get("running_ms"),
+                        "total_ms": record.get("total_ms"),
+                    }
+                    snapshot["request"] = request_payload
+                    snapshot["items"] = [*list(snapshot.get("items") or []), request_payload]
         return snapshot
 
     @router.get("/api/image-queue/admin")
     async def get_admin_image_queue(authorization: str | None = Header(default=None)):
         require_admin_auth_key(authorization)
         reconcile_stale_image_queue_tickets()
+        reconcile_stale_image_request_records()
         return image_queue_service.snapshot_all()
 
     @router.api_route("/v1/responses", methods=["GET", "HEAD"])

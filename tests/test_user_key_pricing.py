@@ -143,6 +143,11 @@ class FakeBackendService:
                     if next_response.get("copied_text") is not None
                     else {}
                 ),
+                **(
+                    {"text_content": next_response.get("text_content")}
+                    if next_response.get("text_content") is not None
+                    else {}
+                ),
             }
         return {
             "created": self.response["created"],
@@ -1175,6 +1180,48 @@ class UserKeyPricingTests(unittest.TestCase):
         record = record_response.json()
         self.assertEqual(record["status"], "failed")
         self.assertIn("stream upstream failed", record["error_message"])
+
+    def test_live_responses_stream_returns_text_when_image_is_missing(self) -> None:
+        FakeBackendService.responses = [
+            {
+                "created": 123,
+                "data": [],
+                "copied_text": "cannot generate that image",
+                "text_content": "cannot generate that image",
+            }
+        ]
+        request_id = "stream-text-only-record"
+        with self.make_client() as client:
+            response = client.post(
+                "/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api.config.auth_key}",
+                    "X-Image-Queue-Request-Id": request_id,
+                },
+                json={
+                    "model": "gpt-5",
+                    "input": [{"type": "input_text", "text": "draw text only"}],
+                    "tools": [{"type": "image_generation", "model": "gpt-image-2"}],
+                    "stream": True,
+                },
+            )
+            record_response = client.get(
+                f"/api/image-requests/{request_id}",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        events = self.collect_sse_events(response.content.decode("utf-8"))
+        self.assertFalse(any(event == "response.failed" for event, _ in events))
+        completed_events = [payload for event, payload in events if event == "response.completed"]
+        self.assertEqual(len(completed_events), 1)
+        completed_response = completed_events[0]["response"]
+        self.assertEqual(completed_response["text_content"], "cannot generate that image")
+        self.assertEqual(completed_response["output_text"], "cannot generate that image")
+        self.assertEqual(completed_response["output"][0]["type"], "message")
+        self.assertEqual(events[-1], (None, "[DONE]"))
+        self.assertEqual(record_response.status_code, 200)
+        self.assertEqual(record_response.json()["status"], "finished")
 
     def test_image_request_records_cursor_keeps_same_second_rows(self) -> None:
         created_ids = ["cursor-c", "cursor-b", "cursor-a"]
