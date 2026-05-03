@@ -50,6 +50,6 @@
 - 前端画图页向 `/v1/responses` 发送请求时，会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。
 - 如果当前额度不够，发送按钮会禁用，并显示提示，位置在 `web/src/app/image/page.tsx:644` 和 `web/src/app/image/page.tsx:652`。
 - 图片请求继续一次请求带 `n`。如果后端返回 `billing.remaining_quota`，前端会先就地刷新余额，再同步拉一次 `/api/quota`，位置在 `web/src/app/image/page.tsx:373` 和 `web/src/lib/api.ts:235`。
-- 如果后端返回了 `copied_text`，画图页会把它保存到当前会话，并在结果区渲染一个“可复制文本”卡片，入口在 `web/src/app/image/page.tsx:489` 和 `web/src/app/image/page.tsx:724`。
+- 如果后端返回了 `copied_text` 或 `text_content`，画图页会把它保存到当前 turn，并在结果区渲染一个“可复制文本”卡片，入口在 `web/src/app/image/page.tsx`。没有图片但有文本时，当前 turn 会结束为成功态，图片占位改成错误态，composer 不再继续等待。
 - 会话历史主存到后端 `/api/image-conversations`，读写入口仍在 `web/src/store/image-conversations.ts`。本地 `localforage` 继续作为缓存；第一次读取时会把旧本地会话上传到后端。新结构是会话级 `id/title/clientConversationId/createdAt` 加 `turns[]`，旧单轮记录读取时自动映射成一个 turn。
 - 在已有会话内继续发送时，前端会追加新 turn，不覆盖旧结果；结果按 `conversationId + turnId` 回写，避免切换会话后写到当前可见会话。

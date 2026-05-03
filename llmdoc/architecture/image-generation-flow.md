@@ -50,11 +50,12 @@
 - `/v1/images/generations` 和 `/v1/images/edits` 默认返回 `b64_json`；当第三方客户端传 `response_format=url` 时，会把图片保存到 `data/generated_images/`，并返回 `/v1/images/generated/{image_id}` 的 HTTP URL。这个图片读取 URL 不要求再次带 Authorization，避免 Cherry Studio 二次 fetch 图片时失败。
 - `/v1/responses` 现在允许 `previous_response_id` 指向本服务生成过的 response。服务会从 SQLite response 记录读取最近历史，把历史 prompt、尺寸和可复制文本合进本次文本上下文；上游会话标识不足时，响应 `metadata.context_mode` 标成 `text_history`。
 - 对外协议转换都在 `services/api.py`。`build_responses_payload` 和 `iter_responses_stream` 负责 Responses 风格输出；`build_images_response_payload` 和 `iter_images_stream` 负责图片接口风格输出。
-- 如果上游页面正文里带了可复制文本，`services/image_service.py:1008` 会先收下，再由 `services/api.py:492` 和 `services/api.py:519` 透传成响应顶层字段 `copied_text`。
+- 如果上游页面正文里带了可复制文本，`services/image_service.py` 会先收下，再由 `services/api.py` 透传成响应顶层字段 `copied_text`。
+- 如果上游只返回文本而没有图片，`services/api.py` 会保留空 `data`，同时返回 `text_content` 和 `copied_text`。`/v1/responses` 会把这段文本放进 `response.output[]` 的 `message/output_text`，并按完成响应结束；`user_key` 只按成功图片数扣费，所以这种文本替代结果不扣图片额度。
 - `/v1/images/generations` 和 `/v1/images/edits` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
-- `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终 `response.image_generation_call.completed` 会带图片 `result` 和完整 `item`，最后一定会给 `response.completed` 和 `data: [DONE]`。
-- 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。
-- 前端图片页调用 `/v1/responses` 时默认传 `stream: true`，会把选中的公开模型放到 `tools[].model`，把当前尺寸选择放到 `tools[].size`，再从 SSE 的 `response.completed` 事件读取最终 Response。公开的 `/v1/images/generations` 和 `/v1/images/edits` 只作为外部兼容入口，项目自带网页不使用。
+- `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终如果有图片，`response.image_generation_call.completed` 会带图片 `result` 和完整 `item`；如果只有文本，最终 Response 会带 `message/output_text`。两种成功结果最后都给 `response.completed` 和 `data: [DONE]`。
+- 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。收到 `response.failed` 时要把本地 turn 和 loading 图片改成错误态。
+- 前端图片页调用 `/v1/responses` 时默认传 `stream: true`，会把选中的公开模型放到 `tools[].model`，把当前尺寸选择放到 `tools[].size`，再从 SSE 的 `response.completed` 事件读取最终 Response。它既读取图片项，也读取 `text_content/copied_text`；没有图片但有文本时会结束生成并展示“可复制文本”。公开的 `/v1/images/generations` 和 `/v1/images/edits` 只作为外部兼容入口，项目自带网页不使用。
 - 前端图片页现在会把 session 存成多轮 `turns[]`，主存储是后端 `/api/image-conversations`，本地 `localforage` 只做缓存和旧数据上传来源。每轮保存 prompt、模型、张数、尺寸、参考图、结果图、队列 id、`responseId` 和 `copied_text`；旧单轮记录读取时会映射成一个 turn，实现见 `web/src/store/image-conversations.ts`。
 - 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。
 - 在同一 session 继续发送新 prompt 时，前端复用 `clientConversationId`，并把上一轮 `responseId` 作为 `previous_response_id` 发给 `/v1/responses`。
@@ -72,7 +73,7 @@
 - 请求先进入 `services/image_queue_service.py` 的进程内队列。等待中的请求按全局 FIFO 排；同一个 Bearer Token 默认最多保留 10 个活动请求，活动数按 `waiting + running` 计算；全局等待数超过 2000 时直接拒绝。
 - 队列启动运行前还有全局 60 次/60 秒限制。超过这个速率的生图请求继续停在等待态，直到滑动窗口释放名额；健康检查、登录、额度和上传接口不计入。
 - 进入运行阶段后，真正的并发上限由 `services/account_service.py` 的账号槽位控制。单个账号最多同时跑 2 个生图；如果没有空闲槽位，请求会保持在 `assigning_account` 状态继续等。
-- 前端会给每次请求附带 `X-Image-Queue-Request-Id`，再通过 `GET /api/image-queue/me` 查询当前 Bearer Token 的等待数、运行数、活动数、当前请求位置和状态。
+- 前端会给每次请求附带 `X-Image-Queue-Request-Id`，再通过 `GET /api/image-queue/me` 查询当前 Bearer Token 的等待数、运行数、活动数、当前请求位置和状态。查询时服务端同时清理超时的内存队列 ticket 和 SQLite 里的活动请求记录；如果内存队列已经丢失，但 SQLite 记录已进入 `failed/rejected/finished`，接口仍会返回这条 `request`。
 - `wait_for_turn` 通过后，请求记录进入 `assigning_account`；`BackendService.generate_with_pool` 选到账户并开始上游调用时进入 `running`，同时记录账号哈希、账号类型、内部路线和尝试次数。
 - JSON 请求成功返回前写 `finished`；SSE 请求在最终事件和 `data: [DONE]` 发完后写 `finished`。异常路径写 `failed`，队列或活动数超限写 `rejected`。
 - 成功和失败统计都回写账号池，见 `services/account_service.py:329`。

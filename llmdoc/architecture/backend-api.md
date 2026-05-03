@@ -38,9 +38,10 @@
 - 本地上传元数据和文件由 `services/uploaded_image_service.py:63` 到 `services/uploaded_image_service.py:228` 管理，上传记录按 Bearer Token 哈希隔离。
 - 上传接口只接收单张图片文件，大小上限 8 MB，返回值里会带 `file_id`、尺寸、大小和 `/backend-api/files/{file_id}/content` 下载地址，逻辑在 `services/api.py:859` 到 `services/api.py:913`。
 - `/v1/images/generations`、`/v1/images/edits` 和 `/v1/responses` 现在都会在顶层额外透传 `copied_text`，前提是上游页面正文里真的返回了这段文本，封装点在 `services/api.py`。
+- 如果上游没有返回图片但返回了文本，API 不把它当成空结果超时报错。`services/api.py` 会把文本写到顶层 `text_content` 和 `copied_text`；`/v1/responses` 还会追加一个 `message/output_text` 到 `response.output[]`，并保持 `response.completed` 加 `data: [DONE]`。
 - 兑换码创建只允许 `20` 或 `100` 两档额度。用户 key 兑换成功后会返回 `added_quota`，并把这次额度加到当前剩余值上，不会重置成固定值。
 - `/v1/images/generations` 的流式输出按图片接口风格返回；最终结果一定会给 `image_generation.completed`，然后给 `data: [DONE]`。
-- `/v1/responses` 的流式输出按 Responses 接口风格返回；最终结果一定会给 `response.completed`，然后给 `data: [DONE]`。
+- `/v1/responses` 的流式输出按 Responses 接口风格返回；最终结果一定会给 `response.completed`，然后给 `data: [DONE]`。失败会给 `response.failed` 和 `data: [DONE]`，让调用方能结束等待。
 - `GET /api/image-queue/me` 是当前 Bearer Token 的队列状态入口，返回等待数、运行数、活动数和可选 `request_id` 的排队位置。前端图片页靠它显示当前用户队列和当前请求进度。
 - `GET /api/image-queue/admin` 是管理员队列入口，返回当前所有活动 ticket，不按用户过滤。
 - `GET /api/image-requests` 和 `GET /api/image-requests/{request_id}` 是管理员请求记录入口，数据来自 SQLite 表 `image_request_records`。
