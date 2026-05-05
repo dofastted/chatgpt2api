@@ -1132,6 +1132,7 @@ class UserKeyPricingTests(unittest.TestCase):
 
     def test_image_queue_status_reports_current_request(self) -> None:
         auth_key = api.config.auth_key
+        api.image_queue_service.clear()
         api.image_queue_service.create_ticket(auth_key, "req-1", "draw a cat")
         api.image_queue_service.wait_for_turn("req-1")
         api.image_queue_service.mark_status("req-1", "running")
@@ -1147,6 +1148,105 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(body["user"], {"waiting": 0, "running": 1, "active": 1})
         self.assertEqual(body["request"]["status"], "running")
         self.assertEqual(body["request"]["request_id"], "req-1")
+
+    def test_image_queue_status_hides_other_owner_live_request(self) -> None:
+        owner_auth_key = api.config.auth_key
+        other_user_key = api.user_key_service.create_user_keys(
+            count=1,
+            quota=5,
+            prefix="other-live",
+        )["created_items"][0]["key"]
+        api.image_queue_service.clear()
+        api.image_queue_service.create_ticket(owner_auth_key, "req-live-owner", "private prompt")
+        api.image_queue_service.wait_for_turn("req-live-owner")
+        api.image_queue_service.mark_status("req-live-owner", "running", error="private error")
+
+        with self.make_client() as client:
+            response = client.get(
+                "/api/image-queue/me?request_id=req-live-owner",
+                headers={"Authorization": f"Bearer {other_user_key}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIsNone(body["request"])
+        self.assertEqual(body["items"], [])
+        self.assertEqual(body["user"], {"waiting": 0, "running": 0, "active": 0})
+
+    def test_image_queue_status_exposes_owner_safe_response_id_and_terminal_counts(self) -> None:
+        auth_key = api.config.auth_key
+        context = api.resolve_auth_context(f"Bearer {auth_key}")
+        self.assertIsNotNone(context)
+        assert context is not None
+        api.image_queue_service.clear()
+        api.create_image_request_record(
+            request_id="req-finished-response",
+            context=context,
+            auth_token=auth_key,
+            endpoint="/v1/responses",
+            protocol="responses",
+            model="gpt-image-2",
+            size="auto",
+            n=10,
+            stream=True,
+            prompt="draw ten cats",
+            has_input_image=False,
+            input_image_count=0,
+            response_id="resp_owner_safe",
+        )
+        api.image_request_log_service.mark_finished(
+            "req-finished-response",
+            billing={
+                "requested_count": 10,
+                "succeeded_count": 7,
+                "failed_count": 3,
+                "charged_quota": 14,
+                "remaining_quota": 21,
+            },
+            result={
+                "id": "resp_owner_safe",
+                "output": [
+                    {
+                        "type": "image_generation_call",
+                        "result": "ZmFrZQ==",
+                        "index": index,
+                    }
+                    for index in range(7)
+                ],
+            },
+        )
+
+        with self.make_client() as client:
+            response = client.get(
+                "/api/image-queue/me?request_id=req-finished-response",
+                headers={"Authorization": f"Bearer {auth_key}"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        request_payload = response.json()["request"]
+        self.assertEqual(request_payload["status"], "finished")
+        self.assertEqual(request_payload["response_id"], "resp_owner_safe")
+        self.assertEqual(request_payload["requested_count"], 10)
+        self.assertEqual(request_payload["succeeded_count"], 7)
+        self.assertEqual(request_payload["failed_count"], 3)
+        self.assertEqual(request_payload["charged_quota"], 14)
+        self.assertEqual(request_payload["remaining_quota"], 21)
+        self.assertEqual(request_payload["http_status"], 200)
+
+        other_user_key = api.user_key_service.create_user_keys(
+            count=1,
+            quota=5,
+            prefix="other",
+        )["created_items"][0]["key"]
+
+        with self.make_client() as client:
+            other_response = client.get(
+                "/api/image-queue/me?request_id=req-finished-response",
+                headers={"Authorization": f"Bearer {other_user_key}"},
+            )
+
+        self.assertEqual(other_response.status_code, 200)
+        self.assertIsNone(other_response.json()["request"])
 
     def test_register_image_queue_request_enforces_per_user_limit(self) -> None:
         auth_key = "queued-user-key"

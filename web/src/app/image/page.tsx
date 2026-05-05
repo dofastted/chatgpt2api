@@ -46,9 +46,11 @@ import {
 } from "@/lib/image-data";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  fetchImageResponseResult,
   fetchImageQueueStatus,
   fetchQuotaSummary,
   generateImage,
+  type ImageGenerationResponse,
   uploadInputImage,
   type ImageModel,
   type ImageQueueItem,
@@ -391,6 +393,42 @@ function formatQueueProgressText(item: ImageQueueItem | null | undefined) {
     return "已完成";
   }
   return "正在同步排队状态";
+}
+
+function buildTerminalImagesFromGenerationResult(
+  turnId: string,
+  targetCount: number,
+  data: ImageGenerationResponse,
+): StoredImage[] {
+  const returnedItems = Array.isArray(data.data) ? data.data : [];
+  return Array.from({ length: targetCount }, (_, index) => {
+    const current =
+      returnedItems.find((item) => item.index === index) ??
+      returnedItems.find(
+        (item) =>
+          item.index === undefined && returnedItems.indexOf(item) === index,
+      );
+    if (current?.b64_json) {
+      return {
+        id: `${turnId}-${index}`,
+        status: "success" as const,
+        b64_json: current.b64_json,
+        mimeType:
+          String(current.mime_type || "").trim() ||
+          detectImageMimeType(current.b64_json),
+      };
+    }
+    const partialError = Array.isArray(data.partial_errors)
+      ? data.partial_errors.find((item) => item.index === index)
+      : undefined;
+    return {
+      id: `${turnId}-${index}`,
+      status: "error" as const,
+      error:
+        String(partialError?.error || "").trim() ||
+        `第 ${index + 1} 张没有返回图片数据`,
+    };
+  });
 }
 
 function createClientRequestId(prefix = "") {
@@ -775,6 +813,24 @@ function buildQueueFailureMessage(item: ImageQueueItem) {
     : "图片生成失败，请重新发送。";
 }
 
+function terminalizeLoadingImages(
+  turn: ImageConversationTurn,
+  message: string,
+): StoredImage[] {
+  const targetCount = clampImageCount(turn.count || turn.images?.length || 1);
+  return Array.from({ length: targetCount }, (_, index) => {
+    const existing = turn.images?.[index];
+    if (existing?.status === "success" || existing?.status === "error") {
+      return existing;
+    }
+    return {
+      id: existing?.id || `${turn.id}-${index}`,
+      status: "error" as const,
+      error: existing?.error || message,
+    };
+  });
+}
+
 function failTurnFromQueueStatus(
   turn: ImageConversationTurn,
   item: ImageQueueItem,
@@ -787,15 +843,78 @@ function failTurnFromQueueStatus(
     error: message,
     lastError: message,
     requestFinishedAt: turn.requestFinishedAt || finishedAt,
-    images: (turn.images || []).map((image) =>
-      image.status === "loading"
-        ? {
-            ...image,
-            status: "error" as const,
-            error: image.error || message,
-          }
-        : image,
-    ),
+    responseId: String(item.response_id || "").trim() || turn.responseId,
+    images: terminalizeLoadingImages(turn, message),
+  };
+}
+
+function completeTurnFromGenerationResult(
+  turn: ImageConversationTurn,
+  data: ImageGenerationResponse,
+  finishedAt = new Date().toISOString(),
+): ImageConversationTurn {
+  const targetCount = clampImageCount(turn.count || 1);
+  const nextImages = buildTerminalImagesFromGenerationResult(
+    turn.id,
+    targetCount,
+    data,
+  );
+  const successCount = nextImages.filter((item) => item.status === "success")
+    .length;
+  const failedCount = nextImages.length - successCount;
+  const returnedText = String(
+    data.text_content || data.copied_text || "",
+  ).trim();
+  const responseId = String(data.id || "").trim() || turn.responseId;
+  const errorMessage =
+    failedCount > 0 && !returnedText
+      ? successCount > 0
+        ? `其中 ${failedCount} 张生成失败`
+        : "生成图片失败"
+      : undefined;
+
+  return {
+    ...turn,
+    copiedText: returnedText || undefined,
+    images: nextImages,
+    status: failedCount > 0 && !returnedText ? "error" : "success",
+    error: errorMessage,
+    lastError: errorMessage,
+    requestFinishedAt: turn.requestFinishedAt || finishedAt,
+    responseId,
+  };
+}
+
+function failTurnFromRecovery(
+  turn: ImageConversationTurn,
+  message: string,
+  finishedAt = new Date().toISOString(),
+): ImageConversationTurn {
+  return {
+    ...turn,
+    status: "error",
+    error: message,
+    lastError: message,
+    requestFinishedAt: turn.requestFinishedAt || finishedAt,
+    images: terminalizeLoadingImages(turn, message),
+  };
+}
+
+function applyTurnsToConversation(
+  conversation: ImageConversation,
+  turns: ImageConversationTurn[],
+) {
+  const latestTurn = turns[turns.length - 1];
+  return {
+    ...conversation,
+    turns,
+    status: latestTurn?.status,
+    error: latestTurn?.error,
+    lastError: latestTurn?.lastError,
+    requestFinishedAt: latestTurn?.requestFinishedAt,
+    images: latestTurn?.images,
+    responseId: latestTurn?.responseId,
+    copiedText: latestTurn?.copiedText,
   };
 }
 
@@ -1478,8 +1597,22 @@ export default function ImagePage() {
             ).values(),
           );
           const baseSnapshot = snapshots.find((snapshot) => snapshot) || null;
-          const terminalItems = uniqueItems.filter(
-            (item) => item.status === "failed" || item.status === "rejected",
+          const pendingRequestIds = new Set(
+            conversationsRef.current
+              .flatMap((conversation) => getConversationTurns(conversation))
+              .filter((turn) => isPendingTurnStatus(turn.status))
+              .map((turn) => String(turn.queueRequestId || "").trim())
+              .filter(Boolean),
+          );
+          const failedTerminalItems = uniqueItems.filter(
+            (item) =>
+              pendingRequestIds.has(item.request_id) &&
+              (item.status === "failed" || item.status === "rejected"),
+          );
+          const finishedItems = uniqueItems.filter(
+            (item) =>
+              pendingRequestIds.has(item.request_id) &&
+              item.status === "finished",
           );
           setQueueStatus(
             baseSnapshot
@@ -1496,9 +1629,42 @@ export default function ImagePage() {
                 }
               : null,
           );
-          if (terminalItems.length > 0 && conversationScope) {
-            const terminalItemsByRequestId = new Map(
-              terminalItems.map((item) => [item.request_id, item]),
+          const finishedItemsByRequestId = new Map(
+            finishedItems.map((item) => [item.request_id, item]),
+          );
+          const recoveryResults = new Map<
+            string,
+            {
+              data?: ImageGenerationResponse;
+              error?: string;
+              responseId?: string;
+            }
+          >();
+          for (const item of finishedItems) {
+            const responseId = String(item.response_id || "").trim();
+            if (!responseId) {
+              recoveryResults.set(item.request_id, {
+                error: "图片请求已完成，但缺少 response_id，无法恢复结果。",
+              });
+              continue;
+            }
+            try {
+              const data = await fetchImageResponseResult(responseId);
+              recoveryResults.set(item.request_id, { data, responseId });
+            } catch (error) {
+              recoveryResults.set(item.request_id, {
+                responseId,
+                error:
+                  error instanceof Error ? error.message : "恢复图片结果失败",
+              });
+            }
+          }
+          if (
+            (failedTerminalItems.length > 0 || recoveryResults.size > 0) &&
+            conversationScope
+          ) {
+            const failedItemsByRequestId = new Map(
+              failedTerminalItems.map((item) => [item.request_id, item]),
             );
             const finishedAt = new Date().toISOString();
             const nextConversations = conversationsRef.current.map(
@@ -1506,26 +1672,46 @@ export default function ImagePage() {
                 let changed = false;
                 const turns = getConversationTurns(conversation).map((turn) => {
                   const requestId = String(turn.queueRequestId || "").trim();
-                  const terminalItem = terminalItemsByRequestId.get(requestId);
-                  if (!terminalItem || !isPendingTurnStatus(turn.status)) {
+                  const failedItem = failedItemsByRequestId.get(requestId);
+                  if (failedItem && isPendingTurnStatus(turn.status)) {
+                    changed = true;
+                    return failTurnFromQueueStatus(turn, failedItem, finishedAt);
+                  }
+
+                  const recovery = recoveryResults.get(requestId);
+                  const finishedItem = finishedItemsByRequestId.get(requestId);
+                  if (
+                    !recovery ||
+                    !finishedItem ||
+                    !isPendingTurnStatus(turn.status)
+                  ) {
                     return turn;
                   }
                   changed = true;
-                  return failTurnFromQueueStatus(turn, terminalItem, finishedAt);
+                  const turnWithResponseId = {
+                    ...turn,
+                    responseId:
+                      recovery.responseId ||
+                      String(finishedItem.response_id || "").trim() ||
+                      turn.responseId,
+                  };
+                  if (recovery.data) {
+                    return completeTurnFromGenerationResult(
+                      turnWithResponseId,
+                      recovery.data,
+                      finishedAt,
+                    );
+                  }
+                  return failTurnFromRecovery(
+                    turnWithResponseId,
+                    recovery.error || "恢复图片结果失败",
+                    finishedAt,
+                  );
                 });
                 if (!changed) {
                   return conversation;
                 }
-                const latestTurn = turns[turns.length - 1];
-                return {
-                  ...conversation,
-                  turns,
-                  status: latestTurn?.status,
-                  error: latestTurn?.error,
-                  lastError: latestTurn?.lastError,
-                  requestFinishedAt: latestTurn?.requestFinishedAt,
-                  images: latestTurn?.images,
-                };
+                return applyTurnsToConversation(conversation, turns);
               },
             );
             const changedConversations = nextConversations.filter(
@@ -1905,45 +2091,30 @@ export default function ImagePage() {
         clientConversationId: conversationId,
         previousResponseId,
         size: targetSize,
+        onResponseId: (responseId) => {
+          void updateConversation(conversationRecordId, (current) =>
+            updateConversationTurn(
+              current ?? draftConversation,
+              turnId,
+              (turn) => ({
+                ...turn,
+                responseId: String(responseId || "").trim() || turn.responseId,
+              }),
+            ),
+          );
+        },
       });
-      const returnedItems = Array.isArray(data.data) ? data.data : [];
       if (data.billing) {
         setAvailableQuota(
           Math.max(0, Number(data.billing.remaining_quota || 0)),
         );
       }
-      const nextImages: StoredImage[] = Array.from(
-        { length: targetCount },
-        (_, index) => {
-          const current =
-            returnedItems.find((item) => item.index === index) ??
-            returnedItems.find(
-              (item) =>
-                item.index === undefined &&
-                returnedItems.indexOf(item) === index,
-            );
-          if (current?.b64_json) {
-            return {
-              id: `${turnId}-${index}`,
-              status: "success",
-              b64_json: current.b64_json,
-              mimeType:
-                String(current.mime_type || "").trim() ||
-                detectImageMimeType(current.b64_json),
-            };
-          }
-          const partialError = Array.isArray(data.partial_errors)
-            ? data.partial_errors.find((item) => item.index === index)
-            : undefined;
-          return {
-            id: `${turnId}-${index}`,
-            status: "error",
-            error:
-              String(partialError?.error || "").trim() ||
-              `第 ${index + 1} 张没有返回图片数据`,
-          };
-        },
+      const completedTurn = completeTurnFromGenerationResult(
+        draftTurn,
+        data,
+        new Date().toISOString(),
       );
+      const nextImages = completedTurn.images;
 
       const successCount = nextImages.filter(
         (item) => item.status === "success",
@@ -1961,22 +2132,7 @@ export default function ImagePage() {
         updateConversationTurn(
           current ?? draftConversation,
           turnId,
-          (turn) => ({
-            ...turn,
-            copiedText: returnedText || undefined,
-            images: nextImages,
-            status: failedCount > 0 && !returnedText ? "error" : "success",
-            error:
-              failedCount > 0 && !returnedText
-                ? `其中 ${failedCount} 张生成失败`
-                : undefined,
-            lastError:
-              failedCount > 0 && !returnedText
-                ? `其中 ${failedCount} 张生成失败`
-                : undefined,
-            requestFinishedAt: new Date().toISOString(),
-            responseId: String(data.id || "").trim() || turn.responseId,
-          }),
+          (turn) => completeTurnFromGenerationResult(turn, data),
         ),
       );
       await loadQuota();
@@ -1992,20 +2148,13 @@ export default function ImagePage() {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "生成图片失败";
-      await persistConversation({
-        ...draftConversation,
-        turns: getConversationTurns(draftConversation).map((turn) =>
-          turn.id === turnId
-            ? {
-                ...turn,
-                status: "error",
-                error: message,
-                lastError: message,
-                requestFinishedAt: new Date().toISOString(),
-              }
-            : turn,
+      await updateConversation(conversationRecordId, (current) =>
+        updateConversationTurn(
+          current ?? draftConversation,
+          turnId,
+          (turn) => failTurnFromRecovery(turn, message),
         ),
-      });
+      );
       toast.error(message);
     } finally {
       activeGenerationKeys.delete(activeGenerationKey);

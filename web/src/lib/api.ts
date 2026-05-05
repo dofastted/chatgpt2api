@@ -47,6 +47,16 @@ export type ImageQueueItem = {
   started_at?: string | null;
   finished_at?: string | null;
   error?: string | null;
+  response_id?: string | null;
+  requested_count?: number | null;
+  succeeded_count?: number | null;
+  failed_count?: number | null;
+  charged_quota?: number | null;
+  remaining_quota?: number | null;
+  http_status?: number | null;
+  queue_wait_ms?: number | null;
+  running_ms?: number | null;
+  total_ms?: number | null;
 };
 
 export type Account = {
@@ -854,6 +864,15 @@ function isResponsesStreamEventData(value: unknown): value is ResponsesStreamEve
 }
 
 async function readResponsesImageGenerationStream(response: Response) {
+  return readResponsesImageGenerationStreamWithCallbacks(response);
+}
+
+async function readResponsesImageGenerationStreamWithCallbacks(
+  response: Response,
+  options: {
+    onResponseId?: (responseId: string) => void;
+  } = {},
+) {
   const reader = response.body?.getReader();
   if (!reader) {
     throw new Error("响应流不可用");
@@ -884,8 +903,20 @@ async function readResponsesImageGenerationStream(response: Response) {
     if (!isResponsesStreamEventData(parsed.data)) {
       return;
     }
+    if (parsed.event === "response.created") {
+      const createdResponse = parsed.data.response as { id?: string } | undefined;
+      const responseId = String(createdResponse?.id || "").trim();
+      if (responseId) {
+        options.onResponseId?.(responseId);
+      }
+      return;
+    }
     if (parsed.event === "response.completed") {
       completedPayload = parsed.data.response || null;
+      const responseId = String(completedPayload?.id || "").trim();
+      if (responseId) {
+        options.onResponseId?.(responseId);
+      }
       return;
     }
     if (
@@ -938,6 +969,7 @@ export async function generateImage(
     clientConversationId?: string | null;
     previousResponseId?: string | null;
     size?: string | null;
+    onResponseId?: (responseId: string) => void;
     headers?: Record<string, string>;
   } = {},
 ) {
@@ -985,7 +1017,24 @@ export async function generateImage(
     headers,
     body: JSON.stringify(body),
   });
-  const payload = await readResponsesImageGenerationStream(response);
+  const payload = await readResponsesImageGenerationStreamWithCallbacks(response, {
+    onResponseId: options.onResponseId,
+  });
+  const responseId = String(payload.id || "").trim();
+  if (responseId) {
+    options.onResponseId?.(responseId);
+  }
+  return normalizeResponsesImageGenerationResponse(payload);
+}
+
+export async function fetchImageResponseResult(responseId: string) {
+  const normalizedId = String(responseId || "").trim();
+  if (!normalizedId) {
+    throw new Error("缺少 response_id");
+  }
+  const payload = await httpRequest<ResponsesImageGenerationResponse>(
+    `/v1/responses/${encodeURIComponent(normalizedId)}`,
+  );
   return normalizeResponsesImageGenerationResponse(payload);
 }
 

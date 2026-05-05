@@ -421,6 +421,30 @@ def reconcile_stale_image_request_records() -> int:
     )
 
 
+def enrich_queue_request_payload_from_record(
+        request_payload: dict[str, object],
+        record: dict[str, object] | None,
+) -> dict[str, object]:
+    if not record:
+        return request_payload
+    next_payload = dict(request_payload)
+    for key in (
+            "response_id",
+            "requested_count",
+            "succeeded_count",
+            "failed_count",
+            "charged_quota",
+            "remaining_quota",
+            "http_status",
+            "queue_wait_ms",
+            "running_ms",
+            "total_ms",
+    ):
+        if record.get(key) is not None:
+            next_payload[key] = record.get(key)
+    return next_payload
+
+
 def extract_image_result_items(result: dict[str, object], *, request_index: int | None = None) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for item in list(result.get("data") or []):
@@ -1624,29 +1648,29 @@ def create_app() -> FastAPI:
         if request_id and snapshot.get("request"):
             record = image_request_log_service.get_record(request_id)
             if record and record.get("owner_id") == owner_id:
-                request_payload = dict(snapshot["request"] or {})
-                for key in ("queue_wait_ms", "running_ms", "total_ms"):
-                    request_payload[key] = record.get(key)
-                snapshot["request"] = request_payload
+                snapshot["request"] = enrich_queue_request_payload_from_record(
+                    dict(snapshot["request"] or {}),
+                    record,
+                )
         elif request_id:
             record = image_request_log_service.get_record(request_id)
             if record and record.get("owner_id") == owner_id:
                 record_status = str(record.get("status") or "").strip()
                 if record_status in {"finished", "failed", "rejected"}:
-                    request_payload = {
-                        "request_id": request_id,
-                        "title": str(record.get("prompt_preview") or "").strip(),
-                        "status": record_status,
-                        "position": None,
-                        "ahead": None,
-                        "created_at": record.get("accepted_at") or record.get("created_at"),
-                        "started_at": record.get("started_at"),
-                        "finished_at": record.get("finished_at"),
-                        "error": record.get("error_message"),
-                        "queue_wait_ms": record.get("queue_wait_ms"),
-                        "running_ms": record.get("running_ms"),
-                        "total_ms": record.get("total_ms"),
-                    }
+                    request_payload = enrich_queue_request_payload_from_record(
+                        {
+                            "request_id": request_id,
+                            "title": str(record.get("prompt_preview") or "").strip(),
+                            "status": record_status,
+                            "position": None,
+                            "ahead": None,
+                            "created_at": record.get("accepted_at") or record.get("created_at"),
+                            "started_at": record.get("started_at"),
+                            "finished_at": record.get("finished_at"),
+                            "error": record.get("error_message"),
+                        },
+                        record,
+                    )
                     snapshot["request"] = request_payload
                     snapshot["items"] = [*list(snapshot.get("items") or []), request_payload]
         return snapshot

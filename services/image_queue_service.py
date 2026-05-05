@@ -260,7 +260,9 @@ class ImageQueueService:
             )
             request_ticket = None
             if normalized_request_id:
-                request_ticket = self._tickets.get(normalized_request_id) or self._recent.get(normalized_request_id)
+                candidate_ticket = self._tickets.get(normalized_request_id) or self._recent.get(normalized_request_id)
+                if candidate_ticket is not None and candidate_ticket.auth_token == normalized_auth_token:
+                    request_ticket = candidate_ticket
             return {
                 "limits": {
                     "per_user_active": self.PER_USER_ACTIVE_LIMIT,
