@@ -50,7 +50,8 @@ PURCHASE_QUOTA_PER_ORDER = 20
 PURCHASE_LDC_COST_PER_ORDER = 20
 DEFAULT_USER_KEY_PRICING = dict(user_key_service.DEFAULT_PRICING)
 ENABLED_IMAGE_MODELS = ("gpt-image-2", "gpt-image-2-2K", "gpt-image-2-4K")
-MAX_IMAGES_PER_REQUEST = 2
+MAX_IMAGES_PER_REQUEST = 10
+IMAGE_BATCH_CONCURRENCY = 3
 DEFAULT_IMAGE_MODEL = ENABLED_IMAGE_MODELS[0]
 DEFAULT_RESPONSES_MODEL = "gpt-5"
 MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024
@@ -478,6 +479,65 @@ async def await_image_generation_payload(awaitable):
         raise build_image_generation_timeout_error() from exc
 
 
+@dataclass
+class ImageBatchSlotResult:
+    index: int
+    result: dict[str, object] | None = None
+    error: Exception | None = None
+
+
+async def generate_single_image_slot(
+        *,
+        service: BackendService,
+        prompt: str,
+        model: str,
+        request_index: int,
+        input_images: list[dict[str, str]] | None,
+        queue_request_id: str | None,
+        size: str | None,
+) -> ImageBatchSlotResult:
+    try:
+        current_result = await run_in_threadpool(
+            service.generate_with_pool,
+            prompt,
+            model,
+            1,
+            input_images,
+            queue_request_id,
+            size,
+        )
+        return ImageBatchSlotResult(index=request_index, result=current_result)
+    except (ImageGenerationError, HTTPException) as exc:
+        return ImageBatchSlotResult(index=request_index, error=exc)
+
+
+async def generate_image_slots_with_limit(
+        *,
+        service: BackendService,
+        prompt: str,
+        model: str,
+        requested_count: int,
+        input_images: list[dict[str, str]] | None,
+        queue_request_id: str | None,
+        size: str | None,
+) -> list[ImageBatchSlotResult]:
+    semaphore = asyncio.Semaphore(max(1, min(IMAGE_BATCH_CONCURRENCY, requested_count)))
+
+    async def run_slot(request_index: int) -> ImageBatchSlotResult:
+        async with semaphore:
+            return await generate_single_image_slot(
+                service=service,
+                prompt=prompt,
+                model=model,
+                request_index=request_index,
+                input_images=input_images,
+                queue_request_id=queue_request_id,
+                size=size,
+            )
+
+    return await asyncio.gather(*(run_slot(request_index) for request_index in range(requested_count)))
+
+
 async def generate_image_payload(
         *,
         service: BackendService,
@@ -534,17 +594,29 @@ async def generate_image_payload(
             copied_text = ""
             text_content = ""
             first_error: Exception | None = None
-            for request_index in range(requested_count):
-                try:
-                    current_result = await run_in_threadpool(
-                        service.generate_with_pool,
-                        prompt,
-                        model,
-                        1,
-                        input_images,
-                        queue_request_id,
-                        size,
+            slot_results = await generate_image_slots_with_limit(
+                service=service,
+                prompt=prompt,
+                model=model,
+                requested_count=requested_count,
+                input_images=input_images,
+                queue_request_id=queue_request_id,
+                size=size,
+            )
+            for slot_result in sorted(slot_results, key=lambda item: item.index):
+                request_index = slot_result.index
+                if slot_result.error is not None:
+                    if first_error is None:
+                        first_error = slot_result.error
+                    partial_errors.append(
+                        {
+                            "index": request_index,
+                            "error": generation_error_to_text(slot_result.error),
+                        }
                     )
+                    continue
+                current_result = slot_result.result or {}
+                try:
                     current_items = extract_image_result_items(current_result, request_index=request_index)[:1]
                     current_text = extract_generated_text(current_result)
                     if not current_items and not current_text:
@@ -562,7 +634,7 @@ async def generate_image_payload(
                             }
                         )
                     created = int(current_result.get("created") or created)
-                except (ImageGenerationError, HTTPException) as exc:
+                except ImageGenerationError as exc:
                     if first_error is None:
                         first_error = exc
                     partial_errors.append(
@@ -1149,17 +1221,29 @@ def iter_responses_stream(payload: dict[str, object], *, include_start: bool = T
         yield emit("response.output_item.added", output_index=output_index, item=added_item)
         if str(output_item.get("type") or "").strip() == "image_generation_call":
             item_id = str(output_item.get("id") or "")
+            request_index = (
+                int(output_item.get("index"))
+                if output_item.get("index") is not None
+                else output_index
+            )
             yield emit("response.image_generation_call.in_progress", output_index=output_index, item_id=item_id)
             yield emit("response.image_generation_call.generating", output_index=output_index, item_id=item_id)
             yield emit(
                 "response.image_generation_call.completed",
                 output_index=output_index,
+                index=request_index,
                 item_id=item_id,
                 result=str(output_item.get("result") or ""),
                 item=clone_json_value(output_item),
             )
 
-        yield emit("response.output_item.done", output_index=output_index, item=output_item)
+        output_item_done_extra: dict[str, object] = {
+            "output_index": output_index,
+            "item": output_item,
+        }
+        if output_item.get("index") is not None:
+            output_item_done_extra["index"] = int(output_item.get("index"))
+        yield emit("response.output_item.done", **output_item_done_extra)
 
     yield emit("response.completed", response=clone_json_value(payload))
     yield format_sse_event(None, "[DONE]")
@@ -1257,6 +1341,7 @@ def iter_images_stream(
         image_b64 = str((item or {}).get("b64_json") or "").strip()
         if not image_b64:
             continue
+        request_index = int((item or {}).get("index")) if (item or {}).get("index") is not None else image_index
         item_output_format = normalize_output_format(output_format, (item or {}).get("mime_type"))
         partial_count = max(0, int(partial_images or 0))
         if partial_count > 0:
@@ -1270,6 +1355,7 @@ def iter_images_stream(
                     "output_format": item_output_format,
                     "quality": str(quality or "auto"),
                     "size": str(size or "auto"),
+                    "index": request_index,
                     "partial_image_index": image_index,
                 },
             )
@@ -1281,6 +1367,7 @@ def iter_images_stream(
             "output_format": item_output_format,
             "quality": str(quality or "auto"),
             "size": str(size or "auto"),
+            "index": request_index,
         }
         if payload.get("usage") is not None:
             completed_event["usage"] = payload.get("usage")

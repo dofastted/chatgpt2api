@@ -86,11 +86,13 @@ import {
   formatImagePreferenceLabel,
   formatImageSizeLabel,
   IMAGE_ASPECT_RATIO_PRESETS,
+  IMAGE_RESOLUTION_AUTO,
   IMAGE_RESOLUTION_PRESETS,
   normalizeImageGenerationPreference,
+  resolveEffectiveImageGenerationPreference,
   type ImageAspectRatioPreset,
   type ImageGenerationPreference,
-  type ImageResolutionPreset,
+  type ImageResolutionPreference,
 } from "@/lib/image-size";
 
 const imageModelLabels: Record<ImageModel, string> = {
@@ -104,11 +106,8 @@ const DEFAULT_IMAGE_PRICING: Record<ImageModel, number> = {
   "gpt-image-2-2K": 2,
   "gpt-image-2-4K": 8,
 };
-const MAX_IMAGES_PER_REQUEST = 2;
-const IMAGE_COUNT_OPTIONS = Array.from(
-  { length: MAX_IMAGES_PER_REQUEST },
-  (_, index) => String(index + 1),
-);
+const MAX_IMAGES_PER_REQUEST = 10;
+const PRIMARY_IMAGE_COUNT_OPTIONS = ["1", "2", "4", "10"];
 const MAX_INPUT_IMAGE_BYTES = 8 * 1024 * 1024;
 const activeGenerationKeys = new Set<string>();
 const GALLERY_PROMPT_SUGGESTION_COUNT = 8;
@@ -241,8 +240,12 @@ function isPendingTurnStatus(status: ImageConversationTurn["status"]) {
 
 function resolveImageModelFromPreference(
   preference: ImageGenerationPreference,
+  prompt?: string | null,
 ): ImageModel {
-  const normalized = normalizeImageGenerationPreference(preference);
+  const normalized = resolveEffectiveImageGenerationPreference(
+    preference,
+    prompt,
+  );
   if (normalized.resolution === "2k") {
     return "gpt-image-2-2K";
   }
@@ -250,6 +253,63 @@ function resolveImageModelFromPreference(
     return "gpt-image-2-4K";
   }
   return "gpt-image-2";
+}
+
+function clampImageCount(value: string | number | null | undefined) {
+  const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.max(1, Math.min(MAX_IMAGES_PER_REQUEST, parsed));
+}
+
+function resolveSizeDraftMode(preference: ImageGenerationPreference): SizeDraftMode {
+  const normalized = normalizeImageGenerationPreference(preference);
+  if (
+    normalized.resolution === IMAGE_RESOLUTION_AUTO &&
+    normalized.ratio === "auto"
+  ) {
+    return "auto";
+  }
+  if (normalized.resolution === IMAGE_RESOLUTION_AUTO) {
+    return "ratio";
+  }
+  if (normalized.ratio === "auto") {
+    return "resolution";
+  }
+  return "resolution";
+}
+
+function normalizeImagePreferenceForMode(
+  mode: SizeDraftMode,
+  preference: ImageGenerationPreference,
+): ImageGenerationPreference {
+  const normalized = normalizeImageGenerationPreference(preference);
+  if (mode === "auto") {
+    return { ...DEFAULT_IMAGE_GENERATION_PREFERENCE };
+  }
+  if (mode === "resolution") {
+    return {
+      resolution:
+        normalized.resolution === IMAGE_RESOLUTION_AUTO
+          ? "1k"
+          : normalized.resolution,
+      ratio: "auto",
+    };
+  }
+  if (mode === "ratio") {
+    return {
+      resolution: IMAGE_RESOLUTION_AUTO,
+      ratio: normalized.ratio === "auto" ? "1:1" : normalized.ratio,
+    };
+  }
+  return {
+    resolution:
+      normalized.resolution === IMAGE_RESOLUTION_AUTO
+        ? "1k"
+        : normalized.resolution,
+    ratio: "auto",
+  };
 }
 
 function downloadBase64Image(
@@ -289,9 +349,11 @@ type PendingInputImage = {
 };
 
 type SizeDialogState = {
-  resolution: ImageResolutionPreset;
+  resolution: ImageResolutionPreference;
   ratio: ImageAspectRatioPreset;
 };
+
+type SizeDraftMode = "auto" | "resolution" | "ratio";
 
 type ImageQueueStatusSnapshot = Awaited<
   ReturnType<typeof fetchImageQueueStatus>
@@ -772,6 +834,7 @@ export default function ImagePage() {
   const [isDesktopViewport, setIsDesktopViewport] = useState(false);
   const [isInspirationRailHidden, setIsInspirationRailHidden] =
     useState(false);
+  const [sizeDraftMode, setSizeDraftMode] = useState<SizeDraftMode>("auto");
   const [sizeDraft, setSizeDraft] = useState<SizeDialogState>({
     ...DEFAULT_IMAGE_GENERATION_PREFERENCE,
   });
@@ -984,8 +1047,7 @@ export default function ImagePage() {
   }, [imagePrompt]);
 
   const parsedCount = useMemo(
-    () =>
-      Math.max(1, Math.min(MAX_IMAGES_PER_REQUEST, Number(imageCount) || 1)),
+    () => clampImageCount(imageCount),
     [imageCount],
   );
   const effectivePricing = useMemo(
@@ -993,8 +1055,17 @@ export default function ImagePage() {
     [currentPricing],
   );
   const imageModel = useMemo(
-    () => resolveImageModelFromPreference(imagePreference),
-    [imagePreference],
+    () => resolveImageModelFromPreference(imagePreference, imagePrompt),
+    [imagePreference, imagePrompt],
+  );
+  const effectiveImagePreference = useMemo(
+    () =>
+      resolveEffectiveImageGenerationPreference(imagePreference, imagePrompt),
+    [imagePreference, imagePrompt],
+  );
+  const normalizedSizeDraft = useMemo(
+    () => normalizeImagePreferenceForMode(sizeDraftMode, sizeDraft),
+    [sizeDraftMode, sizeDraft],
   );
   const currentUnitCost = useMemo(
     () => Math.max(0, Number(effectivePricing[imageModel] || 0)),
@@ -1172,8 +1243,8 @@ export default function ImagePage() {
       : interruptedRequestCount > 0
         ? `${interruptedRequestCount} 个旧请求需要重置`
         : inputImage
-          ? "已附加参考图，Enter 发送"
-          : "Enter 发送，Shift + Enter 换行";
+          ? `已附加参考图，${formatImagePreferenceLabel(effectiveImagePreference)}`
+          : `${formatImagePreferenceLabel(effectiveImagePreference)}，Enter 发送`;
   const sidebarTransition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
@@ -1292,12 +1363,14 @@ export default function ImagePage() {
         const normalized = normalizeImageGenerationPreference(preference);
         setImagePreference(normalized);
         setSizeDraft(normalized);
+        setSizeDraftMode(resolveSizeDraftMode(normalized));
         setImageSize(calculateImageSizeFromPreference(normalized));
       } catch {
         if (!cancelled) {
           const fallback = DEFAULT_IMAGE_GENERATION_PREFERENCE;
           setImagePreference(fallback);
           setSizeDraft(fallback);
+          setSizeDraftMode(resolveSizeDraftMode(fallback));
           setImageSize(calculateImageSizeFromPreference(fallback));
         }
       }
@@ -1630,18 +1703,20 @@ export default function ImagePage() {
 
   const handleOpenImagePreferenceDialog = () => {
     setSizeDraft(imagePreference);
+    setSizeDraftMode(resolveSizeDraftMode(imagePreference));
     setIsSizeDialogOpen(true);
   };
 
   const handleApplyImageSize = async () => {
     try {
-      const nextPreference = normalizeImageGenerationPreference(sizeDraft);
+      const nextPreference = normalizeImagePreferenceForMode(sizeDraftMode, sizeDraft);
       const nextSize = calculateImageSizeFromPreference(nextPreference);
       if (conversationScope) {
         await saveImageGenerationPreference(conversationScope, nextPreference);
       }
       setImagePreference(nextPreference);
       setSizeDraft(nextPreference);
+      setSizeDraftMode(resolveSizeDraftMode(nextPreference));
       setImageSize(nextSize);
       setIsSizeDialogOpen(false);
       toast.success("画面配置已保存");
@@ -1708,16 +1783,19 @@ export default function ImagePage() {
     }
     const prompt = String(retry?.turn.prompt || imagePrompt).trim();
     const currentInputImage = retry?.turn.inputImage || inputImage;
-    const targetModel = retry?.turn.model || imageModel;
+    const targetPreference = normalizeImageGenerationPreference(imagePreference);
+    const targetModel =
+      retry?.turn.model || resolveImageModelFromPreference(targetPreference, prompt);
     const targetCount = Math.max(
       1,
       Math.min(
         MAX_IMAGES_PER_REQUEST,
-        Number(retry?.turn.count || parsedCount) || 1,
+        clampImageCount(retry?.turn.count || parsedCount),
       ),
     );
     const targetSize =
-      String(retry?.turn.size || imageSize || "auto").trim() || "auto";
+      String(retry?.turn.size || calculateImageSizeFromPreference(targetPreference) || imageSize || "auto").trim() ||
+      "auto";
     const targetUnitCost = Math.max(
       0,
       Number(effectivePricing[targetModel] || 0),
@@ -2259,7 +2337,7 @@ export default function ImagePage() {
                 <span className="hidden sm:inline">配置</span>
               </Button>
               <div className="hidden min-w-0 truncate text-sm text-muted-foreground md:block">
-                {formatImagePreferenceLabel(imagePreference)}
+                {formatImagePreferenceLabel(effectiveImagePreference)}
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
@@ -2696,8 +2774,8 @@ export default function ImagePage() {
                   </Link>
                 </Button>
 
-                <div className="flex items-center gap-1 rounded-full border border-border bg-background p-1">
-                  {IMAGE_COUNT_OPTIONS.map((count) => {
+                <div className="flex shrink-0 items-center gap-1 rounded-2xl border border-border bg-background p-1">
+                  {PRIMARY_IMAGE_COUNT_OPTIONS.map((count) => {
                     const active = imageCount === count;
                     return (
                       <button
@@ -2706,7 +2784,7 @@ export default function ImagePage() {
                         aria-pressed={active}
                         onClick={() => setImageCount(count)}
                         className={cn(
-                          "h-8 cursor-pointer rounded-full px-3 text-sm transition focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none",
+                          "h-8 min-w-9 cursor-pointer rounded-full px-2 text-sm transition focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none",
                           active
                             ? "bg-primary text-primary-foreground"
                             : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -2716,6 +2794,27 @@ export default function ImagePage() {
                       </button>
                     );
                   })}
+                  <label className="sr-only" htmlFor="image-count-input">
+                    生成图片张数
+                  </label>
+                  <input
+                    id="image-count-input"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={MAX_IMAGES_PER_REQUEST}
+                    value={imageCount}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) => setImageCount(event.target.value)}
+                    onBlur={() => setImageCount(String(parsedCount))}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    className="h-8 w-14 rounded-full border border-border bg-background px-2 text-center text-sm text-foreground outline-none transition focus:border-ring focus:ring-4 focus:ring-ring/20"
+                    aria-label={`生成图片张数，范围 1 到 ${MAX_IMAGES_PER_REQUEST}`}
+                  />
                 </div>
 
                 <div
@@ -2823,7 +2922,52 @@ export default function ImagePage() {
             <div>
               <div className="text-sm font-semibold">画面配置</div>
               <div className="mt-1 text-xs text-muted-foreground">
-                当前：{formatImagePreferenceLabel(imagePreference)}
+                当前：{formatImagePreferenceLabel(effectiveImagePreference)}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs text-muted-foreground">控制方式</div>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { value: "auto" as const, label: "自动" },
+                  { value: "resolution" as const, label: "分辨率" },
+                  { value: "ratio" as const, label: "比例" },
+                ].map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    onClick={() => {
+                      setSizeDraftMode(item.value);
+                      setSizeDraft((prev) => {
+                        if (item.value === "auto") {
+                          return { ...DEFAULT_IMAGE_GENERATION_PREFERENCE };
+                        }
+                        if (item.value === "resolution") {
+                          return {
+                            resolution:
+                              prev.resolution === IMAGE_RESOLUTION_AUTO
+                                ? "1k"
+                                : prev.resolution,
+                            ratio: "auto",
+                          };
+                        }
+                        return {
+                          resolution: IMAGE_RESOLUTION_AUTO,
+                          ratio: prev.ratio === "auto" ? "1:1" : prev.ratio,
+                        };
+                      });
+                    }}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-sm transition",
+                      sizeDraftMode === item.value
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-background text-foreground hover:bg-muted",
+                    )}
+                  >
+                    {item.label}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -2834,15 +2978,18 @@ export default function ImagePage() {
                   <button
                     key={preset.value}
                     type="button"
-                    onClick={() =>
+                    disabled={sizeDraftMode !== "resolution"}
+                    onClick={() => {
+                      setSizeDraftMode("resolution");
                       setSizeDraft((prev) => ({
-                        ...prev,
                         resolution: preset.value,
-                      }))
-                    }
+                        ratio: "auto",
+                      }));
+                    }}
                     className={cn(
-                      "rounded-lg border px-3 py-2 text-sm transition",
-                      sizeDraft.resolution === preset.value
+                      "rounded-lg border px-3 py-2 text-sm transition disabled:cursor-not-allowed disabled:opacity-45",
+                      sizeDraftMode === "resolution" &&
+                        sizeDraft.resolution === preset.value
                         ? "border-primary bg-primary text-primary-foreground"
                         : "border-border bg-background text-foreground hover:bg-muted",
                     )}
@@ -2856,19 +3003,24 @@ export default function ImagePage() {
             <div className="space-y-2">
               <div className="text-xs text-muted-foreground">图片比例</div>
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                {IMAGE_ASPECT_RATIO_PRESETS.map((preset) => (
+                {IMAGE_ASPECT_RATIO_PRESETS.filter(
+                  (preset) => preset.value !== "auto",
+                ).map((preset) => (
                   <button
                     key={preset.value}
                     type="button"
-                    onClick={() =>
+                    disabled={sizeDraftMode !== "ratio"}
+                    onClick={() => {
+                      setSizeDraftMode("ratio");
                       setSizeDraft((prev) => ({
-                        ...prev,
+                        resolution: IMAGE_RESOLUTION_AUTO,
                         ratio: preset.value,
-                      }))
-                    }
+                      }));
+                    }}
                     className={cn(
-                      "rounded-lg border px-3 py-2 text-sm transition",
-                      sizeDraft.ratio === preset.value
+                      "rounded-lg border px-3 py-2 text-sm transition disabled:cursor-not-allowed disabled:opacity-45",
+                      sizeDraftMode === "ratio" &&
+                        sizeDraft.ratio === preset.value
                         ? "border-primary bg-primary text-primary-foreground"
                         : "border-border bg-background text-foreground hover:bg-muted",
                     )}
@@ -2880,7 +3032,7 @@ export default function ImagePage() {
             </div>
 
             <div className="rounded-lg border border-border bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
-              本次将使用：{formatImagePreferenceLabel(sizeDraft)}
+              本次将使用：{formatImagePreferenceLabel(normalizedSizeDraft)}
             </div>
 
             <div className="flex justify-end gap-2">

@@ -1,15 +1,21 @@
 export const IMAGE_SIZE_AUTO = "auto";
+export const IMAGE_RESOLUTION_AUTO = "auto";
 
 const MIN_IMAGE_SIZE = 16;
 const MAX_IMAGE_SIZE = 4096;
 const DEFAULT_AREA = 1024 * 1024;
 
 export type ImageSizeMode = "auto" | "ratio" | "custom";
-export type ImageResolutionPreset = "1k" | "2k" | "4k";
+export type ImageResolutionPreset = typeof IMAGE_RESOLUTION_AUTO | "1k" | "2k" | "4k";
+export type ConcreteImageResolutionPreset = Exclude<
+  ImageResolutionPreset,
+  typeof IMAGE_RESOLUTION_AUTO
+>;
+export type ImageResolutionPreference = ImageResolutionPreset;
 export type ImageAspectRatioPreset = "auto" | "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
 
 export type ImageGenerationPreference = {
-  resolution: ImageResolutionPreset;
+  resolution: ImageResolutionPreference;
   ratio: ImageAspectRatioPreset;
 };
 
@@ -22,7 +28,7 @@ export type ImageSizeSelection = {
 };
 
 export const IMAGE_RESOLUTION_PRESETS: Array<{
-  value: ImageResolutionPreset;
+  value: ConcreteImageResolutionPreset;
   label: string;
   edge: number;
 }> = [
@@ -44,7 +50,7 @@ export const IMAGE_ASPECT_RATIO_PRESETS: Array<{
 ];
 
 export const DEFAULT_IMAGE_GENERATION_PREFERENCE: ImageGenerationPreference = {
-  resolution: "1k",
+  resolution: IMAGE_RESOLUTION_AUTO,
   ratio: "auto",
 };
 
@@ -100,8 +106,12 @@ export function normalizeImageGenerationPreference(
 ): ImageGenerationPreference {
   const candidate = value || {};
   const resolution =
+    candidate.resolution === IMAGE_RESOLUTION_AUTO
+      ? IMAGE_RESOLUTION_AUTO
+      : (
     IMAGE_RESOLUTION_PRESETS.find((item) => item.value === candidate.resolution)?.value ||
-    DEFAULT_IMAGE_GENERATION_PREFERENCE.resolution;
+    DEFAULT_IMAGE_GENERATION_PREFERENCE.resolution
+      );
   const ratio =
     IMAGE_ASPECT_RATIO_PRESETS.find((item) => item.value === candidate.ratio)?.value ||
     DEFAULT_IMAGE_GENERATION_PREFERENCE.ratio;
@@ -118,7 +128,10 @@ export function calculateImageSizeFromPreference(
   const preset = IMAGE_RESOLUTION_PRESETS.find(
     (item) => item.value === normalized.resolution,
   );
-  const edge = preset?.edge || IMAGE_RESOLUTION_PRESETS[0].edge;
+  if (!preset) {
+    return calculateImageSize(normalized.ratio);
+  }
+  const edge = preset.edge;
   const ratio = parseRatio(normalized.ratio);
   const landscape = ratio.width >= ratio.height;
   const width = landscape ? edge : Math.round((edge * ratio.width) / ratio.height);
@@ -131,13 +144,69 @@ export function formatImagePreferenceLabel(
 ) {
   const normalized = normalizeImageGenerationPreference(preference);
   const resolutionLabel =
-    IMAGE_RESOLUTION_PRESETS.find((item) => item.value === normalized.resolution)?.label ||
-    "1K";
+    normalized.resolution === IMAGE_RESOLUTION_AUTO
+      ? "自动分辨率"
+      : IMAGE_RESOLUTION_PRESETS.find((item) => item.value === normalized.resolution)?.label ||
+        "1K";
   const ratioLabel =
     IMAGE_ASPECT_RATIO_PRESETS.find((item) => item.value === normalized.ratio)?.label ||
-    "AUTO";
+    "自动";
   const size = calculateImageSizeFromPreference(normalized);
+  if (
+    normalized.resolution === IMAGE_RESOLUTION_AUTO &&
+    normalized.ratio === "auto"
+  ) {
+    return "自动";
+  }
   return size === IMAGE_SIZE_AUTO
-    ? `${resolutionLabel} · ${ratioLabel}`
+    ? `${resolutionLabel} · 自动尺寸`
     : `${resolutionLabel} · ${ratioLabel} · ${size}`;
+}
+
+export function inferImageResolutionPreferenceFromPrompt(
+  prompt: string | null | undefined,
+): ConcreteImageResolutionPreset | null {
+  const normalized = String(prompt || "")
+    .normalize("NFKC")
+    .toLowerCase();
+  const matches: Array<{ index: number; value: ConcreteImageResolutionPreset }> = [];
+  const patterns: Array<{ pattern: RegExp; value: ConcreteImageResolutionPreset }> = [
+    { pattern: /4\s*k/gu, value: "4k" },
+    { pattern: /4096/gu, value: "4k" },
+    { pattern: /3840/gu, value: "4k" },
+    { pattern: /(?:超清|高分辨率|高解析度|ultra\s*hd|ultra[-\s]*high\s*resolution|uhd)/gu, value: "4k" },
+    { pattern: /2\s*k/gu, value: "2k" },
+    { pattern: /2048/gu, value: "2k" },
+    { pattern: /1\s*k/gu, value: "1k" },
+    { pattern: /1024/gu, value: "1k" },
+  ];
+
+  for (const { pattern, value } of patterns) {
+    for (const match of normalized.matchAll(pattern)) {
+      matches.push({ index: match.index ?? 0, value });
+    }
+  }
+
+  if (matches.length === 0) {
+    return null;
+  }
+  matches.sort((a, b) => a.index - b.index);
+  return matches[matches.length - 1]?.value ?? null;
+}
+
+export function resolveEffectiveImageGenerationPreference(
+  preference: ImageGenerationPreference,
+  prompt: string | null | undefined,
+): ImageGenerationPreference {
+  const normalized = normalizeImageGenerationPreference(preference);
+  if (
+    normalized.resolution !== IMAGE_RESOLUTION_AUTO ||
+    normalized.ratio !== "auto"
+  ) {
+    return normalized;
+  }
+  const inferredResolution = inferImageResolutionPreferenceFromPrompt(prompt);
+  return inferredResolution
+    ? { ...normalized, resolution: inferredResolution }
+    : normalized;
 }
