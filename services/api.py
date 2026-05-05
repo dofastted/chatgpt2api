@@ -24,6 +24,7 @@ from services.config import DATA_DIR, config
 from services.data_management_service import data_management_service, start_backup_scheduler
 from services.backend_service import BackendService
 from services.chat_image.account_import import normalize_account_carrier
+from services.gallery_service import gallery_service
 from services.image_service import ImageGenerationError
 from services.image_size import normalize_image_size
 from services.image_queue_service import image_queue_service
@@ -198,6 +199,51 @@ class DataManagementSettingsRequest(BaseModel):
     save_image_conversations: bool | None = None
     save_logs: bool | None = None
     s3: dict[str, Any] | None = None
+
+
+class GalleryAssetRequest(BaseModel):
+    asset_id: str | None = None
+    id: str | None = None
+    kind: str | None = None
+    url: str
+    file_id: str | None = None
+    fileId: str | None = None
+    mime_type: str | None = None
+    mimeType: str | None = None
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    size_bytes: int | None = Field(default=None, ge=1)
+    sizeBytes: int | None = Field(default=None, ge=1)
+
+
+class GallerySubmissionRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    title: str | None = None
+    tags: list[str] | str | None = None
+    assets: list[GalleryAssetRequest] = Field(default_factory=list)
+    image_url: str | None = None
+    mime_type: str | None = None
+    source_conversation_id: str | None = None
+    source_turn_id: str | None = None
+    source_image_id: str | None = None
+
+
+class GalleryEventRequest(BaseModel):
+    event: str = Field(..., min_length=1)
+
+
+class AdminGalleryUpdateRequest(BaseModel):
+    action: str | None = None
+    status: str | None = None
+    visibility: bool | None = None
+    prompt: str | None = None
+    title: str | None = None
+    tags: list[str] | str | None = None
+    assets: list[GalleryAssetRequest] | None = None
+    image_url: str | None = None
+    mime_type: str | None = None
+    sort_order: int | None = None
+    is_pinned: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -2152,6 +2198,93 @@ def create_app() -> FastAPI:
     async def get_redeem_codes(authorization: str | None = Header(default=None)):
         require_admin_auth_key(authorization)
         return {"items": redeem_code_service.list_public_codes()}
+
+    @router.get("/api/gallery/public")
+    async def list_public_gallery(
+            authorization: str | None = Header(default=None),
+            limit: int = Query(default=120, ge=1, le=500),
+    ):
+        require_auth_key(authorization)
+        return {"items": gallery_service.list_public_items(limit=limit)}
+
+    @router.post("/api/gallery/{item_id}/events")
+    async def record_gallery_event(
+            item_id: str,
+            body: GalleryEventRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_auth_key(authorization)
+        try:
+            item = gallery_service.record_event(item_id, body.event)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "gallery item not found"})
+        return {"item": item}
+
+    @router.post("/api/gallery/submissions")
+    async def submit_gallery_item(
+            body: GallerySubmissionRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_auth_key(authorization)
+        try:
+            item = gallery_service.submit_item(
+                auth_token=extract_bearer_token(authorization),
+                payload=body.model_dump(exclude_none=True),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {"item": item}
+
+    @router.get("/api/admin/gallery")
+    async def list_admin_gallery(
+            authorization: str | None = Header(default=None),
+            status: str | None = Query(default=None),
+            limit: int = Query(default=200, ge=1, le=500),
+    ):
+        require_admin_auth_key(authorization)
+        return {
+            "items": gallery_service.list_admin_items(status=status, limit=limit),
+            "status": gallery_service.get_status(),
+        }
+
+    @router.patch("/api/admin/gallery/{item_id}")
+    async def update_admin_gallery_item(
+            item_id: str,
+            body: AdminGalleryUpdateRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        context = require_admin_auth_key(authorization)
+        reviewed_by = context.auth_type
+        try:
+            item = gallery_service.admin_update_item(
+                item_id,
+                body.model_dump(exclude_none=True),
+                reviewed_by=reviewed_by,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"error": "gallery item not found"}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {
+            "item": item,
+            "items": gallery_service.list_admin_items(),
+            "status": gallery_service.get_status(),
+        }
+
+    @router.delete("/api/admin/gallery/{item_id}")
+    async def delete_admin_gallery_item(
+            item_id: str,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        result = gallery_service.admin_delete_item(item_id)
+        return {
+            **result,
+            "items": gallery_service.list_admin_items(),
+            "status": gallery_service.get_status(),
+        }
 
     @router.get("/api/data-management/status")
     async def get_data_management_status(authorization: str | None = Header(default=None)):

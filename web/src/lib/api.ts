@@ -177,6 +177,87 @@ export type DataManagementStatus = {
   settings: DataManagementSettings;
 };
 
+export type GalleryItemStatus =
+  | "pending"
+  | "published"
+  | "rejected"
+  | "hidden"
+  | "deleted";
+
+export type GalleryItemSource = "seed" | "user_submission" | "admin";
+
+export type GalleryAsset = {
+  asset_id: string;
+  kind: string;
+  url: string;
+  file_id?: string | null;
+  mime_type?: string | null;
+  width?: number | null;
+  height?: number | null;
+  size_bytes?: number | null;
+  created_at?: string | null;
+};
+
+export type GalleryItem = {
+  id: string;
+  status: GalleryItemStatus;
+  visibility: boolean;
+  source: GalleryItemSource;
+  prompt: string;
+  prompt_preview: string;
+  title?: string | null;
+  tags: string[];
+  assets: GalleryAsset[];
+  cover_asset_id?: string | null;
+  sort_order: number;
+  is_pinned: boolean;
+  submitted_by_owner_id?: string | null;
+  submitted_at?: string | null;
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
+  created_at: string;
+  updated_at: string;
+  published_at?: string | null;
+  last_clicked_at?: string | null;
+  last_used_at?: string | null;
+  click_count: number;
+  use_count: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type GallerySubmissionPayload = {
+  prompt: string;
+  title?: string;
+  tags?: string[];
+  assets?: Array<{
+    url: string;
+    kind?: string;
+    mime_type?: string;
+    width?: number;
+    height?: number;
+    size_bytes?: number;
+  }>;
+  image_url?: string;
+  mime_type?: string;
+  source_conversation_id?: string;
+  source_turn_id?: string;
+  source_image_id?: string;
+};
+
+export type AdminGalleryUpdatePayload = {
+  action?: "approve" | "reject" | "hide" | "publish";
+  status?: GalleryItemStatus;
+  visibility?: boolean;
+  prompt?: string;
+  title?: string;
+  tags?: string[];
+  assets?: GallerySubmissionPayload["assets"];
+  image_url?: string;
+  mime_type?: string;
+  sort_order?: number;
+  is_pinned?: boolean;
+};
+
 type AccountListResponse = {
   items: Account[];
 };
@@ -192,6 +273,18 @@ type RedeemCodeListResponse = {
 type ProxyListResponse = {
   items: ProxyItem[];
   active_proxy_url?: string | null;
+};
+
+type GalleryListResponse = {
+  items: GalleryItem[];
+  status?: Record<string, number>;
+};
+
+type GalleryMutationResponse = {
+  item: GalleryItem;
+  items?: GalleryItem[];
+  status?: Record<string, number>;
+  removed?: number;
 };
 
 type AccountMutationResponse = {
@@ -554,6 +647,69 @@ export async function fetchProxies(options: { redirectOnUnauthorized?: boolean }
 
 export async function fetchRedeemCodes(options: { redirectOnUnauthorized?: boolean } = {}) {
   return httpRequest<RedeemCodeListResponse>("/api/redeem-codes", options);
+}
+
+export async function fetchPublicGalleryItems(options: { limit?: number; redirectOnUnauthorized?: boolean } = {}) {
+  const params = new URLSearchParams();
+  if (options.limit) {
+    params.set("limit", String(Math.max(1, options.limit)));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return httpRequest<GalleryListResponse>(`/api/gallery/public${suffix}`, {
+    redirectOnUnauthorized: options.redirectOnUnauthorized,
+  });
+}
+
+export async function recordGalleryItemEvent(itemId: string, event: "click" | "use") {
+  return httpRequest<GalleryMutationResponse>(
+    `/api/gallery/${encodeURIComponent(itemId)}/events`,
+    {
+      method: "POST",
+      body: { event },
+    },
+  );
+}
+
+export async function submitGalleryItem(payload: GallerySubmissionPayload) {
+  return httpRequest<GalleryMutationResponse>("/api/gallery/submissions", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchAdminGalleryItems(options: { status?: string; limit?: number } = {}) {
+  const params = new URLSearchParams();
+  if (String(options.status || "").trim()) {
+    params.set("status", String(options.status || "").trim());
+  }
+  if (options.limit) {
+    params.set("limit", String(Math.max(1, options.limit)));
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return httpRequest<GalleryListResponse>(`/api/admin/gallery${suffix}`, {
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function updateAdminGalleryItem(itemId: string, payload: AdminGalleryUpdatePayload) {
+  return httpRequest<GalleryMutationResponse>(
+    `/api/admin/gallery/${encodeURIComponent(itemId)}`,
+    {
+      method: "PATCH",
+      body: payload,
+      redirectOnUnauthorized: false,
+    },
+  );
+}
+
+export async function deleteAdminGalleryItem(itemId: string) {
+  return httpRequest<GalleryMutationResponse>(
+    `/api/admin/gallery/${encodeURIComponent(itemId)}`,
+    {
+      method: "DELETE",
+      redirectOnUnauthorized: false,
+    },
+  );
 }
 
 export async function fetchDataManagementStatus(options: { redirectOnUnauthorized?: boolean } = {}) {

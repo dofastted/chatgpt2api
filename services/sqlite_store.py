@@ -250,7 +250,16 @@ class SQLiteStore:
                 "app_logs",
                 "backup_records",
                 "image_request_records",
+                "gallery_items",
+                "gallery_assets",
             ):
+                exists = connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone()
+                if not exists:
+                    tables[table] = 0
+                    continue
                 row = connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
                 tables[table] = int(row["count"] or 0) if row else 0
         return {

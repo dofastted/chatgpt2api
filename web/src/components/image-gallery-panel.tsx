@@ -9,17 +9,25 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import {
+  fetchPublicGalleryItems,
+  recordGalleryItemEvent,
+  type GalleryItem,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { getStoredAuthKey } from "@/store/auth";
 import {
   addUserGalleryPrompt,
   listUserGalleryPrompts,
+  listUserGalleryWaterfallItems,
   loadGalleryPromptStats,
   promptKey,
   recordGalleryPromptUse,
   removeUserGalleryPrompt,
+  resolveGalleryStorageScope,
   type GalleryPromptStats,
   type UserGalleryPrompt,
+  type UserGalleryWaterfallItem,
 } from "@/store/gallery-prompts";
 
 type GallerySeedItem = {
@@ -38,6 +46,9 @@ type GallerySeedItem = {
   userPromptId?: string;
   useCount?: number;
   randomRank?: number;
+  backendGalleryId?: string;
+  source?: string;
+  isUserGenerated?: boolean;
 };
 
 type GalleryImageDimension = {
@@ -79,6 +90,79 @@ function buildUserPromptGalleryItem(item: UserGalleryPrompt): GallerySeedItem {
     userPromptId: item.id,
     useCount: item.useCount,
   };
+}
+
+function buildUserWaterfallGalleryItem(item: UserGalleryWaterfallItem): GallerySeedItem {
+  return {
+    id: item.id,
+    postNumber: 0,
+    username: "我",
+    imageIndex: 0,
+    title: "我的作品",
+    imageUrl: item.imageUrl,
+    downloadPath: "",
+    postUrl: "",
+    prompt: item.prompt,
+    promptPreview: item.promptPreview,
+    hasPrompt: Boolean(item.prompt),
+    isUserGenerated: true,
+    useCount: item.useCount,
+  };
+}
+
+function buildPublicGalleryItem(item: GalleryItem): GallerySeedItem | null {
+  const asset =
+    item.assets.find((candidate) => candidate.asset_id === item.cover_asset_id) ||
+    item.assets[0];
+  if (!asset?.url) {
+    return null;
+  }
+  const metadata = item.metadata || {};
+  const postNumber = Math.max(0, Number(metadata.post_number || 0));
+  const imageIndex = Math.max(0, Number(metadata.image_index || 0));
+  const username = String(metadata.username || item.source || "gallery");
+  return {
+    id: item.id,
+    postNumber,
+    username,
+    imageIndex,
+    title: item.title || item.prompt_preview || "公开画廊",
+    imageUrl: asset.url,
+    downloadPath: String(metadata.download_path || ""),
+    postUrl: String(metadata.post_url || ""),
+    prompt: item.prompt,
+    promptPreview: item.prompt_preview || item.prompt,
+    hasPrompt: Boolean(item.prompt),
+    useCount: item.use_count,
+    backendGalleryId: item.id,
+    source: item.source,
+  };
+}
+
+function buildPublicGalleryDimensions(items: GalleryItem[]) {
+  return Object.fromEntries(
+    items.flatMap((item) => {
+      const asset =
+        item.assets.find((candidate) => candidate.asset_id === item.cover_asset_id) ||
+        item.assets[0];
+      const width = Math.max(0, Number(asset?.width || 0));
+      const height = Math.max(0, Number(asset?.height || 0));
+      if (!asset || !width || !height) {
+        return [];
+      }
+      return [
+        [
+          String(item.id),
+          {
+            id: item.id,
+            width,
+            height,
+            aspectRatio: width / height,
+          },
+        ],
+      ];
+    }),
+  );
 }
 
 function GalleryCard({
@@ -241,7 +325,7 @@ function GalleryCard({
               第 {item.postNumber} 层 / 图 {item.imageIndex}
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              {item.title}
+              {item.isUserGenerated ? "本地常用" : item.title}
             </div>
           </div>
           <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground">
@@ -283,6 +367,7 @@ export function ImageGalleryPanel({
   const [isPreviewPromptExpanded, setIsPreviewPromptExpanded] = useState(false);
   const [galleryScope, setGalleryScope] = useState<string | null>(null);
   const [userPromptItems, setUserPromptItems] = useState<UserGalleryPrompt[]>([]);
+  const [userWaterfallItems, setUserWaterfallItems] = useState<UserGalleryWaterfallItem[]>([]);
   const [promptStats, setPromptStats] = useState<GalleryPromptStats>({});
   const [promptDraft, setPromptDraft] = useState("");
   const [randomRanks, setRandomRanks] = useState<Record<string, number>>({});
@@ -297,7 +382,7 @@ export function ImageGalleryPanel({
       try {
         const authKey = await getStoredAuthKey();
         if (!cancelled) {
-          setGalleryScope(String(authKey || "").trim() || "__anonymous__");
+          setGalleryScope(await resolveGalleryStorageScope(authKey));
         }
       } catch {
         if (!cancelled) {
@@ -315,9 +400,10 @@ export function ImageGalleryPanel({
     if (!scope) {
       return;
     }
+    const storageScope = await resolveGalleryStorageScope(scope);
     const [nextPrompts, nextStats] = await Promise.all([
-      listUserGalleryPrompts(scope),
-      loadGalleryPromptStats(scope),
+      listUserGalleryPrompts(storageScope),
+      loadGalleryPromptStats(storageScope),
     ]);
     setUserPromptItems(nextPrompts);
     setPromptStats(nextStats);
@@ -328,22 +414,30 @@ export function ImageGalleryPanel({
     const load = async () => {
       setIsLoading(true);
       try {
-        const [itemsMod, dimensionsMod] = await Promise.all([
-          import("@/data/gallery-ui-seed.json"),
-          import("@/data/gallery-image-dimensions.json").catch(() => ({
-            default: [],
+        const [publicGallery, dimensionsMod] = await Promise.all([
+          fetchPublicGalleryItems({ limit: 300, redirectOnUnauthorized: false }).catch(() => ({
+            items: [],
           })),
+          import("@/data/gallery-image-dimensions.json").catch(() => ({ default: [] })),
         ]);
+        let nextItems = publicGallery.items
+          .map(buildPublicGalleryItem)
+          .filter((item): item is GallerySeedItem => Boolean(item));
+        let nextDimensions = buildPublicGalleryDimensions(publicGallery.items);
+        if (nextItems.length === 0) {
+          const itemsMod = await import("@/data/gallery-ui-seed.json");
+          nextItems = (itemsMod.default || []) as GallerySeedItem[];
+          nextDimensions = Object.fromEntries(
+            ((dimensionsMod.default || []) as GalleryImageDimension[]).map((item) => {
+              const id = String(item.id);
+              return [id, { ...item, id }];
+            }),
+          );
+        }
         if (!cancelled) {
-          const nextItems = (itemsMod.default || []) as GallerySeedItem[];
           setItems(nextItems);
           setRandomRanks(
             Object.fromEntries(nextItems.map((item) => [String(item.id), Math.random()])),
-          );
-          const nextDimensions = Object.fromEntries(
-            ((dimensionsMod.default || []) as GalleryImageDimension[]).map(
-              (item) => [String(item.id), item],
-            ),
           );
           setImageDimensions(nextDimensions);
         }
@@ -366,18 +460,22 @@ export function ImageGalleryPanel({
     let cancelled = false;
     const load = async () => {
       try {
-        const [nextPrompts, nextStats] = await Promise.all([
-          listUserGalleryPrompts(galleryScope),
-          loadGalleryPromptStats(galleryScope),
+        const storageScope = await resolveGalleryStorageScope(galleryScope);
+        const [nextPrompts, nextStats, nextWaterfallItems] = await Promise.all([
+          listUserGalleryPrompts(storageScope),
+          loadGalleryPromptStats(storageScope),
+          listUserGalleryWaterfallItems(storageScope),
         ]);
         if (!cancelled) {
           setUserPromptItems(nextPrompts);
           setPromptStats(nextStats);
+          setUserWaterfallItems(nextWaterfallItems);
         }
       } catch {
         if (!cancelled) {
           setUserPromptItems([]);
           setPromptStats({});
+          setUserWaterfallItems([]);
         }
       }
     };
@@ -388,7 +486,10 @@ export function ImageGalleryPanel({
   }, [galleryScope]);
 
   const rankedItems = useMemo(() => {
-    const pinnedItems = userPromptItems.map(buildUserPromptGalleryItem);
+    const pinnedItems = [
+      ...userWaterfallItems.map(buildUserWaterfallGalleryItem),
+      ...userPromptItems.map(buildUserPromptGalleryItem),
+    ];
     const seedItems = items
       .map((item) => ({
         ...item,
@@ -403,7 +504,7 @@ export function ImageGalleryPanel({
         return Number(a.randomRank || 0) - Number(b.randomRank || 0);
       });
     return [...pinnedItems, ...seedItems];
-  }, [items, promptStats, randomRanks, userPromptItems]);
+  }, [items, promptStats, randomRanks, userPromptItems, userWaterfallItems]);
 
   const filteredItems = useMemo(() => {
     const q = normalizeSearchText(keyword);
@@ -455,6 +556,9 @@ export function ImageGalleryPanel({
       void recordGalleryPromptUse(galleryScope, normalizedPrompt).then(() => reloadUserPromptData(galleryScope));
     }
     onApplyPrompt(normalizedPrompt);
+    if (previewItem?.backendGalleryId) {
+      void recordGalleryItemEvent(previewItem.backendGalleryId, "use").catch(() => undefined);
+    }
     if (promptTargetHref) {
       router.push(
         `${promptTargetHref}?prompt=${encodeURIComponent(normalizedPrompt)}&focus=prompt`,
@@ -462,6 +566,13 @@ export function ImageGalleryPanel({
       return;
     }
     toast.success("已填入 prompt");
+  };
+
+  const handleOpenPreview = (item: GallerySeedItem) => {
+    setPreviewItem(item);
+    if (item.backendGalleryId) {
+      void recordGalleryItemEvent(item.backendGalleryId, "click").catch(() => undefined);
+    }
   };
 
   const handleAddUserPrompt = async () => {
@@ -610,7 +721,7 @@ export function ImageGalleryPanel({
                   key={item.id}
                   item={item}
                   imageDimension={imageDimensions[String(item.id)]}
-                  onOpenImage={setPreviewItem}
+                  onOpenImage={handleOpenPreview}
                   onRemoveUserPrompt={handleRemoveUserPrompt}
                 />
               ))}

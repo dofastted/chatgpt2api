@@ -48,8 +48,12 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   fetchImageResponseResult,
   fetchImageQueueStatus,
+  fetchPublicGalleryItems,
   fetchQuotaSummary,
   generateImage,
+  recordGalleryItemEvent,
+  submitGalleryItem,
+  type GalleryItem,
   type ImageGenerationResponse,
   uploadInputImage,
   type ImageModel,
@@ -77,6 +81,8 @@ import {
   loadGalleryPromptStats,
   promptKey,
   recordGalleryPromptUse,
+  resolveGalleryStorageScope,
+  updateUserGalleryWaterfallItemSubmission,
   type GalleryPromptStats,
   type UserGalleryPrompt,
   type UserGalleryWaterfallItem,
@@ -136,6 +142,8 @@ type GallerySeedItem = {
   randomRank?: number;
   aspectRatio?: number;
   isUserGenerated?: boolean;
+  backendGalleryId?: string;
+  source?: string;
 };
 
 type GalleryImageDimension = {
@@ -178,6 +186,61 @@ function buildUserWaterfallSeedItem(item: UserGalleryWaterfallItem): GallerySeed
     aspectRatio: item.aspectRatio,
     isUserGenerated: true,
   };
+}
+
+function buildPublicGallerySeedItem(item: GalleryItem): GallerySeedItem | null {
+  const asset =
+    item.assets.find((candidate) => candidate.asset_id === item.cover_asset_id) ||
+    item.assets[0];
+  if (!asset?.url) {
+    return null;
+  }
+  const metadata = item.metadata || {};
+  const width = Math.max(0, Number(asset.width || 0));
+  const height = Math.max(0, Number(asset.height || 0));
+  return {
+    id: item.id,
+    postNumber: Math.max(0, Number(metadata.post_number || 0)),
+    username: String(metadata.username || item.source || "gallery"),
+    imageIndex: Math.max(0, Number(metadata.image_index || 0)),
+    title: item.title || item.prompt_preview || "公开画廊",
+    imageUrl: asset.url,
+    downloadPath: String(metadata.download_path || ""),
+    postUrl: String(metadata.post_url || ""),
+    prompt: item.prompt,
+    promptPreview: item.prompt_preview || item.prompt,
+    hasPrompt: Boolean(item.prompt),
+    useCount: item.use_count,
+    aspectRatio: width && height ? width / height : undefined,
+    backendGalleryId: item.id,
+    source: item.source,
+  };
+}
+
+function buildPublicGalleryImageDimensions(items: GalleryItem[]) {
+  return Object.fromEntries(
+    items.flatMap((item) => {
+      const asset =
+        item.assets.find((candidate) => candidate.asset_id === item.cover_asset_id) ||
+        item.assets[0];
+      const width = Math.max(0, Number(asset?.width || 0));
+      const height = Math.max(0, Number(asset?.height || 0));
+      if (!width || !height) {
+        return [];
+      }
+      return [
+        [
+          String(item.id),
+          {
+            id: item.id,
+            width,
+            height,
+            aspectRatio: width / height,
+          },
+        ],
+      ];
+    }),
+  );
 }
 
 function buildWaterfallSourceImageId(
@@ -978,6 +1041,9 @@ export default function ImagePage() {
   const [conversationScope, setConversationScope] = useState<string | null>(
     null,
   );
+  const [galleryStorageScope, setGalleryStorageScope] = useState<string | null>(
+    null,
+  );
   const [hasLoadedHistory, setHasLoadedHistory] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [loadingConversationDetailId, setLoadingConversationDetailId] =
@@ -1012,20 +1078,23 @@ export default function ImagePage() {
         toast.error("这张图没有 prompt");
         return;
       }
-      if (conversationScope) {
-        void recordGalleryPromptUse(conversationScope, normalizedPrompt).then(async () => {
+      if (galleryStorageScope) {
+        void recordGalleryPromptUse(galleryStorageScope, normalizedPrompt).then(async () => {
           const [nextPrompts, nextStats] = await Promise.all([
-            listUserGalleryPrompts(conversationScope),
-            loadGalleryPromptStats(conversationScope),
+            listUserGalleryPrompts(galleryStorageScope),
+            loadGalleryPromptStats(galleryStorageScope),
           ]);
           setUserGalleryPrompts(nextPrompts);
           setGalleryPromptStats(nextStats);
         });
       }
+      if (galleryPreviewItem?.backendGalleryId) {
+        void recordGalleryItemEvent(galleryPreviewItem.backendGalleryId, "use").catch(() => undefined);
+      }
       setImagePrompt(normalizedPrompt);
       focusPromptInput();
     },
-    [conversationScope, focusPromptInput],
+    [focusPromptInput, galleryPreviewItem, galleryStorageScope],
   );
 
   useEffect(() => {
@@ -1067,21 +1136,29 @@ export default function ImagePage() {
     const loadGalleryData = async () => {
       setIsGalleryDataLoading(true);
       try {
-        const [itemsMod, dimensionsMod] = await Promise.all([
-          import("@/data/gallery-ui-seed.json"),
-          import("@/data/gallery-image-dimensions.json").catch(() => ({
-            default: [],
+        const [publicGallery, dimensionsMod] = await Promise.all([
+          fetchPublicGalleryItems({ limit: 300, redirectOnUnauthorized: false }).catch(() => ({
+            items: [],
           })),
+          import("@/data/gallery-image-dimensions.json").catch(() => ({ default: [] })),
         ]);
         if (cancelled) {
           return;
         }
-        const nextItems = (itemsMod.default || []) as GallerySeedItem[];
-        const nextDimensions = Object.fromEntries(
-          ((dimensionsMod.default || []) as GalleryImageDimension[]).map(
-            (item) => [String(item.id), item],
-          ),
-        );
+        let nextItems = publicGallery.items
+          .map(buildPublicGallerySeedItem)
+          .filter((item): item is GallerySeedItem => Boolean(item));
+        let nextDimensions = buildPublicGalleryImageDimensions(publicGallery.items);
+        if (nextItems.length === 0) {
+          const itemsMod = await import("@/data/gallery-ui-seed.json");
+          nextItems = (itemsMod.default || []) as GallerySeedItem[];
+          nextDimensions = Object.fromEntries(
+            ((dimensionsMod.default || []) as GalleryImageDimension[]).map((item) => {
+              const id = String(item.id);
+              return [id, { ...item, id }];
+            }),
+          );
+        }
         setGalleryItems(nextItems);
         setGalleryImageDimensions(nextDimensions);
         setGalleryRandomRanks(
@@ -1100,16 +1177,17 @@ export default function ImagePage() {
   }, []);
 
   useEffect(() => {
-    if (!conversationScope) {
+    if (!galleryStorageScope) {
       return;
     }
     let cancelled = false;
     const loadGalleryPromptData = async () => {
       try {
+        const storageScope = await resolveGalleryStorageScope(galleryStorageScope);
         const [nextPrompts, nextStats, nextWaterfallItems] = await Promise.all([
-          listUserGalleryPrompts(conversationScope),
-          loadGalleryPromptStats(conversationScope),
-          listUserGalleryWaterfallItems(conversationScope),
+          listUserGalleryPrompts(storageScope),
+          loadGalleryPromptStats(storageScope),
+          listUserGalleryWaterfallItems(storageScope),
         ]);
         if (!cancelled) {
           setUserGalleryPrompts(nextPrompts);
@@ -1128,7 +1206,7 @@ export default function ImagePage() {
     return () => {
       cancelled = true;
     };
-  }, [conversationScope]);
+  }, [galleryStorageScope]);
 
   useEffect(() => {
     const element = textareaRef.current;
@@ -1385,6 +1463,7 @@ export default function ImagePage() {
         const authKey = await getStoredAuthKey();
         if (!cancelled) {
           const nextScope = String(authKey || "").trim() || "__anonymous__";
+          const nextGalleryStorageScope = await resolveGalleryStorageScope(nextScope);
           conversationsRef.current = [];
           setConversations([]);
           setSelectedConversationId(null);
@@ -1392,6 +1471,7 @@ export default function ImagePage() {
           setHasLoadedHistory(false);
           setIsLoadingHistory(false);
           setConversationScope(nextScope);
+          setGalleryStorageScope(nextGalleryStorageScope);
         }
       } catch (error) {
         if (!cancelled) {
@@ -1402,6 +1482,7 @@ export default function ImagePage() {
           setHasLoadedHistory(false);
           setIsLoadingHistory(false);
           setConversationScope("__anonymous__");
+          setGalleryStorageScope("__anonymous__");
         }
       }
     };
@@ -2065,14 +2146,16 @@ export default function ImagePage() {
       conversationRecordId,
       turnId,
     );
-    void recordGalleryPromptUse(conversationScope, prompt).then(async () => {
-      const [nextPrompts, nextStats] = await Promise.all([
-        listUserGalleryPrompts(conversationScope),
-        loadGalleryPromptStats(conversationScope),
-      ]);
-      setUserGalleryPrompts(nextPrompts);
-      setGalleryPromptStats(nextStats);
-    });
+    if (galleryStorageScope) {
+      void recordGalleryPromptUse(galleryStorageScope, prompt).then(async () => {
+        const [nextPrompts, nextStats] = await Promise.all([
+          listUserGalleryPrompts(galleryStorageScope),
+          loadGalleryPromptStats(galleryStorageScope),
+        ]);
+        setUserGalleryPrompts(nextPrompts);
+        setGalleryPromptStats(nextStats);
+      });
+    }
 
     setSelectedConversationId(conversationRecordId);
     if (!retry) {
@@ -2256,7 +2339,7 @@ export default function ImagePage() {
     turn: ImageConversationTurn,
     image: StoredImage,
   ) => {
-    if (!conversationScope) {
+    if (!galleryStorageScope) {
       toast.error("当前登录信息还在初始化，请稍后再试");
       return;
     }
@@ -2268,7 +2351,7 @@ export default function ImagePage() {
     const mimeType =
       String(image.mimeType || "").trim() || detectImageMimeType(image.b64_json);
     try {
-      await addUserGalleryWaterfallItem(conversationScope, {
+      const localItem = await addUserGalleryWaterfallItem(galleryStorageScope, {
         prompt,
         promptPreview: buildPromptPreview(prompt),
         imageUrl: buildImageDataUrl(image.b64_json, mimeType),
@@ -2281,10 +2364,41 @@ export default function ImagePage() {
           image.id,
         ),
       });
+      void submitGalleryItem({
+        prompt,
+        title: "用户投稿",
+        assets: [
+          {
+            url: buildImageDataUrl(image.b64_json, mimeType),
+            kind: "image",
+            mime_type: mimeType,
+          },
+        ],
+        source_conversation_id: conversation.id,
+        source_turn_id: turn.id,
+        source_image_id: buildWaterfallSourceImageId(
+          conversation.id,
+          turn.id,
+          image.id,
+        ),
+      })
+        .then(async (response) => {
+          await updateUserGalleryWaterfallItemSubmission(galleryStorageScope, localItem.id, {
+            submissionId: response.item.id,
+            submissionStatus: "pending",
+          });
+          const submittedItems = await listUserGalleryWaterfallItems(galleryStorageScope);
+          setUserGalleryWaterfallItems(submittedItems);
+          toast.success("已提交审核");
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : "提交审核失败";
+          toast.error(`已保存到本地，${message}`);
+        });
       const nextItems =
-        await listUserGalleryWaterfallItems(conversationScope);
+        await listUserGalleryWaterfallItems(galleryStorageScope);
       setUserGalleryWaterfallItems(nextItems);
-      toast.success("已添加到瀑布流");
+      toast.success("已添加到本地画廊");
     } catch (error) {
       const message = error instanceof Error ? error.message : "添加失败";
       toast.error(message);
@@ -3037,7 +3151,12 @@ export default function ImagePage() {
           isLoading={isGalleryDataLoading}
           shouldReduceMotion={Boolean(shouldReduceMotion)}
           onHide={() => setIsInspirationRailHidden(true)}
-          onOpenPreview={setGalleryPreviewItem}
+          onOpenPreview={(item) => {
+            setGalleryPreviewItem(item);
+            if (item.backendGalleryId) {
+              void recordGalleryItemEvent(item.backendGalleryId, "click").catch(() => undefined);
+            }
+          }}
         />
       </section>
 

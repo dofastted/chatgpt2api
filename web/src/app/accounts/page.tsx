@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Admin gallery rows may render data URLs and private runtime images. */
+
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
@@ -15,6 +17,7 @@ import {
   FileSearch,
   Download,
   HardDrive,
+  Images,
   KeyRound,
   LoaderCircle,
   Pencil,
@@ -60,10 +63,12 @@ import {
   createRedeemCodes,
   createDataBackup,
   createUserKeys,
+  deleteAdminGalleryItem,
   deleteProxy,
   deleteAccounts,
   deleteRedeemCodes,
   deleteUserKeys,
+  fetchAdminGalleryItems,
   fetchAuthSession,
   fetchAccounts,
   fetchDataBackups,
@@ -79,7 +84,9 @@ import {
   upsertProxy,
   updateDataManagementSettings,
   updateAccount,
+  updateAdminGalleryItem,
   updateUserKey,
+  type AdminGalleryUpdatePayload,
   type Account,
   type AccountCategory,
   type AccountStatus,
@@ -88,6 +95,8 @@ import {
   type DataManagementLogItem,
   type DataManagementSettings,
   type DataManagementStatus,
+  type GalleryItem,
+  type GalleryItemStatus,
   type ImageRequestRecord,
   type ImageRequestStatus,
   type ImageModel,
@@ -177,7 +186,7 @@ const imageModels: ImageModel[] = [
 
 const ADMIN_SECONDARY_PAGE_SIZE = 10;
 
-type AdminTab = "accounts" | "userKeys" | "redeemCodes" | "data";
+type AdminTab = "accounts" | "userKeys" | "redeemCodes" | "gallery" | "data";
 type UserKeyExportState = {
   open: boolean;
   title: string;
@@ -188,6 +197,14 @@ type UserKeyExportState = {
 const proxyProtocolOptions: Array<{ label: string; value: ProxyProtocol }> = [
   { label: "HTTP", value: "http" },
   { label: "SOCKS5", value: "socks5" },
+];
+
+const galleryStatusOptions: Array<{ label: string; value: GalleryItemStatus | "all" }> = [
+  { label: "全部状态", value: "all" },
+  { label: "待审核", value: "pending" },
+  { label: "已发布", value: "published" },
+  { label: "已拒绝", value: "rejected" },
+  { label: "已隐藏", value: "hidden" },
 ];
 
 function formatCompact(value: number) {
@@ -297,6 +314,13 @@ function formatUserKeyPricing(pricing?: UserKeyPricing | null) {
   ].join(" / ");
 }
 
+function getGalleryCoverUrl(item: GalleryItem) {
+  const cover =
+    item.assets.find((asset) => asset.asset_id === item.cover_asset_id) ||
+    item.assets[0];
+  return String(cover?.url || "").trim();
+}
+
 function maskToken(token?: string, visibleStart = 16, visibleEnd = 8) {
   if (!token) return "—";
   if (token.length <= visibleStart + visibleEnd) return token;
@@ -375,6 +399,14 @@ export default function AccountsPage() {
     useState<DataManagementSettings | null>(null);
   const [dataBackups, setDataBackups] = useState<DataBackupRecord[]>([]);
   const [dataLogs, setDataLogs] = useState<DataManagementLogItem[]>([]);
+  const [galleryItems, setGalleryItems] = useState<GalleryItem[]>([]);
+  const [galleryStatusSummary, setGalleryStatusSummary] = useState<Record<string, number>>({});
+  const [galleryStatusFilter, setGalleryStatusFilter] = useState<GalleryItemStatus | "all">("all");
+  const [galleryQuery, setGalleryQuery] = useState("");
+  const [editingGalleryItem, setEditingGalleryItem] = useState<GalleryItem | null>(null);
+  const [galleryEditTitle, setGalleryEditTitle] = useState("");
+  const [galleryEditPrompt, setGalleryEditPrompt] = useState("");
+  const [galleryEditSortOrder, setGalleryEditSortOrder] = useState("0");
   const [imageRequests, setImageRequests] = useState<ImageRequestRecord[]>([]);
   const [selectedImageRequest, setSelectedImageRequest] =
     useState<ImageRequestRecord | null>(null);
@@ -464,6 +496,8 @@ export default function AccountsPage() {
   const [isLoadingUserKeys, setIsLoadingUserKeys] = useState(true);
   const [isLoadingRedeemCodes, setIsLoadingRedeemCodes] = useState(true);
   const [isLoadingDataManagement, setIsLoadingDataManagement] = useState(true);
+  const [isLoadingGallery, setIsLoadingGallery] = useState(true);
+  const [isUpdatingGallery, setIsUpdatingGallery] = useState(false);
   const [isLoadingImageRequests, setIsLoadingImageRequests] = useState(true);
   const [isSavingDataSettings, setIsSavingDataSettings] = useState(false);
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
@@ -639,6 +673,33 @@ export default function AccountsPage() {
     [handleAdminRouteFailure],
   );
 
+  const loadGalleryItems = useCallback(
+    async (silent = false) => {
+      if (!silent) {
+        setIsLoadingGallery(true);
+      }
+      try {
+        const data = await fetchAdminGalleryItems({
+          status: galleryStatusFilter !== "all" ? galleryStatusFilter : undefined,
+          limit: 300,
+        });
+        setGalleryItems(data.items);
+        setGalleryStatusSummary(data.status || {});
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "加载画廊失败";
+        if (!handleAdminRouteFailure(message)) {
+          toast.error(message);
+        }
+      } finally {
+        if (!silent) {
+          setIsLoadingGallery(false);
+        }
+      }
+    },
+    [galleryStatusFilter, handleAdminRouteFailure],
+  );
+
   const loadImageRequests = useCallback(
     async (silent = false) => {
       if (!silent) {
@@ -709,6 +770,7 @@ export default function AccountsPage() {
           loadUserKeys(),
           loadRedeemCodes(),
           loadProxies(),
+          loadGalleryItems(),
           loadDataManagement(),
           loadImageRequests(),
         ]);
@@ -734,6 +796,7 @@ export default function AccountsPage() {
     handleAdminRouteFailure,
     loadAccounts,
     loadDataManagement,
+    loadGalleryItems,
     loadImageRequests,
     loadProxies,
     loadRedeemCodes,
@@ -831,6 +894,18 @@ export default function AccountsPage() {
       );
     });
   }, [redeemCodeQuery, redeemCodes]);
+
+  const filteredGalleryItems = useMemo(() => {
+    const normalizedQuery = galleryQuery.trim().toLowerCase();
+    return galleryItems.filter((item) => {
+      if (!normalizedQuery) {
+        return true;
+      }
+      return `${item.id} ${item.title || ""} ${item.prompt || ""} ${item.source || ""}`
+        .toLowerCase()
+        .includes(normalizedQuery);
+    });
+  }, [galleryItems, galleryQuery]);
 
   const userKeyPageCount = Math.max(
     1,
@@ -1611,10 +1686,68 @@ export default function AccountsPage() {
     );
   };
 
+  const openGalleryEditDialog = (item: GalleryItem) => {
+    setEditingGalleryItem(item);
+    setGalleryEditTitle(String(item.title || ""));
+    setGalleryEditPrompt(String(item.prompt || ""));
+    setGalleryEditSortOrder(String(item.sort_order || 0));
+  };
+
+  const applyGalleryMutation = async (
+    item: GalleryItem,
+    payload: AdminGalleryUpdatePayload,
+    successMessage: string,
+  ) => {
+    setIsUpdatingGallery(true);
+    try {
+      const data = await updateAdminGalleryItem(item.id, payload);
+      setGalleryStatusSummary(data.status || {});
+      await loadGalleryItems(true);
+      toast.success(successMessage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "更新画廊失败";
+      toast.error(message);
+    } finally {
+      setIsUpdatingGallery(false);
+    }
+  };
+
+  const handleSaveGalleryEdit = async () => {
+    if (!editingGalleryItem) {
+      return;
+    }
+    await applyGalleryMutation(
+      editingGalleryItem,
+      {
+        title: galleryEditTitle.trim(),
+        prompt: galleryEditPrompt.trim(),
+        sort_order: Number(galleryEditSortOrder || 0),
+      },
+      "画廊项已保存",
+    );
+    setEditingGalleryItem(null);
+  };
+
+  const handleDeleteGalleryItem = async (item: GalleryItem) => {
+    setIsUpdatingGallery(true);
+    try {
+      const data = await deleteAdminGalleryItem(item.id);
+      setGalleryStatusSummary(data.status || {});
+      await loadGalleryItems(true);
+      toast.success("画廊项已删除");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除画廊失败";
+      toast.error(message);
+    } finally {
+      setIsUpdatingGallery(false);
+    }
+  };
+
   const adminTabs: Array<{ value: AdminTab; label: string }> = [
     { value: "accounts", label: "账号池" },
     { value: "userKeys", label: "用户 Key" },
     { value: "redeemCodes", label: "兑换码" },
+    { value: "gallery", label: "画廊管理" },
     { value: "data", label: "数据管理" },
   ];
 
@@ -1727,6 +1860,67 @@ export default function AccountsPage() {
                 <LoaderCircle className="size-4 animate-spin" />
               ) : null}
               新增账户
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(editingGalleryItem)}
+        onOpenChange={(open) => (!open ? setEditingGalleryItem(null) : null)}
+      >
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>编辑画廊项</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              {editingGalleryItem?.id || "—"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">标题</label>
+              <Input
+                value={galleryEditTitle}
+                onChange={(event) => setGalleryEditTitle(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">Prompt</label>
+              <Textarea
+                value={galleryEditPrompt}
+                onChange={(event) => setGalleryEditPrompt(event.target.value)}
+                className="min-h-40 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">排序值</label>
+              <Input
+                type="number"
+                value={galleryEditSortOrder}
+                onChange={(event) => setGalleryEditSortOrder(event.target.value)}
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+          </div>
+          <DialogFooter className="pt-2">
+            <Button
+              variant="secondary"
+              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              onClick={() => setEditingGalleryItem(null)}
+              disabled={isUpdatingGallery}
+            >
+              取消
+            </Button>
+            <Button
+              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              onClick={() => void handleSaveGalleryEdit()}
+              disabled={isUpdatingGallery}
+            >
+              {isUpdatingGallery ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : null}
+              保存修改
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3802,6 +3996,254 @@ export default function AccountsPage() {
                     </Button>
                   </div>
                 </div>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+      ) : null}
+
+      {activeTab === "gallery" ? (
+        <section className="minimal-fade-soft space-y-4 [animation-delay:180ms]">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="inline-flex size-10 items-center justify-center rounded-xl bg-stone-950 text-white">
+                <Images className="size-4" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold tracking-tight">
+                  画廊管理
+                </h2>
+                <p className="text-sm text-stone-500">
+                  审核投稿，维护公开画廊顺序、可见性和置顶。
+                </p>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
+              onClick={() => void loadGalleryItems()}
+              disabled={isLoadingGallery}
+            >
+              <RefreshCw className={cn("size-4", isLoadingGallery ? "animate-spin" : "")} />
+              刷新
+            </Button>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-4">
+            {galleryStatusOptions
+              .filter((item) => item.value !== "all")
+              .map((item) => (
+                <Card key={item.value} className="minimal-card">
+                  <CardContent className="p-4">
+                    <div className="text-xs text-stone-500">{item.label}</div>
+                    <div className="mt-1 text-2xl font-semibold text-stone-900">
+                      {galleryStatusSummary[item.value] || 0}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+          </div>
+
+          <Card className="minimal-card">
+            <CardContent className="space-y-4 p-5">
+              <div className="grid gap-3 md:grid-cols-[220px_minmax(0,1fr)_auto]">
+                <Select
+                  value={galleryStatusFilter}
+                  onValueChange={(value) =>
+                    setGalleryStatusFilter(value as GalleryItemStatus | "all")
+                  }
+                >
+                  <SelectTrigger className="h-10 rounded-xl border-stone-200">
+                    <SelectValue placeholder="状态" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {galleryStatusOptions.map((item) => (
+                      <SelectItem key={item.value} value={item.value}>
+                        {item.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Input
+                  value={galleryQuery}
+                  onChange={(event) => setGalleryQuery(event.target.value)}
+                  placeholder="搜索 prompt / 标题 / id"
+                  className="h-10 rounded-xl border-stone-200"
+                />
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                  onClick={() => void loadGalleryItems()}
+                  disabled={isLoadingGallery}
+                >
+                  <Search className="size-4" />
+                  查询
+                </Button>
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border border-stone-100">
+                <table className="w-full min-w-[1120px] text-left text-sm">
+                  <thead className="bg-stone-50 text-xs text-stone-500">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">图片</th>
+                      <th className="px-3 py-2 font-medium">状态</th>
+                      <th className="px-3 py-2 font-medium">内容</th>
+                      <th className="px-3 py-2 font-medium">来源</th>
+                      <th className="px-3 py-2 font-medium">排序</th>
+                      <th className="px-3 py-2 font-medium">统计</th>
+                      <th className="px-3 py-2 font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100">
+                    {isLoadingGallery ? (
+                      <tr>
+                        <td className="px-3 py-6 text-stone-500" colSpan={7}>
+                          正在加载画廊
+                        </td>
+                      </tr>
+                    ) : filteredGalleryItems.length === 0 ? (
+                      <tr>
+                        <td className="px-3 py-6 text-stone-500" colSpan={7}>
+                          暂无画廊项
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredGalleryItems.map((item) => {
+                        const coverUrl = getGalleryCoverUrl(item);
+                        return (
+                          <tr key={item.id} className="align-top hover:bg-stone-50">
+                            <td className="px-3 py-3">
+                              {coverUrl ? (
+                                <img
+                                  src={coverUrl}
+                                  alt={item.title || "gallery"}
+                                  className="h-20 w-16 rounded-lg object-cover"
+                                />
+                              ) : (
+                                <div className="grid h-20 w-16 place-items-center rounded-lg bg-stone-100 text-xs text-stone-400">
+                                  无图
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-3 py-3">
+                              <div className="space-y-2">
+                                <Badge
+                                  variant={
+                                    item.status === "published"
+                                      ? "success"
+                                      : item.status === "pending"
+                                        ? "warning"
+                                        : item.status === "rejected"
+                                          ? "danger"
+                                          : "secondary"
+                                  }
+                                >
+                                  {item.status}
+                                </Badge>
+                                {item.is_pinned ? <Badge variant="secondary">置顶</Badge> : null}
+                                {!item.visibility ? <Badge variant="secondary">隐藏</Badge> : null}
+                              </div>
+                            </td>
+                            <td className="max-w-[420px] px-3 py-3">
+                              <div className="font-medium text-stone-900">
+                                {item.title || "未命名"}
+                              </div>
+                              <div className="mt-1 line-clamp-3 text-xs leading-5 text-stone-500">
+                                {item.prompt_preview || item.prompt}
+                              </div>
+                              <div className="mt-1 truncate font-mono text-[11px] text-stone-400">
+                                {item.id}
+                              </div>
+                            </td>
+                            <td className="px-3 py-3 text-stone-600">{item.source}</td>
+                            <td className="px-3 py-3 text-stone-600">{item.sort_order}</td>
+                            <td className="px-3 py-3 text-stone-600">
+                              点击 {item.click_count} / 使用 {item.use_count}
+                            </td>
+                            <td className="px-3 py-3">
+                              <div className="flex flex-wrap gap-2">
+                                {item.status === "pending" ? (
+                                  <>
+                                    <Button
+                                      size="sm"
+                                      className="h-8 rounded-lg bg-emerald-600 px-3 text-white hover:bg-emerald-700"
+                                      disabled={isUpdatingGallery}
+                                      onClick={() =>
+                                        void applyGalleryMutation(item, { action: "approve" }, "已通过投稿")
+                                      }
+                                    >
+                                      通过
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-8 rounded-lg border-rose-200 px-3 text-rose-700"
+                                      disabled={isUpdatingGallery}
+                                      onClick={() =>
+                                        void applyGalleryMutation(item, { action: "reject" }, "已拒绝投稿")
+                                      }
+                                    >
+                                      拒绝
+                                    </Button>
+                                  </>
+                                ) : null}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 rounded-lg px-3"
+                                  disabled={isUpdatingGallery}
+                                  onClick={() =>
+                                    void applyGalleryMutation(
+                                      item,
+                                      { is_pinned: !item.is_pinned },
+                                      item.is_pinned ? "已取消置顶" : "已置顶",
+                                    )
+                                  }
+                                >
+                                  {item.is_pinned ? "取消置顶" : "置顶"}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 rounded-lg px-3"
+                                  disabled={isUpdatingGallery}
+                                  onClick={() =>
+                                    void applyGalleryMutation(
+                                      item,
+                                      item.status === "published" && item.visibility
+                                        ? { action: "hide" }
+                                        : { action: "publish" },
+                                      item.status === "published" && item.visibility ? "已隐藏" : "已发布",
+                                    )
+                                  }
+                                >
+                                  {item.status === "published" && item.visibility ? "隐藏" : "发布"}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 rounded-lg px-3"
+                                  onClick={() => openGalleryEditDialog(item)}
+                                >
+                                  编辑
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 rounded-lg border-rose-200 px-3 text-rose-700"
+                                  disabled={isUpdatingGallery}
+                                  onClick={() => void handleDeleteGalleryItem(item)}
+                                >
+                                  删除
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
               </div>
             </CardContent>
           </Card>
