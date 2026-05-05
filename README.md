@@ -100,7 +100,7 @@ POST /v1/responses
 - 图片模型放在 `tools[].model`，当前支持 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`；如果没传，默认按 `gpt-image-2` 处理，三个公开模型发往 ChatGPT 上游时都使用 `gpt-image-2`
 - 图片尺寸放在 `tools[].size`，默认 `auto`；非 `auto` 会规整后传给上游
 - 支持 `previous_response_id` 指向本服务生成过的 response，用于带入最近历史文本上下文；记录保存在 SQLite，容器重启后仍可读取；找不到会返回 `404`
-- `n` 最多 2
+- `n` 最多 10
 - 返回 `response.output[]`，其中图片结果项是 `type: "image_generation_call"`，图片 base64 在 `result`
 - 如果上游页面返回了可复制文本，响应顶层还会带 `copied_text`
 - 同样会按 `user key` 自己的模型单价扣费，并在响应里返回 `billing`

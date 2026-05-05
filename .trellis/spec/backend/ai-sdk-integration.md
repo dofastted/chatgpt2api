@@ -106,6 +106,56 @@ return result.toDataStreamResponse();
 - Wrong: treat `data=[]` plus copied text as `ImageGenerationError`.
 - Correct: return completed text output and expose it as `text_content`, `copied_text`, and `output_text`.
 
+### Batched Image Generation Contract
+
+#### 1. Scope / Trigger
+- Trigger: `/v1/responses`, `/v1/images/generations`, and `/v1/images/edits` accept image generation count `n` greater than `1`.
+- This is a cross-layer API contract because backend validation, internal provider calls, SSE events, frontend placeholder slots, and user-key billing must agree on the same indexes and counts.
+
+#### 2. Signatures
+- `MAX_IMAGES_PER_REQUEST = 10`
+- `IMAGE_BATCH_CONCURRENCY = 3`
+- `generate_image_payload(..., n: int, ...) -> (dict[str, object], dict[str, object] | None)`
+- `generate_single_image_slot(..., request_index: int, ...) -> ImageBatchSlotResult`
+- `generate_image_slots_with_limit(..., requested_count: int, ...) -> list[ImageBatchSlotResult]`
+
+#### 3. Contracts
+- Public routes accept `n` in `1..10`; `n > 10` must fail request validation.
+- When `n > 1`, the public request is split into `n` internal calls to `BackendService.generate_with_pool(..., n=1, ...)`.
+- Internal slot concurrency is capped by `IMAGE_BATCH_CONCURRENCY`, not by public `n`.
+- Every successful image item must include original slot `index`.
+- Partial failure with at least one success returns success payload plus `partial_errors[]`.
+- `partial_errors[]` entries must include `index` and a client-safe `error` string.
+- User-key preflight checks `unit_cost * requested_count`; final billing charges `unit_cost * succeeded_count`.
+- All failed slots must remain an error response and must not deduct user-key quota.
+
+#### 4. Validation & Error Matrix
+- `n=1` -> one internal call, no batch aggregation needed.
+- `n=10` -> ten internal calls with at most three active slots.
+- `n=11` -> validation error before queue/backend execution.
+- Some slots succeed and some fail -> HTTP success with `partial_errors`, success-count billing.
+- All slots fail -> error response, zero quota deduction.
+- Slot returns text but no image -> preserve text output; do not charge image quota for text-only output.
+
+#### 5. Good/Base/Bad Cases
+- Good: output indexes and partial error indexes cover the requested slots without overlap.
+- Base: clients may receive successful image events in output order, but event payload still carries original `index`.
+- Bad: assuming completion order equals request index; bounded concurrency can change completion order.
+
+#### 6. Tests Required
+- Route validation accepts `n=10` and rejects `n=11` for all public image routes.
+- Batch aggregation calls `generate_with_pool` with `n=1` for each slot.
+- Concurrency test proves active slots never exceed `IMAGE_BATCH_CONCURRENCY`.
+- Partial success test proves only successful slots are billed.
+- Responses SSE test proves every successful `image_generation_call` emits completed/done events with `index`, then `response.completed` and `[DONE]`.
+- Images SSE test proves every successful image emits `image_generation.completed` with `index`, then `[DONE]`.
+
+#### 7. Wrong vs Correct
+- Wrong: pass public `n=10` directly into one upstream provider call.
+- Correct: split into ten internal `n=1` slot calls and merge results by original slot index.
+- Wrong: charge `requested_count` after partial success.
+- Correct: preflight against `requested_count`, then deduct only `succeeded_count`.
+
 ## 3. Telemetry Configuration
 
 **IMPORTANT**: Always enable telemetry for token tracking and performance monitoring.

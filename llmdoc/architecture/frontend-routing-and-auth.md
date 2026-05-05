@@ -37,17 +37,17 @@
 
 - 画图页不再读账号列表，而是调用 `/api/quota` 显示当前 key 可用次数。如果当前是 `user_key`，也会拿到这个 key 自己的 `pricing`，入口在 `web/src/app/image/page.tsx:240`。
 - 画图页工具区提供“打开画廊”入口，画廊预览弹层可把 prompt 带回 `/image?prompt=...&focus=prompt`。`/image` 收到 `focus=prompt` 后会聚焦并滚动到输入框，再清掉查询串。
-- 画图页顶部栏放“新建”和“配置”。主界面在桌面端是历史侧栏、对话区、画廊栏三栏结构；中间对话区使用 `minmax(0, 1fr)` 风格的弹性区域承载结果和 composer，避免被左右两栏挤出。侧栏默认隐藏且只显示会话历史；桌面端用左上角按钮展开或收起，移动端用浮层抽屉打开。桌面历史侧栏使用约 500ms 的宽度、透明度和位移动画，不再用 spring 弹性动画；历史条目只做轻微 fade 和 y 轴移动。隐藏后的桌面侧栏不可点击，避免挡住顶部按钮。首屏不拉会话历史。侧栏打开后先请求 `/api/image-conversations?summary=true` 读取轻量摘要，摘要只保留最新 turn、`turnCount` 和状态字段；点选某条会话时再请求 `/api/image-conversations/{conversation_id}` 读取完整图片和 turn 数据。清空历史按钮在侧栏底部，点击后必须在弹窗里二次确认。图像尺寸默认 `auto`，弹窗支持自动、比例和自定义宽高；尺寸计算在 `web/src/lib/image-size.ts`。侧栏、历史条目、结果图和输入区使用 `motion/react` 做轻量动效，并通过 `prefers-reduced-motion` 降低动效。
+- 画图页顶部栏放“新建”和“配置”。主界面在桌面端是历史侧栏、对话区、画廊栏三栏结构；中间对话区使用 `minmax(0, 1fr)` 风格的弹性区域承载结果和 composer，避免被左右两栏挤出。侧栏默认隐藏且只显示会话历史；桌面端用左上角按钮展开或收起，移动端用浮层抽屉打开。桌面历史侧栏使用约 500ms 的宽度、透明度和位移动画，不再用 spring 弹性动画；历史条目只做轻微 fade 和 y 轴移动。隐藏后的桌面侧栏不可点击，避免挡住顶部按钮。首屏不拉会话历史。侧栏打开后先请求 `/api/image-conversations?summary=true` 读取轻量摘要，摘要只保留最新 turn、`turnCount` 和状态字段；点选某条会话时再请求 `/api/image-conversations/{conversation_id}` 读取完整图片和 turn 数据。清空历史按钮在侧栏底部，点击后必须在弹窗里二次确认。图像尺寸默认 `auto`，配置弹窗支持自动、只控分辨率、只控比例三种方式；自动时分辨率和比例不可控，单项自定义时另一项保存为 `auto`，尺寸计算在 `web/src/lib/image-size.ts`。侧栏、历史条目、结果图和输入区使用 `motion/react` 做轻量动效，并通过 `prefers-reduced-motion` 降低动效。
 - 画图页右侧桌面端常驻画廊栏由 `web/src/app/image/page.tsx` 内部的 `ImageInspirationRail` 渲染。它动态读取 `web/src/data/gallery-ui-seed.json` 和 `web/src/data/gallery-image-dimensions.json`，两列展示小图，点击小图只打开预览弹窗，不直接改输入框。弹窗里提供复制 prompt 和“带入 prompt”，用户点“带入 prompt”后才写入 composer 并聚焦。右侧画廊栏可隐藏；隐藏状态只存在当前页面 state，不写后端。
 - `ImageInspirationRail` 的滚动容器带 `data-auto-scroll="image-inspiration-rail"`，会按自身 `scrollTop` 自动下滚；鼠标移入右侧“画廊灵感”时暂停，鼠标移出后等待 3 秒再继续滚动。真实瀑布布局和自动滚动都在 `web/src/app/image/page.tsx` 内部完成，验证时应检查这个滚动容器，而不是独立 `/gallery` 页面。
 - 画图页生成成功的结果图下方会显示“添加到瀑布流”。点击后会把这张生成图存入 `web/src/store/gallery-prompts.ts` 的 `user_waterfall_items:<auth scope>` 本地记录，并在右侧“画廊灵感”最前面显示为“我的作品”；同一张图再次添加时按钮显示“已在瀑布流”。这些用户添加项只对当前 Bearer Token 对应的本地 scope 生效，不写后端，不影响其他用户。
 - 右侧“画廊灵感”的 seed 图仍先按 prompt 使用次数排序，再按页面加载时生成的随机权重排序；用户添加的生成图在 seed 图之前。空状态快捷 prompt 仍只展示 prompt，不展示用户生成图。
 - 画图页空状态标题是“今天你想创造什么?”。标题下方展示 `gallery-ui-seed.json` 中有 prompt 的前 8 条快捷 prompt，点击后直接写入 composer 并聚焦输入框，不跳转。
-- 画图页 composer 在 `web/src/app/image/page.tsx` 中实现，结构接近 ChatGPT 输入栏：大圆角输入框，上方是 prompt textarea，下方是上传、画廊、张数切换、状态提示和圆形发送按钮。上传图预览仍在输入框内显示，Enter 发送、Shift+Enter 换行。
+- 画图页 composer 在 `web/src/app/image/page.tsx` 中实现，结构接近 ChatGPT 输入栏：大圆角输入框，上方是 prompt textarea，下方是上传、画廊、1 到 10 张的张数快捷按钮和数字输入、状态提示和圆形发送按钮。上传图预览仍在输入框内显示，Enter 发送、Shift+Enter 换行。
 - 画图页会把页面重新打开后遗留的 `queued`、`assigning_account`、`running` 和 `loading` 图片状态改成可重试错误态。composer 旁会显示“重置”按钮，用于手动清掉旧请求状态，避免发送按钮被旧运行态占用。
 - 画图页的聊天区图片按中间聊天栏宽度自适应。参考图在用户消息里使用 `object-contain`，结果图单张时占满聊天栏，多张时最多两列，避免右侧画廊栏显示时结果图被压得过小。
 - 前端发送时会先按当前 key 的模型单价和张数算成本，默认单价是 `1K=2`、`2K=2`、`4K=8`。画图页模型按钮提供 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`，默认模型是 `gpt-image-2`。
-- 前端画图页向 `/v1/responses` 发送请求时，会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。
+- 前端画图页向 `/v1/responses` 发送请求时，会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。配置保持自动时，prompt 里明确写到 `1K`、`2K`、`4K`、`1024`、`2048`、`4096` 或常见高分辨率词时，页面只用它推断显示和模型档位，`tools[].size` 仍保持 `auto`。
 - 如果当前额度不够，发送按钮会禁用，并显示提示，位置在 `web/src/app/image/page.tsx:644` 和 `web/src/app/image/page.tsx:652`。
 - 图片请求继续一次请求带 `n`。如果后端返回 `billing.remaining_quota`，前端会先就地刷新余额，再同步拉一次 `/api/quota`，位置在 `web/src/app/image/page.tsx:373` 和 `web/src/lib/api.ts:235`。
 - 如果后端返回了 `copied_text` 或 `text_content`，画图页会把它保存到当前 turn，并在结果区渲染一个“可复制文本”卡片，入口在 `web/src/app/image/page.tsx`。没有图片但有文本时，当前 turn 会结束为成功态，图片占位改成错误态，composer 不再继续等待。

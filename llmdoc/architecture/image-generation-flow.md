@@ -14,7 +14,7 @@
 处理顺序：
 
 - 如果当前鉴权是 `user_key`，会先检查这个 key 的 `pricing[model] * n` 是否足够；只有拿到图片结果后才扣费，公共逻辑在 `services/api.py` 的 `generate_image_payload`。
-- 当 `n > 1` 时，服务端会把它拆成 `n` 次内部生成调用，每次传给 `BackendService.generate_with_pool` 的 `n` 都是 `1`。这样单张图命中 `524` 之类的上游错误时，不会丢掉已经成功的其他图片。
+- 当 `n > 1` 时，服务端会把它拆成 `n` 次内部生成调用，每次传给 `BackendService.generate_with_pool` 的 `n` 都是 `1`。单次公开请求最多 10 张，聚合层最多同时启动 3 个内部槽位；这样单张图命中 `524` 之类的上游错误时，不会丢掉已经成功的其他图片。
 - 批量请求如果至少一张成功，会返回成功图片，并在响应顶层带 `partial_errors` 记录失败图片的 `index` 和错误信息；每个成功图片项也带原始 `index`，方便前端放回对应位置。`user_key` 只按成功张数扣费，`billing` 会带 `requested_count`、`succeeded_count` 和 `failed_count`。
 - 批量请求如果全部失败，会保持失败响应，不扣 `user_key` 额度。
 - 先从账号池选一个当前可用的 token，逻辑在 `services/backend_service.py:38`。
@@ -53,9 +53,9 @@
 - 如果上游页面正文里带了可复制文本，`services/image_service.py` 会先收下，再由 `services/api.py` 透传成响应顶层字段 `copied_text`。
 - 如果上游只返回文本而没有图片，`services/api.py` 会保留空 `data`，同时返回 `text_content` 和 `copied_text`。`/v1/responses` 会把这段文本放进 `response.output[]` 的 `message/output_text`，并按完成响应结束；`user_key` 只按成功图片数扣费，所以这种文本替代结果不扣图片额度。
 - `/v1/images/generations` 和 `/v1/images/edits` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
-- `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终如果有图片，`response.image_generation_call.completed` 会带图片 `result` 和完整 `item`；如果只有文本，最终 Response 会带 `message/output_text`。两种成功结果最后都给 `response.completed` 和 `data: [DONE]`。
+- `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终如果有图片，每张成功图都会有一条 `response.image_generation_call.completed`，事件顶层带原始 `index`、图片 `result` 和完整 `item`；如果只有文本，最终 Response 会带 `message/output_text`。两种成功结果最后都给 `response.completed` 和 `data: [DONE]`。
 - 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。收到 `response.failed` 时要把本地 turn 和 loading 图片改成错误态。
-- 前端图片页调用 `/v1/responses` 时默认传 `stream: true`，会把选中的公开模型放到 `tools[].model`，把当前尺寸选择放到 `tools[].size`，再从 SSE 的 `response.completed` 事件读取最终 Response。它既读取图片项，也读取 `text_content/copied_text`；没有图片但有文本时会结束生成并展示“可复制文本”。公开的 `/v1/images/generations` 和 `/v1/images/edits` 只作为外部兼容入口，项目自带网页不使用。
+- 前端图片页调用 `/v1/responses` 时默认传 `stream: true`，会把选中的公开模型放到 `tools[].model`，把当前尺寸选择放到 `tools[].size`，再从 SSE 的 `response.completed` 事件读取最终 Response。配置保持自动时，prompt 中明确出现的 `1K`、`2K`、`4K`、`1024`、`2048`、`4096` 或常见高分辨率词只用于页面显示和模型档位推断，不会把 `tools[].size` 从 `auto` 改成固定宽高。它既读取图片项，也读取 `text_content/copied_text`；没有图片但有文本时会结束生成并展示“可复制文本”。公开的 `/v1/images/generations` 和 `/v1/images/edits` 只作为外部兼容入口，项目自带网页不使用。
 - 前端图片页现在会把 session 存成多轮 `turns[]`，主存储是后端 `/api/image-conversations`，本地 `localforage` 只做缓存和旧数据上传来源。每轮保存 prompt、模型、张数、尺寸、参考图、结果图、队列 id、`responseId` 和 `copied_text`；旧单轮记录读取时会映射成一个 turn，实现见 `web/src/store/image-conversations.ts`。
 - 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。
 - 在同一 session 继续发送新 prompt 时，前端复用 `clientConversationId`，并把上一轮 `responseId` 作为 `previous_response_id` 发给 `/v1/responses`。
