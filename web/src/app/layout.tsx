@@ -20,8 +20,8 @@ const monoFont = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChatGPT 号池管理",
-  description: "ChatGPT account pool management dashboard",
+  title: "image-2",
+  description: "image-2",
 };
 
 export default function RootLayout({
