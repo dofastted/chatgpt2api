@@ -52,7 +52,8 @@
 - 对外协议转换都在 `services/api.py`。`build_responses_payload` 和 `iter_responses_stream` 负责 Responses 风格输出；`build_images_response_payload` 和 `iter_images_stream` 负责图片接口风格输出。
 - 如果上游页面正文里带了可复制文本，`services/image_service.py` 会先收下，再由 `services/api.py` 透传成响应顶层字段 `copied_text`。
 - 如果上游只返回文本而没有图片，`services/api.py` 会保留空 `data`，同时返回 `text_content` 和 `copied_text`。`/v1/responses` 会把这段文本放进 `response.output[]` 的 `message/output_text`，并按完成响应结束；`user_key` 只按成功图片数扣费，所以这种文本替代结果不扣图片额度。
-- 无输入图 prompt 现在直接按原文发给上游，不再追加后端文字渲染约束，也不再因为 `low quality text render` 拦下已完成的下载结果。
+- 无输入图 prompt 现在直接按原文发给上游，不再追加后端文字渲染约束。
+- 下载完成后不再做本地 `low quality text render` 复核；`low quality text render` 也不再作为本地拦截用户 prompt 或丢弃已生成结果的理由。
 - `/v1/images/generations` 和 `/v1/images/edits` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
 - `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终如果有图片，每张成功图都会有一条 `response.image_generation_call.completed`，事件顶层带原始 `index`、图片 `result` 和完整 `item`；如果只有文本，最终 Response 会带 `message/output_text`。两种成功结果最后都给 `response.completed` 和 `data: [DONE]`。前端会在 `response.created` 或 `response.completed` 里尽早保存 `responseId`。
 - 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。收到 `response.failed` 或浏览器流异常时，要把本地 turn 和所有 loading 图片改成错误态，数量保持为本次请求的 `n`。
@@ -81,6 +82,7 @@
 - 如果报错命中失效 token 条件，判断在 `services/image_service.py:205`，随后 `services/backend_service.py:68` 会把 token 从池里删掉。
 - 如果请求前刷新失败，`services/backend_service.py:27` 会把这个账号标成 3 分钟冷却，跳过后继续试下一个。
 - 如果上游会话返回瞬时错误，`services/image_service.py` 会把 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit、temporarily unavailable 这类信号都当作可重试失败；`services/backend_service.py` 会跳过当前账号继续试。
+- 如果本机代理报 `curl: (7) Failed to connect ... 10808`，先按本机 Clash 或代理瞬时连接失败处理：先测代理是否还能连通，再走代码层短退避重试。不要把这类错误先归因到 `low quality text render`、prompt 质量或账号质量。
 - 如果整个池里没有可用 token，`services/backend_service.py:38` 会抛出 `503`。
 - 请求完成后，不论是 JSON 还是 SSE，都会在响应真正发完后才从运行态移除。`/v1/images/generations` 和 `/v1/images/edits` 流式请求要等 `image_generation.completed` 与 `data: [DONE]` 发完；`/v1/responses` 流式请求要等 `response.completed` 与 `data: [DONE]` 发完。
 
@@ -92,3 +94,11 @@
 - 队列采样显示全局运行峰值 20、全局等待峰值 3、单 key 等待峰值 2，最后 `global.waiting=0`、`global.running=0`。
 - 扣费结果是 `1K=20/10次`、`2K=12/6次`、`4K=32/4次`，没有单价不匹配。
 - 原始报告在 `.llmdoc-tmp/cloud-queue-checks/20260426-173010/report.json`。
+
+2026-05-05 这轮稳定修复链：
+
+- `764ea86 fix: recover stuck image queue turns`：先把卡住问题收回到队列终态传播与请求对账。
+- `6c26946 fix: disable image text render review`：明确取消后端文字质量审查，不再因为 `low quality text render` 本地拦截结果。
+- `ef515b5 fix: retry transient proxy connect failures`：把 `curl: (7) Failed to connect ... 10808` 当作代理瞬时错误，做短退避重试。
+
+以后再碰到类似事故，判断顺序应先看队列和终态，再看代理连通性，最后才看账号状态或上游真实返回；不要倒过来。

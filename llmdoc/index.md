@@ -8,6 +8,7 @@
 - `llmdoc/must/read-this-first.md`
 - `llmdoc/must/auth-and-roles.md`
 - `llmdoc/must/runtime-layout.md`
+- `llmdoc/memory/reflections/2026-05-05-image-proxy-review-boundaries.md`
 
 ## 概览
 
@@ -46,6 +47,7 @@
 - `llmdoc/memory/reflections/2026-04-29-image-inspiration-rail.md` 记录 `/image` 右侧“画廊灵感”瀑布流、自动滚动、悬停暂停和用户生成图加入 rail 的验证要点。
 - `llmdoc/memory/reflections/2026-04-26-cherry-image-api-compat.md` 记录 Cherry Studio 图片 API 兼容、`response_format=url` 和 HTTP 图片 URL 的验证要点。
 - `llmdoc/memory/reflections/2026-04-25-main-worktree-data-handoff.md` 记录主工作树接管、运行数据合并和迁移 worktree 归档规则。
+- `llmdoc/memory/reflections/2026-05-05-image-proxy-review-boundaries.md` 记录 2026-05-05 这轮稳定修复链、不要恢复后端文字质量审查、代理瞬时失败判定、以及 `fork/main` 发布边界。
 
 ## 临时调查
 

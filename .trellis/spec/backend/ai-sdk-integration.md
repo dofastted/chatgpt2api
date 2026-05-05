@@ -106,6 +106,51 @@ return result.toDataStreamResponse();
 - Wrong: treat `data=[]` plus copied text as `ImageGenerationError`.
 - Correct: return completed text output and expose it as `text_content`, `copied_text`, and `output_text`.
 
+### Image Generation Review and Proxy Failure Contract
+
+#### 1. Scope / Trigger
+- Trigger: image generation code touches prompt construction, downloaded image validation, upstream retry classification, or local proxy handling.
+- This contract prevents regressions from reintroducing backend text-render review or misclassifying local Clash proxy failures as prompt/account failures.
+
+#### 2. Signatures
+- `services.image_service.is_transient_image_error(message: str) -> bool`
+- `services.image_service._retry(fn, retries: int = 4, delay: float = 2.0, retry_on_status: tuple[int, ...] = ()) -> object`
+- `BackendService.generate_with_pool(prompt, model, n, input_images=None, queue_request_id=None, size=None)`
+
+#### 3. Contracts
+- For no-input-image requests, pass the user prompt through to upstream unchanged. Do not append backend text-render constraints.
+- After an image has been downloaded, do not run local `low quality text render` review.
+- `low quality text render` must not be a local reason to block a user prompt, discard a downloaded result, or convert a completed image into failure.
+- Treat `curl: (7) Failed to connect ... 10808`, `failed to connect`, `could not connect to server`, and `connection refused` as transient local proxy-connect failures.
+- Proxy-connect failures should receive short backoff retries before they consume account-pool attempts.
+- If Git operations hit the same local proxy instability, use command-scoped `-c http.proxy= -c https.proxy=` only; do not change global Git proxy config from code or docs automation.
+
+#### 4. Validation & Error Matrix
+- Upstream returns a downloadable image plus text-render warning text -> keep the downloaded image result.
+- Local code sees `low quality text render` from a legacy error path -> propagate it as an upstream error sample; do not add a special local review/retry branch.
+- `curl: (7)` from proxy connection to `127.0.0.1:10808` or `192.168.*:10808` -> short backoff retry, then transient image error if still failing.
+- Proxy recovers during short backoff -> continue the same image generation attempt.
+- Proxy remains down across retries and account attempts -> fail with the proxy error, not with a text-quality diagnosis.
+
+#### 5. Good/Base/Bad Cases
+- Good: a short Clash hiccup recovers inside `_retry()` and the request finishes without switching accounts.
+- Base: a transient proxy error still reaches `generate_with_pool()`, which skips the current account and tries the next available account.
+- Bad: reintroducing prompt refinement or downloaded-image text review blocks user prompts or completed images.
+- Bad: diagnosing `curl: (7) ... 10808` as account quality, prompt quality, or text-render quality before checking proxy connectivity.
+
+#### 6. Tests Required
+- Unit: `is_transient_image_error()` returns true for proxy-connect failure text.
+- Unit: `_retry()` uses short backoff for proxy-connect failures and does not count those short backoffs against the configured normal retry count.
+- Unit: no-input-image prompt construction keeps the original prompt text.
+- Unit: downloaded images are returned without local `low quality text render` review.
+- Integration/manual: a real `/v1/responses` request succeeds after deployment and its `image_request_records` row is `finished`, `http_status=200`, and `error_message=None`.
+
+#### 7. Wrong vs Correct
+- Wrong: add a local "text quality" filter that rejects already downloaded images.
+- Correct: preserve the upstream result and let clients receive the image or explicit upstream error.
+- Wrong: handle `curl: (7) Failed to connect ... 10808` by removing accounts or changing prompt review rules.
+- Correct: test local proxy connectivity, use short backoff retries, then fall back to transient account-pool retry behavior.
+
 ### Batched Image Generation Contract
 
 #### 1. Scope / Trigger

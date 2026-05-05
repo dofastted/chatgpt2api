@@ -4,6 +4,13 @@
 
 这台机器的本地主工作树是 `X:/project/chatgpt2api`。如果曾在 `X:/project/chatgpt2api-chat-image-worktree` 验证迁移代码，正式本机容器仍应回到主工作树启动；临时 worktree 只能保留在归档分支。
 
+发布和 Git 边界：
+
+1. 当前稳定发布目标是 `fork/main`。
+2. `origin/main` 和本地 `main` 已严重分叉；除非用户明确要求处理上游分叉，不要推 `origin/main`，也不要强推 `origin/main`。
+3. Git 操作继续用 Windows Git，不要切回 WSL Git 混用。
+4. 如果 Git 因代理失败，可对单条命令临时禁用代理直连，例如 `git -c http.proxy= -c https.proxy= fetch`、`pull`、`push`。只限这一次命令，不改全局配置。
+
 最短路径：
 
 1. 以 `config.example.json:2` 到 `config.example.json:4` 为样例，在仓库根目录准备 `config.json`。
@@ -30,3 +37,4 @@
 - 管理员密钥登录后应该进入 `/accounts`，规则也在 `web/src/app/login/page.tsx:30`。
 - 普通密钥访问号池管理页时应被挡回 `/image`，见 `web/src/app/accounts/page.tsx:269`。
 - 如果要确认当前实例已经带上自启动，可在宿主机执行 `docker inspect chatgpt2api --format '{{.HostConfig.RestartPolicy.Name}}'`，期望值是 `unless-stopped`。
+- 如果生图请求报 `curl: (7) Failed to connect ... 10808`，先做本机代理连通性检查，再按短退避重试或重新触发请求；不要先回滚成文字质量审查，也不要先判成账号坏。
