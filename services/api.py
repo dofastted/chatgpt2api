@@ -472,6 +472,13 @@ def build_image_generation_timeout_error() -> HTTPException:
     )
 
 
+def build_image_generation_cancelled_error() -> HTTPException:
+    return HTTPException(
+        status_code=499,
+        detail={"error": "image generation stream was cancelled before completion"},
+    )
+
+
 async def await_image_generation_payload(awaitable):
     try:
         return await asyncio.wait_for(awaitable, timeout=IMAGE_GENERATION_TIMEOUT_SECONDS)
@@ -1290,6 +1297,7 @@ async def iter_live_responses_generation_stream(
     yield emit("response.in_progress", response=clone_json_value(pending_payload))
 
     task = asyncio.create_task(build_payload())
+    completed = False
     try:
         deadline = time() + IMAGE_GENERATION_TIMEOUT_SECONDS
         while not task.done():
@@ -1301,6 +1309,21 @@ async def iter_live_responses_generation_stream(
             if not task.done():
                 yield emit("response.in_progress", response=clone_json_value(pending_payload), heartbeat=True)
         payload = await task
+        for chunk in iter_responses_stream(payload, include_start=False):
+            yield chunk
+        image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
+        image_queue_service.finish_ticket(queue_request_id)
+        completed = True
+    except asyncio.CancelledError as exc:
+        cancelled_error = build_image_generation_cancelled_error()
+        message = generation_error_to_text(cancelled_error)
+        fail_queue_request(queue_request_id, message)
+        image_request_log_service.mark_failed(
+            queue_request_id,
+            error=cancelled_error,
+            http_status=499,
+        )
+        raise exc
     except Exception as exc:
         fail_queue_request(queue_request_id, str(exc))
         image_request_log_service.mark_failed(
@@ -1319,11 +1342,9 @@ async def iter_live_responses_generation_stream(
         yield emit("response.failed", response=failed_payload)
         yield format_sse_event(None, "[DONE]")
         return
-
-    for chunk in iter_responses_stream(payload, include_start=False):
-        yield chunk
-    image_request_log_service.mark_finished(queue_request_id, billing=payload.get("billing"), result=payload)
-    image_queue_service.finish_ticket(queue_request_id)
+    finally:
+        if not completed and not task.done():
+            task.cancel()
 
 
 def iter_images_stream(

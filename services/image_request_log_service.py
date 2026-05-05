@@ -179,6 +179,11 @@ class ImageRequestLogService:
         normalized_id = _clean_text(request_id)
         if not normalized_id or not updates:
             return
+        next_status = _clean_text(updates.get("status"))
+        if next_status in REQUEST_ACTIVE_STATUSES:
+            current = self.get_record(normalized_id) or {}
+            if _clean_text(current.get("status")) in REQUEST_TERMINAL_STATUSES:
+                return
         updates["updated_at"] = _now_text()
         assignments = ", ".join(f"{key} = ?" for key in updates)
         with sqlite_store.connect() as connection:

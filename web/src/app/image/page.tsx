@@ -1229,7 +1229,10 @@ export default function ImagePage() {
     return (
       (queueStatus?.items || []).find(
         (item) => item.request_id === selectedTurn.queueRequestId,
-      ) || null
+      ) ||
+      (queueStatus?.request?.request_id === selectedTurn.queueRequestId
+        ? queueStatus.request
+        : null)
     );
   }, [queueStatus, selectedTurn]);
   const currentQueueProgressText = useMemo(
@@ -1465,9 +1468,10 @@ export default function ImagePage() {
           ),
         );
         if (!cancelled) {
-          const mergedItems = snapshots.flatMap(
-            (snapshot) => snapshot?.items || [],
-          );
+          const mergedItems = snapshots.flatMap((snapshot) => [
+            ...(snapshot?.items || []),
+            ...(snapshot?.request ? [snapshot.request] : []),
+          ]);
           const uniqueItems = Array.from(
             new Map(
               mergedItems.map((item) => [item.request_id, item]),
@@ -1485,7 +1489,9 @@ export default function ImagePage() {
                     uniqueItems.find(
                       (item) =>
                         item.request_id === selectedConversationRequestId,
-                    ) || null,
+                    ) ||
+                    baseSnapshot.request ||
+                    null,
                   items: uniqueItems,
                 }
               : null,

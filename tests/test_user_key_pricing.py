@@ -1324,6 +1324,44 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(record_response.status_code, 200)
         self.assertEqual(record_response.json()["status"], "finished")
 
+    def test_image_request_record_terminal_status_is_not_overwritten_by_running_update(self) -> None:
+        request_id = "terminal-status-record"
+        api.image_request_log_service.create_record(
+            request_id=request_id,
+            owner_id="owner-terminal",
+            auth_type="auth_key",
+            endpoint="/v1/responses",
+            protocol="responses",
+            model="gpt-image-2",
+            size="auto",
+            n=10,
+            stream=True,
+            prompt="terminal request",
+            requested_count=10,
+        )
+
+        api.image_request_log_service.mark_failed(
+            request_id,
+            error="client disconnected before completion",
+            http_status=499,
+        )
+        api.image_request_log_service.mark_running(
+            request_id,
+            account_token="late-token",
+            account_type="Team",
+            route="images",
+            attempt_count=2,
+        )
+
+        record = api.image_request_log_service.get_record(request_id)
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["http_status"], 499)
+        self.assertEqual(record["error_message"], "client disconnected before completion")
+        self.assertIsNone(record["route"])
+        self.assertEqual(record["attempt_count"], 0)
+
     def test_image_request_records_cursor_keeps_same_second_rows(self) -> None:
         created_ids = ["cursor-c", "cursor-b", "cursor-a"]
         for request_id in created_ids:
