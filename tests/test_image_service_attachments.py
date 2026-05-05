@@ -293,6 +293,20 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         prompt = "black background with white letters ABCD"
         self.assertTrue(image_service._needs_text_render_retry(prompt, image_bytes.getvalue()))
 
+    def test_needs_text_render_retry_skips_plain_portrait_prompt(self) -> None:
+        image = Image.new("RGB", (512, 512), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((36, 200, 476, 368), fill="white")
+        image_bytes = BytesIO()
+        image.save(image_bytes, format="PNG")
+
+        prompt = (
+            "A dreamy ultra-detailed close-up portrait of a beautiful young East Asian girl "
+            "holding a bouquet of flowers, cinematic lighting, realistic skin texture"
+        )
+
+        self.assertFalse(image_service._needs_text_render_retry(prompt, image_bytes.getvalue()))
+
     def test_refine_prompt_for_text_rendering_only_applies_to_text_prompts(self) -> None:
         plain_prompt = "a red apple on a wooden table"
         text_prompt = "black background with white letters ABCD"
@@ -302,6 +316,11 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertIn("Keep one centered line only", refined)
         self.assertIn("No blur, glow, bloom", refined)
         self.assertTrue(refined.startswith(text_prompt))
+
+    def test_refine_prompt_for_text_rendering_ignores_negated_text_hints(self) -> None:
+        prompt = "cinematic portrait, no text, no watermark, no logo"
+
+        self.assertEqual(image_service._refine_prompt_for_text_rendering(prompt), prompt)
 
     def test_generate_image_result_skips_prompt_refinement_when_input_image_exists(self) -> None:
         with (

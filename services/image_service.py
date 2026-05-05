@@ -129,12 +129,29 @@ _TEXT_RENDER_HINT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_NEGATED_TEXT_RENDER_HINT_PATTERN = re.compile(
+    r"\b(?:no|without|avoid|exclude|remove)\s+(?:any\s+|visible\s+)?"
+    r"(?:letters?|typography|fonts?|texts?|words?|watermarks?|captions?|logos?)\b"
+    r"|不要(?:任何|可见)?(?:字母|文字|字体|水印|字幕|标识|logo)"
+    r"|不(?:要|含|带)(?:任何|可见)?(?:字母|文字|字体|水印|字幕|标识|logo)"
+    r"|无(?:字母|文字|字体|水印|字幕|标识|logo)",
+    re.IGNORECASE,
+)
+
+
+def _prompt_requests_text_rendering(prompt: str) -> bool:
+    normalized_prompt = str(prompt or "").strip()
+    if not normalized_prompt:
+        return False
+    cleaned_prompt = _NEGATED_TEXT_RENDER_HINT_PATTERN.sub(" ", normalized_prompt)
+    return bool(_TEXT_RENDER_HINT_PATTERN.search(cleaned_prompt))
+
 
 def _refine_prompt_for_text_rendering(prompt: str) -> str:
     normalized_prompt = str(prompt or "").strip()
     if not normalized_prompt:
         return normalized_prompt
-    if not _TEXT_RENDER_HINT_PATTERN.search(normalized_prompt):
+    if not _prompt_requests_text_rendering(normalized_prompt):
         return normalized_prompt
     refinement = (
         " Render the text with crisp hard edges and clean spacing. "
@@ -225,7 +242,7 @@ def _measure_text_render_metrics(image_bytes: bytes) -> Optional[TextRenderMetri
 
 
 def _needs_text_render_retry(prompt: str, image_bytes: bytes) -> bool:
-    if not _TEXT_RENDER_HINT_PATTERN.search(str(prompt or "").strip()):
+    if not _prompt_requests_text_rendering(prompt):
         return False
     metrics = _measure_text_render_metrics(image_bytes)
     if metrics is None:

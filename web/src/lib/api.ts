@@ -381,10 +381,12 @@ type ResponsesImageGenerationResponse = {
   id?: string;
   created_at?: number;
   output?: Array<{
+    id?: string;
     type?: string;
     status?: string;
     result?: string;
     index?: number;
+    [key: string]: unknown;
   }>;
   partial_errors?: Array<{ index?: number; error?: string }>;
   billing?: ImageBilling;
@@ -404,6 +406,90 @@ type ResponsesImageGenerationOutputItem = NonNullable<ResponsesImageGenerationRe
 type ResponsesStreamEventData = Record<string, unknown> & {
   response?: ResponsesImageGenerationResponse;
 };
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function isResponsesImageGenerationOutputItem(
+  value: unknown,
+): value is ResponsesImageGenerationOutputItem {
+  return isObjectRecord(value) && value.type === "image_generation_call";
+}
+
+function normalizeStreamImageOutputItem(
+  data: ResponsesStreamEventData,
+): ResponsesImageGenerationOutputItem | null {
+  const rawItem = isObjectRecord(data.item) ? data.item : {};
+  const itemType = String(rawItem.type || data.type || "").trim();
+  const result = String(rawItem.result || data.result || "").trim();
+  if (itemType !== "image_generation_call" || !result) {
+    return null;
+  }
+
+  const index = toFiniteNumber(rawItem.index ?? data.index ?? data.output_index);
+  return {
+    ...rawItem,
+    type: "image_generation_call",
+    status: String(rawItem.status || "").trim() || "completed",
+    result,
+    ...(index !== null ? { index } : {}),
+  };
+}
+
+function mergeStreamImageOutputItems(
+  payload: ResponsesImageGenerationResponse,
+  streamedItems: ResponsesImageGenerationOutputItem[],
+): ResponsesImageGenerationResponse {
+  if (streamedItems.length === 0) {
+    return payload;
+  }
+
+  const output = Array.isArray(payload.output) ? [...payload.output] : [];
+  const outputByIndex = new Map<number, ResponsesImageGenerationOutputItem>();
+  for (const item of output) {
+    if (!isResponsesImageGenerationOutputItem(item)) {
+      continue;
+    }
+    const index = toFiniteNumber(item.index);
+    if (index !== null) {
+      outputByIndex.set(index, item);
+    }
+  }
+
+  const mergedOutput = [...output];
+  for (const streamedItem of streamedItems) {
+    const index = toFiniteNumber(streamedItem.index);
+    if (index === null) {
+      mergedOutput.push(streamedItem);
+      continue;
+    }
+
+    const existingItem = outputByIndex.get(index);
+    if (existingItem) {
+      const existingOutputIndex = mergedOutput.indexOf(existingItem);
+      mergedOutput[existingOutputIndex] = {
+        ...existingItem,
+        ...streamedItem,
+        result: String(streamedItem.result || existingItem.result || "").trim(),
+      };
+      continue;
+    }
+
+    outputByIndex.set(index, streamedItem);
+    mergedOutput.push(streamedItem);
+  }
+
+  return {
+    ...payload,
+    output: mergedOutput,
+  };
+}
 
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
@@ -775,6 +861,20 @@ async function readResponsesImageGenerationStream(response: Response) {
   const decoder = new TextDecoder();
   let buffer = "";
   let completedPayload: ResponsesImageGenerationResponse | null = null;
+  const streamedItemsByIndex = new Map<number, ResponsesImageGenerationOutputItem>();
+  const streamedItemsWithoutIndex: ResponsesImageGenerationOutputItem[] = [];
+
+  const recordStreamedItem = (item: ResponsesImageGenerationOutputItem | null) => {
+    if (!item) {
+      return;
+    }
+    const index = toFiniteNumber(item.index);
+    if (index === null) {
+      streamedItemsWithoutIndex.push(item);
+      return;
+    }
+    streamedItemsByIndex.set(index, item);
+  };
 
   const processRawEvent = (rawEvent: string) => {
     if (!rawEvent.trim()) {
@@ -786,6 +886,13 @@ async function readResponsesImageGenerationStream(response: Response) {
     }
     if (parsed.event === "response.completed") {
       completedPayload = parsed.data.response || null;
+      return;
+    }
+    if (
+      parsed.event === "response.image_generation_call.completed" ||
+      parsed.event === "response.output_item.done"
+    ) {
+      recordStreamedItem(normalizeStreamImageOutputItem(parsed.data));
       return;
     }
     if (parsed.event === "response.failed") {
@@ -814,7 +921,10 @@ async function readResponsesImageGenerationStream(response: Response) {
   if (!completedPayload) {
     throw new Error("生成响应没有结束信号");
   }
-  return completedPayload;
+  return mergeStreamImageOutputItems(completedPayload, [
+    ...streamedItemsByIndex.values(),
+    ...streamedItemsWithoutIndex,
+  ]);
 }
 
 export async function generateImage(
