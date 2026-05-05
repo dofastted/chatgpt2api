@@ -52,7 +52,7 @@
 - 对外协议转换都在 `services/api.py`。`build_responses_payload` 和 `iter_responses_stream` 负责 Responses 风格输出；`build_images_response_payload` 和 `iter_images_stream` 负责图片接口风格输出。
 - 如果上游页面正文里带了可复制文本，`services/image_service.py` 会先收下，再由 `services/api.py` 透传成响应顶层字段 `copied_text`。
 - 如果上游只返回文本而没有图片，`services/api.py` 会保留空 `data`，同时返回 `text_content` 和 `copied_text`。`/v1/responses` 会把这段文本放进 `response.output[]` 的 `message/output_text`，并按完成响应结束；`user_key` 只按成功图片数扣费，所以这种文本替代结果不扣图片额度。
-- 无输入图 prompt 只有在明确要求生成文字、字母、字体或排版时，`services/image_service.py` 才会追加文字渲染约束，并在下载后执行文字质量复查。普通人像、摄影、写实 prompt，以及明确写了 `no text`、`no watermark`、`无文字` 这类否定词的 prompt，不进入 `low quality text render` 重试链。
+- 无输入图 prompt 现在直接按原文发给上游，不再追加后端文字渲染约束，也不再因为 `low quality text render` 拦下已完成的下载结果。
 - `/v1/images/generations` 和 `/v1/images/edits` 流式时，图片事件会带 `event: image_generation.completed`，事件内容里也有 `type: image_generation.completed`，最后一定会给 `data: [DONE]`。
 - `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终如果有图片，每张成功图都会有一条 `response.image_generation_call.completed`，事件顶层带原始 `index`、图片 `result` 和完整 `item`；如果只有文本，最终 Response 会带 `message/output_text`。两种成功结果最后都给 `response.completed` 和 `data: [DONE]`。前端会在 `response.created` 或 `response.completed` 里尽早保存 `responseId`。
 - 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。收到 `response.failed` 或浏览器流异常时，要把本地 turn 和所有 loading 图片改成错误态，数量保持为本次请求的 `n`。

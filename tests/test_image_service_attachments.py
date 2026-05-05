@@ -11,7 +11,7 @@ sys.modules.setdefault("pybase64", base64)
 
 from services import image_service
 from services.uploaded_image_service import uploaded_image_service
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 class FakeSession:
@@ -265,64 +265,39 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             self.assertEqual(upstream_model, "gpt-image-2")
             self.assertIsNone(reasoning_effort)
 
-    def test_needs_text_render_retry_detects_oversized_or_unbalanced_text(self) -> None:
-        good = Image.new("RGB", (512, 512), "black")
-        good_draw = ImageDraw.Draw(good)
-        good_draw.rectangle((120, 205, 392, 295), fill="white")
-        good_bytes = BytesIO()
-        good.save(good_bytes, format="PNG")
+    def test_generate_image_result_preserves_plain_prompt_without_text_refinement(self) -> None:
+        with (
+            patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),
+            patch.object(image_service, "_resolve_upstream_target", return_value=("gpt-image-2", None)),
+            patch.object(image_service, "_bootstrap", return_value="device-1"),
+            patch.object(image_service, "_chat_requirements", return_value=("chat-token", {})),
+            patch.object(image_service, "_send_conversation", return_value=object()) as send_conversation,
+            patch.object(
+                image_service,
+                "_parse_sse",
+                return_value={
+                    "conversation_id": "conv-1",
+                    "file_ids": ["file-1"],
+                    "text": "",
+                },
+            ),
+            patch.object(
+                image_service,
+                "_download_generated_images",
+                return_value=[
+                    image_service.GeneratedImage(
+                        b64_json="aW1hZ2UtMQ==",
+                        revised_prompt="plain prompt",
+                        mime_type="image/png",
+                    )
+                ],
+            ),
+        ):
+            image_service.generate_image_result("token-123", "black background with white letters ABCD", model="gpt-image-2", n=1)
 
-        bad = Image.new("RGB", (512, 512), "black")
-        bad_draw = ImageDraw.Draw(bad)
-        bad_draw.rectangle((36, 200, 476, 368), fill="white")
-        bad_bytes = BytesIO()
-        bad.save(bad_bytes, format="PNG")
+        self.assertEqual(send_conversation.call_args.args[6], "black background with white letters ABCD")
 
-        prompt = "black background with white letters ABCD"
-        self.assertFalse(image_service._needs_text_render_retry(prompt, good_bytes.getvalue()))
-        self.assertTrue(image_service._needs_text_render_retry(prompt, bad_bytes.getvalue()))
-
-    def test_needs_text_render_retry_detects_extra_artifact_blocks(self) -> None:
-        image = Image.new("RGB", (512, 512), "black")
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((120, 205, 392, 295), fill="white")
-        draw.rectangle((160, 350, 230, 382), fill="white")
-        image_bytes = BytesIO()
-        image.save(image_bytes, format="PNG")
-
-        prompt = "black background with white letters ABCD"
-        self.assertTrue(image_service._needs_text_render_retry(prompt, image_bytes.getvalue()))
-
-    def test_needs_text_render_retry_skips_plain_portrait_prompt(self) -> None:
-        image = Image.new("RGB", (512, 512), "black")
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((36, 200, 476, 368), fill="white")
-        image_bytes = BytesIO()
-        image.save(image_bytes, format="PNG")
-
-        prompt = (
-            "A dreamy ultra-detailed close-up portrait of a beautiful young East Asian girl "
-            "holding a bouquet of flowers, cinematic lighting, realistic skin texture"
-        )
-
-        self.assertFalse(image_service._needs_text_render_retry(prompt, image_bytes.getvalue()))
-
-    def test_refine_prompt_for_text_rendering_only_applies_to_text_prompts(self) -> None:
-        plain_prompt = "a red apple on a wooden table"
-        text_prompt = "black background with white letters ABCD"
-
-        self.assertEqual(image_service._refine_prompt_for_text_rendering(plain_prompt), plain_prompt)
-        refined = image_service._refine_prompt_for_text_rendering(text_prompt)
-        self.assertIn("Keep one centered line only", refined)
-        self.assertIn("No blur, glow, bloom", refined)
-        self.assertTrue(refined.startswith(text_prompt))
-
-    def test_refine_prompt_for_text_rendering_ignores_negated_text_hints(self) -> None:
-        prompt = "cinematic portrait, no text, no watermark, no logo"
-
-        self.assertEqual(image_service._refine_prompt_for_text_rendering(prompt), prompt)
-
-    def test_generate_image_result_skips_prompt_refinement_when_input_image_exists(self) -> None:
+    def test_generate_image_result_keeps_input_image_prompt_unchanged(self) -> None:
         with (
             patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),
             patch.object(image_service, "_resolve_upstream_target", return_value=("gpt-image-2", None)),
@@ -529,7 +504,8 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             )
         )
 
-    def test_generate_image_result_retries_when_text_render_quality_is_rejected_once(self) -> None:
+    def test_generate_image_result_propagates_text_quality_error_without_retry(self) -> None:
+        error = image_service.ImageGenerationError("low quality text render for file: file-4")
         with (
             patch.object(image_service, "_new_session", return_value=(FakeSession(), {"oai-device-id": "device-1"})),
             patch.object(image_service, "_resolve_upstream_target", return_value=("auto", None)),
@@ -545,25 +521,13 @@ class ImageServiceAttachmentTests(unittest.TestCase):
                     "text": "",
                 },
             ),
-            patch.object(
-                image_service,
-                "_download_generated_images",
-                side_effect=[
-                    image_service.ImageGenerationError("low quality text render for file: file-4"),
-                    [
-                        image_service.GeneratedImage(
-                            b64_json="aW1hZ2UtNA==",
-                            revised_prompt="draw ABCD",
-                            mime_type="image/png",
-                        )
-                    ],
-                ],
-            ) as download_mock,
+            patch.object(image_service, "_download_generated_images", side_effect=error) as download_mock,
         ):
-            payload = image_service.generate_image_result("token-123", "draw white letters ABCD", model="gpt-image-2", n=1)
+            with self.assertRaises(image_service.ImageGenerationError) as raised:
+                image_service.generate_image_result("token-123", "draw white letters ABCD", model="gpt-image-2", n=1)
 
-        self.assertEqual(download_mock.call_count, 2)
-        self.assertEqual(payload["data"][0]["b64_json"], "aW1hZ2UtNA==")
+        self.assertEqual(download_mock.call_count, 1)
+        self.assertEqual(str(raised.exception), "low quality text render for file: file-4")
 
     def test_download_image_payload_retries_until_content_arrives(self) -> None:
         class Response:

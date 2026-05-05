@@ -8,7 +8,6 @@ from services.account_service import AccountService
 from services.image_service import (
     ImageGenerationError,
     generate_image_result,
-    is_low_quality_image_error,
     is_transient_image_error,
     is_token_invalid_error,
 )
@@ -257,10 +256,6 @@ class BackendService:
                     last_error = exc
                     self.account_service.remove_token(request_token)
                     print(f"[image-generate] remove invalid token={self._token_label(request_token)}")
-                    continue
-                if is_low_quality_image_error(str(exc)):
-                    last_error = exc
-                    print(f"[image-generate] skip low quality token={self._token_label(request_token)}")
                     continue
                 if self._is_responses_input_image_rejection(exc, input_images):
                     last_error = exc

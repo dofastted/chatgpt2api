@@ -60,7 +60,7 @@ class FakeAccountService:
 
 
 class BackendServiceQualityRetryTests(unittest.TestCase):
-    def test_generate_with_pool_skips_low_quality_token_and_uses_next_one(self) -> None:
+    def test_generate_with_pool_propagates_text_quality_error_without_retry(self) -> None:
         service = BackendService(FakeAccountService())
 
         def fake_generate(
@@ -78,9 +78,11 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
             return {"created": 1, "data": [{"b64_json": "ok"}]}
 
         with patch("services.backend_service.generate_image_result", side_effect=fake_generate):
-            payload = service.generate_with_pool("draw ABCD", "gpt-image-2", 1)
+            with self.assertRaises(ImageGenerationError) as raised:
+                service.generate_with_pool("draw ABCD", "gpt-image-2", 1)
 
-        self.assertEqual(payload["data"][0]["b64_json"], "ok")
+        self.assertEqual(str(raised.exception), "low quality text render for file: file-1")
+        self.assertEqual(service.account_service.removed, [])
 
     def test_generate_with_pool_skips_transient_failure_and_uses_next_token(self) -> None:
         service = BackendService(FakeAccountService())

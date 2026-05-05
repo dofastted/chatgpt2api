@@ -99,17 +99,6 @@ class UploadedInputImage:
     height: int | None = None
 
 
-@dataclass
-class TextRenderMetrics:
-    foreground_area_ratio: float
-    foreground_width_ratio: float
-    foreground_height_ratio: float
-    top_margin_ratio: float
-    bottom_margin_ratio: float
-    vertical_imbalance_ratio: float
-    extra_component_ratio: float
-
-
 def _is_transient_stream_error(exc: Exception) -> bool:
     text = str(exc or "").lower()
     return (
@@ -119,140 +108,6 @@ def _is_transient_stream_error(exc: Exception) -> bool:
         or "stream was not closed cleanly" in text
         or "connection was reset" in text
         or "recv failure" in text
-    )
-
-
-_TEXT_RENDER_HINT_PATTERN = re.compile(
-    r"\b("
-    r"letters?|typography|font|text|word|words|uppercase|lowercase|sans-serif|serif"
-    r")\b|字母|文字|字体|排版|黑底白字",
-    re.IGNORECASE,
-)
-
-_NEGATED_TEXT_RENDER_HINT_PATTERN = re.compile(
-    r"\b(?:no|without|avoid|exclude|remove)\s+(?:any\s+|visible\s+)?"
-    r"(?:letters?|typography|fonts?|texts?|words?|watermarks?|captions?|logos?)\b"
-    r"|不要(?:任何|可见)?(?:字母|文字|字体|水印|字幕|标识|logo)"
-    r"|不(?:要|含|带)(?:任何|可见)?(?:字母|文字|字体|水印|字幕|标识|logo)"
-    r"|无(?:字母|文字|字体|水印|字幕|标识|logo)",
-    re.IGNORECASE,
-)
-
-
-def _prompt_requests_text_rendering(prompt: str) -> bool:
-    normalized_prompt = str(prompt or "").strip()
-    if not normalized_prompt:
-        return False
-    cleaned_prompt = _NEGATED_TEXT_RENDER_HINT_PATTERN.sub(" ", normalized_prompt)
-    return bool(_TEXT_RENDER_HINT_PATTERN.search(cleaned_prompt))
-
-
-def _refine_prompt_for_text_rendering(prompt: str) -> str:
-    normalized_prompt = str(prompt or "").strip()
-    if not normalized_prompt:
-        return normalized_prompt
-    if not _prompt_requests_text_rendering(normalized_prompt):
-        return normalized_prompt
-    refinement = (
-        " Render the text with crisp hard edges and clean spacing. "
-        "Keep one centered line only, with wide empty black margins. "
-        "The letters should occupy about 55% to 65% of the canvas width and about 18% to 24% "
-        "of the canvas height. "
-        "No blur, glow, bloom, shadow, smear, ghosting, extra marks, or stray shapes."
-    )
-    return normalized_prompt + refinement
-
-
-def _measure_text_render_metrics(image_bytes: bytes) -> Optional[TextRenderMetrics]:
-    try:
-        from io import BytesIO
-        from PIL import Image
-    except Exception:
-        return None
-
-    try:
-        image = Image.open(BytesIO(image_bytes)).convert("L")
-    except Exception:
-        return None
-
-    width, height = image.size
-    pixels = image.load()
-    foreground_x: list[int] = []
-    foreground_y: list[int] = []
-    for y in range(height):
-        for x in range(width):
-            if pixels[x, y] > 30:
-                foreground_x.append(x)
-                foreground_y.append(y)
-    if not foreground_x or not foreground_y:
-        return None
-
-    left = min(foreground_x)
-    right = max(foreground_x)
-    top = min(foreground_y)
-    bottom = max(foreground_y)
-    foreground_area_ratio = len(foreground_x) / max(width * height, 1)
-    foreground_width_ratio = (right - left + 1) / max(width, 1)
-    foreground_height_ratio = (bottom - top + 1) / max(height, 1)
-    top_margin_ratio = top / max(height, 1)
-    bottom_margin_ratio = (height - 1 - bottom) / max(height, 1)
-    vertical_imbalance_ratio = abs(top_margin_ratio - bottom_margin_ratio)
-
-    binary_threshold = 60
-    component_sizes: list[int] = []
-    visited: set[tuple[int, int]] = set()
-    for y in range(top, bottom + 1):
-        for x in range(left, right + 1):
-            if pixels[x, y] <= binary_threshold or (x, y) in visited:
-                continue
-            stack = [(x, y)]
-            visited.add((x, y))
-            size = 0
-            while stack:
-                current_x, current_y = stack.pop()
-                size += 1
-                for next_x, next_y in (
-                    (current_x + 1, current_y),
-                    (current_x - 1, current_y),
-                    (current_x, current_y + 1),
-                    (current_x, current_y - 1),
-                ):
-                    if next_x < left or next_x > right or next_y < top or next_y > bottom:
-                        continue
-                    if pixels[next_x, next_y] <= binary_threshold or (next_x, next_y) in visited:
-                        continue
-                    visited.add((next_x, next_y))
-                    stack.append((next_x, next_y))
-            component_sizes.append(size)
-    component_sizes.sort(reverse=True)
-    total_component_pixels = sum(component_sizes)
-    extra_component_ratio = 0.0
-    if total_component_pixels > 0 and len(component_sizes) > 4:
-        extra_component_ratio = sum(component_sizes[4:]) / total_component_pixels
-
-    return TextRenderMetrics(
-        foreground_area_ratio=foreground_area_ratio,
-        foreground_width_ratio=foreground_width_ratio,
-        foreground_height_ratio=foreground_height_ratio,
-        top_margin_ratio=top_margin_ratio,
-        bottom_margin_ratio=bottom_margin_ratio,
-        vertical_imbalance_ratio=vertical_imbalance_ratio,
-        extra_component_ratio=extra_component_ratio,
-    )
-
-
-def _needs_text_render_retry(prompt: str, image_bytes: bytes) -> bool:
-    if not _prompt_requests_text_rendering(prompt):
-        return False
-    metrics = _measure_text_render_metrics(image_bytes)
-    if metrics is None:
-        return False
-    return (
-        metrics.foreground_area_ratio > 0.11
-        or metrics.foreground_width_ratio > 0.75
-        or metrics.foreground_height_ratio > 0.28
-        or metrics.vertical_imbalance_ratio > 0.08
-        or metrics.extra_component_ratio > 0.004
     )
 
 
@@ -408,10 +263,6 @@ def is_token_invalid_error(message: str) -> bool:
         or "authentication token has been invalidated" in text
         or "invalidated oauth token" in text
     )
-
-
-def is_low_quality_image_error(message: str) -> bool:
-    return "low quality text render" in str(message or "").lower()
 
 
 def _iter_nested_error_values(value: object):
@@ -1091,7 +942,7 @@ def _download_generated_images(
     device_id: str,
     conversation_id: str,
     file_ids: list[str],
-    prompt: str,
+    revised_prompt: str,
 ) -> list[GeneratedImage]:
     images: list[GeneratedImage] = []
     for file_id in file_ids:
@@ -1108,12 +959,10 @@ def _download_generated_images(
         if not download_url:
             raise ImageGenerationError(f"failed to get download url for file: {normalized_file_id}")
         image_b64, mime_type = _download_image_payload(session, download_url)
-        if _needs_text_render_retry(prompt, base64.b64decode(image_b64)):
-            raise ImageGenerationError(f"low quality text render for file: {normalized_file_id}")
         images.append(
             GeneratedImage(
                 b64_json=image_b64,
-                revised_prompt=prompt,
+                revised_prompt=revised_prompt,
                 url=download_url,
                 mime_type=mime_type,
             )
@@ -1340,8 +1189,6 @@ def generate_image_result_via_responses(
     input_images: list[dict[str, str]] | None = None,
     size: str | None = None,
 ) -> dict:
-    if not input_images:
-        prompt = _refine_prompt_for_text_rendering(prompt)
     access_token = str(access_token or "").strip()
     if not prompt:
         raise ImageGenerationError("prompt is required")
@@ -1417,9 +1264,6 @@ def generate_image_result(
             input_images=input_images,
             size=size,
         )
-
-    if not input_images:
-        prompt = _refine_prompt_for_text_rendering(prompt)
     access_token = str(access_token or "").strip()
     if not prompt:
         raise ImageGenerationError("prompt is required")
@@ -1503,15 +1347,9 @@ def generate_image_result(
                         device_id=device_id,
                         conversation_id=actual_conversation_id,
                         file_ids=file_ids,
-                        prompt=prompt,
+                        revised_prompt=prompt,
                     )
-                except ImageGenerationError as exc:
-                    if stream_attempt < 2 and "low quality text render" in str(exc):
-                        print(
-                            f"[image-upstream] retry token={_token_label(access_token)} "
-                            f"stage=text_render attempt={stream_attempt + 1} error={exc}"
-                        )
-                        continue
+                except ImageGenerationError:
                     raise
                 results.extend(downloaded_images)
                 break
