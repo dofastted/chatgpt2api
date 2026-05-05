@@ -504,6 +504,34 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             )
         )
 
+    def test_is_transient_image_error_treats_proxy_connect_refused_as_retryable(self) -> None:
+        self.assertTrue(
+            image_service.is_transient_image_error(
+                "Failed to perform, curl: (7) Failed to connect to 192.168.3.2 port 10808 "
+                "after 4 ms: Could not connect to server."
+            )
+        )
+
+    def test_retry_uses_short_backoff_for_proxy_connect_errors(self) -> None:
+        calls = 0
+
+        def flaky_request() -> object:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise RuntimeError(
+                    "Failed to perform, curl: (7) Failed to connect to 192.168.3.2 port 10808 "
+                    "after 4 ms: Could not connect to server."
+                )
+            return object()
+
+        with patch.object(image_service.time, "sleep") as sleep_mock:
+            result = image_service._retry(flaky_request, retries=1)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(calls, 3)
+        self.assertEqual([call.args[0] for call in sleep_mock.call_args_list], [0.25, 0.75])
+
     def test_generate_image_result_propagates_text_quality_error_without_retry(self) -> None:
         error = image_service.ImageGenerationError("low quality text render for file: file-4")
         with (

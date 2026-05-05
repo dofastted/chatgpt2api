@@ -52,6 +52,7 @@ SUPPORTED_INPUT_IMAGE_EXTENSIONS = {
 TRANSIENT_UPSTREAM_STATUS_CODES = frozenset((*TRANSIENT_HTTP_STATUS_CODES, 422))
 MAX_UPSTREAM_INPUT_IMAGE_SIDE = 1536
 MAX_UPSTREAM_INPUT_IMAGE_BYTES = 4 * 1024 * 1024
+PROXY_CONNECT_RETRY_DELAYS = (0.25, 0.75, 1.5)
 
 _CORES = [16, 24, 32]
 _SCREENS = [3000, 4000, 6000]
@@ -111,6 +112,16 @@ def _is_transient_stream_error(exc: Exception) -> bool:
     )
 
 
+def _is_proxy_connect_error(message: str) -> bool:
+    text = str(message or "").lower()
+    return (
+        "curl: (7)" in text
+        or "failed to connect" in text
+        or "could not connect to server" in text
+        or "connection refused" in text
+    )
+
+
 def _build_fp(access_token: str) -> dict:
     account = account_service.get_account(access_token) or {}
     fp = {}
@@ -165,16 +176,26 @@ def _new_session(access_token: str) -> tuple[Session, dict]:
 def _retry(fn, retries: int = 4, delay: float = 2.0, retry_on_status: tuple[int, ...] = ()) -> object:
     last_error = None
     last_response = None
-    for attempt in range(retries):
+    max_attempts = max(1, retries)
+    attempt = 0
+    proxy_retry_index = 0
+    while attempt < max_attempts:
         try:
             response = fn()
         except Exception as exc:
             last_error = exc
+            if proxy_retry_index < len(PROXY_CONNECT_RETRY_DELAYS) and _is_proxy_connect_error(str(exc)):
+                time.sleep(PROXY_CONNECT_RETRY_DELAYS[proxy_retry_index])
+                proxy_retry_index += 1
+                max_attempts += 1
+                continue
             time.sleep(delay)
+            attempt += 1
             continue
         if retry_on_status and getattr(response, "status_code", 0) in retry_on_status:
             last_response = response
             time.sleep(delay * (attempt + 1))
+            attempt += 1
             continue
         return response
     if last_response is not None:
@@ -325,6 +346,7 @@ def is_transient_image_error(message: str) -> bool:
         or "timed out" in text
         or "timeout" in text
         or "gateway timeout" in text
+        or _is_proxy_connect_error(text)
         or "cloudflare" in text
         or "rate limit" in text
         or "too many requests" in text
