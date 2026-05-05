@@ -19,3 +19,7 @@ docker-compose-local.yml
 
 # Local agent/Trellis workspace files.
 .trellis/
+.agents/
+.claude/
+.codex/
+AGENTS.md
