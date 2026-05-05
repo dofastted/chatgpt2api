@@ -149,8 +149,16 @@ class BackendService:
         size: str | None = None,
     ):
         attempted_tokens: set[str] = set()
+        max_account_attempts = max(1, int(config.image_generation_max_account_attempts or 4))
+        last_error: Exception | None = None
 
         while True:
+            if len(attempted_tokens) >= max_account_attempts:
+                message = (
+                    f"image generation failed after {max_account_attempts} account attempts"
+                    + (f": {last_error}" if last_error else "")
+                )
+                raise ImageGenerationError(message)
             if queue_request_id:
                 image_queue_service.mark_assigning_account(queue_request_id)
             try:
@@ -246,16 +254,20 @@ class BackendService:
                     f"error={exc} quota={account.get('quota') if account else 'unknown'} status={account.get('status') if account else 'unknown'}"
                 )
                 if is_token_invalid_error(str(exc)):
+                    last_error = exc
                     self.account_service.remove_token(request_token)
                     print(f"[image-generate] remove invalid token={self._token_label(request_token)}")
                     continue
                 if is_low_quality_image_error(str(exc)):
+                    last_error = exc
                     print(f"[image-generate] skip low quality token={self._token_label(request_token)}")
                     continue
                 if self._is_responses_input_image_rejection(exc, input_images):
+                    last_error = exc
                     print(f"[image-generate] skip responses input image rejection token={self._token_label(request_token)}")
                     continue
                 if is_transient_image_error(str(exc)):
+                    last_error = exc
                     print(f"[image-generate] skip transient failure token={self._token_label(request_token)}")
                     continue
                 raise

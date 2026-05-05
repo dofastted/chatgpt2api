@@ -24,6 +24,7 @@
 - `IMAGE_QUEUE_GLOBAL_WAIT_LIMIT` 默认 `2000`，限制全局等待请求。
 - `IMAGE_QUEUE_GLOBAL_START_LIMIT` 默认 `60`，配合启动窗口限制生图启动速率。
 - `IMAGE_QUEUE_GLOBAL_START_WINDOW_SECONDS` 默认 `60`。
+- `IMAGE_GENERATION_MAX_ACCOUNT_ATTEMPTS` 默认 `4`，限制单次生图最多尝试多少个账号；超过后返回失败，避免某个提示词或上游异常让 Web 请求一直停在生成中。
 - 主容器默认不需要在 `config.json` 里显式写 `image-engine` 或 `image-route-policy`；不写时就是 `chat_image` 加 `plan_type`。只有排障或临时回退时才改这些值。
 
 样例文件：

@@ -38,6 +38,7 @@ class AppSettings:
     image_queue_global_start_limit: int
     image_queue_global_start_window_seconds: int
     image_generation_timeout_seconds: int
+    image_generation_max_account_attempts: int
 
 
 def _parse_bool(value: object, *, default: bool) -> bool:
@@ -218,6 +219,14 @@ def _load_settings() -> AppSettings:
             ),
             default=900,
             name="image-generation-timeout-seconds",
+        ),
+        image_generation_max_account_attempts=_parse_int(
+            os.getenv(
+                "IMAGE_GENERATION_MAX_ACCOUNT_ATTEMPTS",
+                raw_config.get("image-generation-max-account-attempts"),
+            ),
+            default=4,
+            name="image-generation-max-account-attempts",
         ),
     )
 
