@@ -33,6 +33,7 @@
 - 旧 `data/*.json` 只作为首次导入和人工备份来源。
 - 管理员页“数据管理”负责 SQLite 状态、备份、S3 设置、图片会话和日志查看。
 - 生图请求记录在 SQLite 表 `image_request_records`，管理员页“数据管理”可查询请求摘要、耗时、扣费和路线。
+- 公开画廊主存储是 SQLite 表 `gallery_items` 和 `gallery_assets`；旧 `web/src/data/gallery-ui-seed.json` 只作为首次导入和前端回退来源。
 
 ## 指南
 

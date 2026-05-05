@@ -21,6 +21,9 @@
 - `GET /api/quota`，普通密钥返回账号池总额度。用户 key 返回自己的剩余次数和 `pricing`，位置在 `services/api.py:399`。
 - `POST /api/donations/accounts`，接收 `tokens: string[]` 或 `accounts: object[]`，把账户按“捐赠”分类入池，然后刷新账号信息，位置在 `services/api.py:635`。
 - `POST /api/redeem-codes/redeem`，只给 `user_key` 使用。请求体是 `code`。成功后返回这次增加的 `added_quota`、最新 `remaining_quota` 和兑换码条目；这次额度会直接加到当前剩余额度上。
+- `GET /api/gallery/public`，读取公开可见画廊项。只返回 `published` 且 `visibility=1` 的项，按置顶、排序和发布时间排列；首次调用时会触发静态 seed 导入。
+- `POST /api/gallery/{item_id}/events`，记录公开画廊项点击或使用。请求体是 `event: "click" | "use"`。只有公开可见项可记录，非公开项返回 `404`。
+- `POST /api/gallery/submissions`，普通用户提交画廊项给管理员审核。请求体包含 `prompt`、可选 `title`、`assets[]`、`source_conversation_id`、`source_turn_id` 和 `source_image_id`。后端保存当前 Bearer Token 的 owner hash，不保存原始 key。
 - `POST /backend-api/files/process_upload_stream`，接收 `multipart/form-data` 的 `file` 字段，大小上限 8 MB，返回 `file_id`、`mime_type`、尺寸、大小和下载地址，位置在 `services/api.py:859` 到 `services/api.py:880` 与 `services/uploaded_image_service.py:143` 到 `services/uploaded_image_service.py:184`。
 - `GET /backend-api/my/recent/uploaded_images?limit=25&images_app_only=false`，返回当前 Bearer Token 自己最近上传的图片，位置在 `services/api.py:882` 到 `services/api.py:896`。
 - `GET /backend-api/files/{file_id}/content`，读取当前 Bearer Token 自己的已上传原图，位置在 `services/api.py:898` 到 `services/api.py:913`。
@@ -60,6 +63,9 @@
 - `GET /api/image-requests`，管理员查询生图请求记录。支持 `request_id`、`owner_id`、`auth_type`、`status`、`model`、`endpoint`、`since`、`until`、`limit`、`cursor`。
 - `GET /api/image-requests/{request_id}`，管理员读取单条生图请求记录。记录只含摘要、哈希、耗时、扣费、错误和路线字段。
 - `GET /api/image-queue/admin`，管理员查看当前所有活动队列 ticket 和全局限制。
+- `GET /api/admin/gallery`，管理员读取公开画廊和用户投稿。支持 `status` 和 `limit` 查询参数，响应包含 `items` 和按状态统计的 `status`。
+- `PATCH /api/admin/gallery/{item_id}`，管理员更新画廊项。请求体可包含 `action`，支持 `approve`、`reject`、`publish`、`hide`、`delete`、`pin`、`unpin`；也可更新 `prompt`、`title`、`tags`、`sort_order`、`visibility` 和 `assets`。
+- `DELETE /api/admin/gallery/{item_id}`，管理员软删除画廊项，实际把状态改成 `deleted` 并隐藏。
 - `GET /api/image-conversations`，读取当前 Bearer Token 的图片会话；传 `summary=true` 时只返回轻量摘要，只含最新 turn、`turnCount` 和状态字段，不带生成图 base64。
 - `GET /api/image-conversations/{conversation_id}`，读取当前 Bearer Token 下单条图片会话的完整内容。
 - `POST /api/image-conversations`，保存或更新当前 Bearer Token 的图片会话；返回的 `items` 使用轻量摘要，避免保存后再传回完整图片列表。
@@ -69,5 +75,6 @@
 
 - 登录、会话、额度、账号列表、新增、捐赠新增、刷新、更新都在 `web/src/lib/api.ts:98` 到 `web/src/lib/api.ts:245`。
 - proxy 列表、新增、更新和删除封装在 `web/src/lib/api.ts` 的 `fetchProxies`、`upsertProxy`、`deleteProxy`。
+- 公开画廊、用户投稿、公开项统计和管理员画廊管理封装在 `web/src/lib/api.ts` 的 `fetchPublicGalleryItems`、`recordGalleryItemEvent`、`submitGalleryItem`、`fetchAdminGalleryItems`、`updateAdminGalleryItem`、`deleteAdminGalleryItem`。
 - 图片页上传和最近上传列表封装在 `web/src/lib/api.ts:350` 到 `web/src/lib/api.ts:364`。
 - 数据管理和图片会话接口封装在 `web/src/lib/api.ts`，会话读写由 `web/src/store/image-conversations.ts` 统一调用。
