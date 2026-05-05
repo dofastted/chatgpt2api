@@ -34,4 +34,5 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - 只要任务和生图链路有关，不要恢复后端文字质量审查。无输入图 prompt 原样下发；下载完成后不做本地 `low quality text render` 复核；`low quality text render` 不能作为本地阻拦用户 prompt 或结果的理由。
 - 看到 `curl: (7) Failed to connect ... 10808`，先按本机 Clash 或代理瞬时连接失败处理。先测代理连通性，再决定是否按短退避重试；不要先归因成文字质量审查问题或账号质量问题。
 - 发布边界以 `fork/main` 为当前稳定目标。`origin/main` 和本地 `main` 已严重分叉；除非用户明确要求处理上游分叉，不要直接推 `origin/main`，也不要强推 `origin/main`。
+- 当前部署和默认镜像只认 `fork/main` 与 `ghcr.io/dofastted/chatgpt2api:latest`。`basketikun/chatgpt2api` 只作为历史上游参考，不作为部署来源；不要再把默认 compose、README 或发布说明改回原始仓库。
 - Git 操作继续用 Windows Git。遇到 Git 代理失败，可对单条命令临时加 `-c http.proxy= -c https.proxy=` 直连，不改全局 Git 配置。

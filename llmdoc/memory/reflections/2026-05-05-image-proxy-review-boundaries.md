@@ -14,6 +14,8 @@
 - `curl: (7) Failed to connect ... 10808` 先按本机 Clash 或代理瞬时连接失败处理，不先判成文字质量问题，也不先判成账号质量问题。
 - 代码层面对这类代理瞬时错误应做短退避重试；前提是先确认代理链路本身还能通。
 - 当前稳定发布目标是 `fork/main`。`origin/main` 和本地 `main` 已严重分叉，除非用户明确要求处理上游分叉，不要直接推或强推 `origin/main`。
+- push 到 `fork/main` 会触发 fork 仓库的 `Publish Docker Image` workflow，默认镜像是 `ghcr.io/dofastted/chatgpt2api:latest`。
+- `basketikun/chatgpt2api` 只作为历史上游参考，不作为部署来源；默认 compose、README 和发布说明都不应再指向原始仓库。
 - Git 操作继续用 Windows Git。遇到 Git 代理失败，只允许命令级一次性 `-c http.proxy= -c https.proxy=` 直连，不改全局配置。
 
 ## Diagnosis order
@@ -27,10 +29,12 @@
 - 不要因为日志里出现 `low quality text render` 就恢复本地文字审查逻辑。
 - 不要把 `curl: (7) Failed to connect ... 10808` 直接解释成 prompt 有问题或账号坏了。
 - 不要在未确认分叉状态时把本地 `main` 直接推到 `origin/main`。
+- 不要把默认镜像、clone 地址或部署说明改回 `basketikun/chatgpt2api`。
 - 不要为了临时 push/fetch 失败去改全局 Git 代理配置。
 
 ## Verification anchor
 
 - `git log --oneline -3` 应能看到 `ef515b5`、`6c26946`、`764ea86` 这条稳定修复链。
 - `git branch -vv` 的稳定发布分支应以 `fork/main` 为准，不以 `origin/main` 为准。
+- `docker-compose.yml` 默认镜像应是 `ghcr.io/dofastted/chatgpt2api:latest`。
 - 相关 llmdoc 页面要同时体现这三件事：不恢复后端文字质量审查、代理瞬时失败先测连通性再短退避重试、发布边界是 `fork/main`。

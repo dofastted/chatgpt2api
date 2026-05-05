@@ -232,7 +232,7 @@ GET /backend-api/files/{file_id}/content
 ## 部署
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone git@github.com:dofastted/chatgpt2api.git
 cp config.example.json config.json
 # 编辑 config.json密钥
 docker compose up -d

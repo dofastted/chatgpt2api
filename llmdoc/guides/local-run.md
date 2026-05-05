@@ -7,9 +7,11 @@
 发布和 Git 边界：
 
 1. 当前稳定发布目标是 `fork/main`。
-2. `origin/main` 和本地 `main` 已严重分叉；除非用户明确要求处理上游分叉，不要推 `origin/main`，也不要强推 `origin/main`。
-3. Git 操作继续用 Windows Git，不要切回 WSL Git 混用。
-4. 如果 Git 因代理失败，可对单条命令临时禁用代理直连，例如 `git -c http.proxy= -c https.proxy= fetch`、`pull`、`push`。只限这一次命令，不改全局配置。
+2. push 到 `fork/main` 会触发 fork 仓库的 `Publish Docker Image` workflow，默认镜像是 `ghcr.io/dofastted/chatgpt2api:latest`。
+3. `origin/main` 和本地 `main` 已严重分叉；除非用户明确要求处理上游分叉，不要推 `origin/main`，也不要强推 `origin/main`。
+4. `basketikun/chatgpt2api` 只作为历史上游参考，不作为部署来源；不要把默认 compose 或 README 改回原始仓库。
+5. Git 操作继续用 Windows Git，不要切回 WSL Git 混用。
+6. 如果 Git 因代理失败，可对单条命令临时禁用代理直连，例如 `git -c http.proxy= -c https.proxy= fetch`、`pull`、`push`。只限这一次命令，不改全局配置。
 
 最短路径：
 
