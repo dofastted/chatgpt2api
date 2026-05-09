@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": "llmdoc/architecture/backend-api.md", "reason": "gallery API and seed import behavior"}
+{"file": "llmdoc/architecture/image-generation-flow.md", "reason": "real image generation diagnostic flow"}
+{"file": ".trellis/spec/backend/database.md", "reason": "SQLite image payload and gallery asset contracts"}
