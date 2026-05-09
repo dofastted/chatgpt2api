@@ -192,7 +192,9 @@ class GalleryService:
         with self._lock:
             with self.store.connect() as connection:
                 self._ensure_schema(connection)
-                row = connection.execute("SELECT COUNT(*) AS count FROM gallery_items").fetchone()
+                row = connection.execute(
+                    "SELECT COUNT(*) AS count FROM gallery_items WHERE source = 'seed'"
+                ).fetchone()
                 if row and int(row["count"] or 0) > 0:
                     return
                 self._import_seed_locked(connection)

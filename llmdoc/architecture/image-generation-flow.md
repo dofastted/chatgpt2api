@@ -41,6 +41,7 @@
 - legacy 回退路线仍请求上游 `/backend-api/conversation`，可通过 `IMAGE_ROUTE_POLICY=legacy` 开启。
 - 会话流请求在 `services/image_service.py` 发出。
 - SSE 解析在 `services/image_service.py:295`，会从流里提取文件标识和文字结果。
+- 上游返回附件后，`services/image_service.py` 先用当前账号 Bearer 和 `oai-device-id` 换取下载地址，再下载图片内容。如果下载地址仍在 `chatgpt.com` 同域，下载请求也必须带同一组 Bearer 和 device id；否则上游会返回 JSON 形式的 `403/404`，Web 会一直等到后端把请求标成失败。
 - 当前公开模型是 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`。API 层会在 `services/api.py` 的 `normalize_requested_image_model` 拒绝 `gpt-image-1`。
 - `/v1/models` 暴露三个公开模型；每个模型条目都会标出 `endpoint=/v1/responses`、`type=responses`、Responses 能力和对应的 `default_image_tool.model`。
 - 三个公开模型发往 ChatGPT 上游时都使用真实模型 `gpt-image-2`，转换逻辑在 `services/image_service.py` 的 `_resolve_upstream_target` 和 `_normalize_responses_image_tool_model`。

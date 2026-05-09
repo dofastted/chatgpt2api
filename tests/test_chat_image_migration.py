@@ -64,6 +64,15 @@ class RecordingGateway:
         return {"created": 1, "data": [{"b64_json": "ok"}]}
 
 
+def patched_backend_config(**overrides: object) -> SimpleNamespace:
+    values = {
+        "image_route_policy": "plan_type",
+        "image_generation_max_account_attempts": 4,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 class ChatImageMigrationTests(unittest.TestCase):
     def test_single_account_carrier_normalizes_plan_and_sanitizes_auth_data(self) -> None:
         accounts = normalize_account_carrier(
@@ -148,7 +157,7 @@ class ChatImageMigrationTests(unittest.TestCase):
             service = BackendService(FakeRouteAccountService(account_type))
             gateway = RecordingGateway()
             service.image_gateway = gateway
-            with patch("services.backend_service.config", SimpleNamespace(image_route_policy="plan_type")):
+            with patch("services.backend_service.config", patched_backend_config()):
                 service.generate_with_pool("draw", "gpt-image-2", 1, input_images=input_images)
             self.assertEqual(gateway.routes, [expected_route])
 
@@ -157,7 +166,7 @@ class ChatImageMigrationTests(unittest.TestCase):
         service = BackendService(account_service)
         service.image_gateway = RecordingGateway()
 
-        with patch("services.backend_service.config", SimpleNamespace(image_route_policy="plan_type")):
+        with patch("services.backend_service.config", patched_backend_config()):
             service.generate_with_pool(
                 "draw",
                 "gpt-image-2",
@@ -172,7 +181,7 @@ class ChatImageMigrationTests(unittest.TestCase):
         gateway = RecordingGateway(fail_routes={"responses"})
         service.image_gateway = gateway
 
-        with patch("services.backend_service.config", SimpleNamespace(image_route_policy="force_responses")):
+        with patch("services.backend_service.config", patched_backend_config(image_route_policy="force_responses")):
             payload = service.generate_with_pool("draw", "gpt-image-2", 1)
 
         self.assertEqual(payload["data"][0]["b64_json"], "ok")

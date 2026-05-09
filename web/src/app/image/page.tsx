@@ -65,7 +65,10 @@ import {
   deleteImageConversation,
   getImageConversationDetail,
   getImageGenerationPreference,
+  IMAGE_CONVERSATION_SUMMARY_LIMIT,
+  listCachedImageConversationSummaries,
   listImageConversationSummaries,
+  listMoreImageConversationSummaries,
   saveImageConversation,
   saveImageGenerationPreference,
   type ImageConversation,
@@ -1047,6 +1050,8 @@ export default function ImagePage() {
   );
   const [hasLoadedHistory, setHasLoadedHistory] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isLoadingMoreHistory, setIsLoadingMoreHistory] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingConversationDetailId, setLoadingConversationDetailId] =
     useState<string | null>(null);
   const [isUploadingInputImage, setIsUploadingInputImage] = useState(false);
@@ -1471,6 +1476,8 @@ export default function ImagePage() {
           setPreviewImageId(null);
           setHasLoadedHistory(false);
           setIsLoadingHistory(false);
+          setIsLoadingMoreHistory(false);
+          setHasMoreHistory(false);
           setConversationScope(nextScope);
           setGalleryStorageScope(nextGalleryStorageScope);
         }
@@ -1482,6 +1489,8 @@ export default function ImagePage() {
           setPreviewImageId(null);
           setHasLoadedHistory(false);
           setIsLoadingHistory(false);
+          setIsLoadingMoreHistory(false);
+          setHasMoreHistory(false);
           setConversationScope("__anonymous__");
           setGalleryStorageScope("__anonymous__");
         }
@@ -1499,11 +1508,23 @@ export default function ImagePage() {
       return;
     }
 
-    setIsLoadingHistory(true);
     setPreviewImageId(null);
+    const now = new Date().toISOString();
+    const cachedItems = await listCachedImageConversationSummaries(conversationScope);
+    if (cachedItems.length > 0) {
+      const normalizedCachedItems = cachedItems.map(
+        (item) =>
+          resetInterruptedConversation(item, conversationScope, now)
+            .conversation,
+      );
+      conversationsRef.current = normalizedCachedItems;
+      setConversations(normalizedCachedItems);
+      setHasLoadedHistory(true);
+      setHasMoreHistory(normalizedCachedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT);
+    }
+    setIsLoadingHistory(cachedItems.length === 0);
     try {
       const items = await listImageConversationSummaries(conversationScope);
-      const now = new Date().toISOString();
       const normalizedItems = items.map(
         (item) =>
           resetInterruptedConversation(item, conversationScope, now)
@@ -1512,14 +1533,59 @@ export default function ImagePage() {
       conversationsRef.current = normalizedItems;
       setConversations(normalizedItems);
       setHasLoadedHistory(true);
+      setHasMoreHistory(normalizedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "读取会话记录失败";
       toast.error(message);
+      if (cachedItems.length === 0) {
+        setHasLoadedHistory(true);
+      }
     } finally {
       setIsLoadingHistory(false);
     }
   }, [conversationScope]);
+
+  const handleLoadMoreHistory = useCallback(async () => {
+    if (!conversationScope || isLoadingMoreHistory) {
+      return;
+    }
+
+    setIsLoadingMoreHistory(true);
+    try {
+      const offset = conversationsRef.current.length;
+      const items = await listMoreImageConversationSummaries(
+        conversationScope,
+        offset,
+        IMAGE_CONVERSATION_SUMMARY_LIMIT,
+      );
+      const now = new Date().toISOString();
+      const normalizedItems = items.map(
+        (item) =>
+          resetInterruptedConversation(item, conversationScope, now)
+            .conversation,
+      );
+      const mergedItems = [
+        ...conversationsRef.current,
+        ...normalizedItems.filter(
+          (item) =>
+            !conversationsRef.current.some(
+              (conversation) => conversation.id === item.id,
+            ),
+        ),
+      ];
+      conversationsRef.current = mergedItems;
+      setConversations(mergedItems);
+      setHasMoreHistory(normalizedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT);
+      setHasLoadedHistory(true);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "读取更多会话失败";
+      toast.error(message);
+    } finally {
+      setIsLoadingMoreHistory(false);
+    }
+  }, [conversationScope, isLoadingMoreHistory]);
 
   useEffect(() => {
     if (conversationScope === null || hasLoadedHistory || isLoadingHistory) {
@@ -1966,6 +2032,7 @@ export default function ImagePage() {
       setConversations([]);
       setSelectedConversationId(null);
       setPreviewImageId(null);
+      setHasMoreHistory(false);
       setIsClearHistoryDialogOpen(false);
       toast.success("已清空历史记录");
     } catch (error) {
@@ -2460,7 +2527,7 @@ export default function ImagePage() {
             </div>
 
             <div className="min-h-0 flex-1 border-t border-sidebar-border pt-2 lg:overflow-y-auto lg:pr-1">
-              {isLoadingHistory ? (
+              {isLoadingHistory && conversations.length === 0 ? (
                 <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
                   <LoaderCircle className="size-4 animate-spin" />
                   正在读取会话记录
@@ -2541,6 +2608,26 @@ export default function ImagePage() {
                       </motion.div>
                     );
                   })}
+                  <div className="pt-2">
+                    {isLoadingHistory ? (
+                      <div className="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+                        <LoaderCircle className="size-3.5 animate-spin" />
+                        正在刷新历史
+                      </div>
+                    ) : hasMoreHistory ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleLoadMoreHistory()}
+                        disabled={isLoadingMoreHistory}
+                        className="flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-sidebar-border bg-sidebar-accent/40 px-3 text-xs font-medium text-sidebar-foreground transition hover:bg-sidebar-accent focus-visible:ring-4 focus-visible:ring-ring/20 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isLoadingMoreHistory ? (
+                          <LoaderCircle className="size-3.5 animate-spin" />
+                        ) : null}
+                        {isLoadingMoreHistory ? "正在加载" : "加载更多"}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               )}
             </div>

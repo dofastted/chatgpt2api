@@ -2396,6 +2396,8 @@ def create_app() -> FastAPI:
     @router.get("/api/image-conversations")
     async def list_image_conversations(
         summary: bool = False,
+        limit: int = Query(default=100, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
         authorization: str | None = Header(default=None),
     ):
         require_auth_key(authorization)
@@ -2403,6 +2405,8 @@ def create_app() -> FastAPI:
             "items": data_management_service.list_conversations(
                 extract_bearer_token(authorization),
                 summary=summary,
+                limit=limit,
+                offset=offset,
             )
         }
 

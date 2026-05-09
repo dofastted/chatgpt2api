@@ -152,6 +152,63 @@ class SQLiteDataManagementTests(unittest.TestCase):
         self.assertEqual(service.list_conversations(auth_token, summary=True), [summary_payload])
         self.assertEqual(service.list_conversations(auth_token, summary=False), [])
 
+    def test_image_conversation_summary_limit_and_offset_returns_expected_page(self) -> None:
+        auth_token = "summary-limit-key"
+        owner_id = UploadedImageService.build_owner_id(auth_token)
+        temp_store = SQLiteStore(self.temp_dir / "summary-limit.sqlite3")
+        sqlite_patcher = patch.object(data_management_module, "sqlite_store", temp_store)
+        sqlite_patcher.start()
+        self.addCleanup(sqlite_patcher.stop)
+        service = DataManagementService()
+        rows = []
+        for index in range(12):
+            conversation_id = f"conv_summary_limit_{index + 1:02d}"
+            timestamp = f"2026-05-09 00:00:{index + 1:02d}"
+            summary_payload = {
+                "id": conversation_id,
+                "clientConversationId": conversation_id,
+                "title": f"会话 {index + 1:02d}",
+                "createdAt": timestamp,
+                "turns": [],
+                "turnCount": 0,
+                "isSummary": True,
+            }
+            full_payload = {**summary_payload, "isSummary": False}
+            rows.append(
+                (
+                    owner_id,
+                    conversation_id,
+                    json.dumps(full_payload, ensure_ascii=False),
+                    json.dumps(summary_payload, ensure_ascii=False),
+                    timestamp,
+                    timestamp,
+                )
+            )
+        with temp_store.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO image_conversations (
+                    owner_id, conversation_id, payload, summary_payload, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        first_page = service.list_conversations(auth_token, summary=True, limit=10, offset=0)
+        second_page = service.list_conversations(auth_token, summary=True, limit=10, offset=10)
+
+        self.assertEqual(len(first_page), 10)
+        self.assertEqual(
+            [item["id"] for item in first_page],
+            [f"conv_summary_limit_{index:02d}" for index in range(12, 2, -1)],
+        )
+        self.assertEqual(len(second_page), 2)
+        self.assertEqual(
+            [item["id"] for item in second_page],
+            ["conv_summary_limit_02", "conv_summary_limit_01"],
+        )
+
     def test_pricing_update_script_overwrites_sqlite_and_json(self) -> None:
         script = load_pricing_update_script()
         db_path = self.temp_dir / "chatgpt2api.sqlite3"

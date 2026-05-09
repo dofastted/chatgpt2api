@@ -569,7 +569,7 @@ class ImageServiceAttachmentTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def get(self, _url: str, timeout: int = 60) -> Response:
+            def get(self, _url: str, **_kwargs) -> Response:
                 self.calls += 1
                 if self.calls < 3:
                     return Response(False, b"")
@@ -581,6 +581,58 @@ class ImageServiceAttachmentTests(unittest.TestCase):
         self.assertEqual(session.calls, 3)
         self.assertEqual(mime_type, "image/png")
         self.assertEqual(base64.b64decode(payload), b"\x89PNG\r\n\x1a\nrest")
+
+    def test_download_image_payload_uses_auth_headers_for_chatgpt_downloads(self) -> None:
+        class Response:
+            ok = True
+            content = b"\x89PNG\r\n\x1a\nrest"
+            headers = {"content-type": "image/png"}
+            status_code = 200
+
+        class Session:
+            def __init__(self) -> None:
+                self.headers: dict | None = None
+
+            def get(self, _url: str, **kwargs) -> Response:
+                self.headers = kwargs.get("headers")
+                return Response()
+
+        session = Session()
+        image_service._download_image_payload(
+            session,
+            "https://chatgpt.com/backend-api/files/file-1/downloaded",
+            access_token="token-123",
+            device_id="device-1",
+        )
+
+        self.assertEqual(session.headers["Authorization"], "Bearer token-123")
+        self.assertEqual(session.headers["oai-device-id"], "device-1")
+        self.assertEqual(session.headers["sec-fetch-site"], "same-origin")
+
+    def test_download_image_payload_omits_auth_headers_for_external_downloads(self) -> None:
+        class Response:
+            ok = True
+            content = b"\x89PNG\r\n\x1a\nrest"
+            headers = {"content-type": "image/png"}
+            status_code = 200
+
+        class Session:
+            def __init__(self) -> None:
+                self.headers: dict | None = None
+
+            def get(self, _url: str, **kwargs) -> Response:
+                self.headers = kwargs.get("headers")
+                return Response()
+
+        session = Session()
+        image_service._download_image_payload(
+            session,
+            "https://persistent.oaistatic.com/file.png",
+            access_token="token-123",
+            device_id="device-1",
+        )
+
+        self.assertIsNone(session.headers)
 
 
 if __name__ == "__main__":

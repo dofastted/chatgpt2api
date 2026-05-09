@@ -67,7 +67,7 @@
 - `GET /api/admin/gallery`，管理员读取公开画廊和用户投稿。支持 `status` 和 `limit` 查询参数，响应包含 `items` 和按状态统计的 `status`；列表里的旧 base64 资产同样返回 `/api/gallery/assets/{asset_id}`。
 - `PATCH /api/admin/gallery/{item_id}`，管理员更新画廊项。请求体可包含 `action`，支持 `approve`、`reject`、`publish`、`hide`、`delete`、`pin`、`unpin`；也可更新 `prompt`、`title`、`tags`、`sort_order`、`visibility` 和 `assets`。
 - `DELETE /api/admin/gallery/{item_id}`，管理员软删除画廊项，实际把状态改成 `deleted` 并隐藏。
-- `GET /api/image-conversations`，读取当前 Bearer Token 的图片会话；传 `summary=true` 时只读 `summary_payload` 等轻字段，返回轻量摘要，只含最新 turn、`turnCount` 和状态字段，不带生成图 base64。旧记录没有摘要时会返回可点击的行级占位摘要，单条详情仍走完整 payload。
+- `GET /api/image-conversations`，读取当前 Bearer Token 的图片会话；支持 `limit=1..100` 和 `offset>=0`。传 `summary=true` 时只读 `summary_payload` 等轻字段，返回轻量摘要，只含最新 turn、`turnCount` 和状态字段，不带生成图 base64。图片页历史侧栏初始打开时优先显示本地缓存的前 10 条持久化摘要，再后台刷新 `summary=true&limit=10&offset=0`；继续加载更多时请求后续 `summary=true&limit=10&offset=<当前条数>`，单条详情仍走完整 payload。
 - `GET /api/image-conversations/{conversation_id}`，读取当前 Bearer Token 下单条图片会话的完整内容。
 - `POST /api/image-conversations`，保存或更新当前 Bearer Token 的图片会话；返回的 `items` 使用轻量摘要，避免保存后再传回完整图片列表。
 - `DELETE /api/image-conversations`，按 `id` 或 `conversation_id` 删除当前 Bearer Token 的图片会话；返回的 `items` 使用轻量摘要。

@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Optional
+from urllib.parse import urlparse
 from urllib.parse import unquote_to_bytes
 
 from curl_cffi.requests import Session
@@ -618,8 +619,20 @@ def _fetch_download_url(session: Session, access_token: str, device_id: str, con
         retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
     )
     if not response.ok:
+        print(
+            "[image-download] url lookup failed "
+            f"file_id={_safe_download_file_id(file_id)} status={response.status_code} "
+            f"content_type={_safe_content_type(response.headers.get('content-type'))}"
+        )
         return ""
-    return str((response.json() or {}).get("download_url") or "")
+    download_url = str((response.json() or {}).get("download_url") or "")
+    if not download_url:
+        print(
+            "[image-download] url lookup empty "
+            f"file_id={_safe_download_file_id(file_id)} status={response.status_code} "
+            f"content_type={_safe_content_type(response.headers.get('content-type'))}"
+        )
+    return download_url
 
 
 def _download_as_base64(session: Session, download_url: str) -> str:
@@ -646,6 +659,25 @@ def _detect_image_mime_type(image_bytes: bytes, response_content_type: str | Non
     if image_bytes[4:12] == b"ftypavif":
         return "image/avif"
     return "image/png"
+
+
+def _safe_content_type(value: str | None) -> str:
+    content_type = str(value or "").split(";", 1)[0].strip().lower()
+    return content_type[:64] or "unknown"
+
+
+def _safe_download_url_label(download_url: str) -> str:
+    parsed = urlparse(str(download_url or ""))
+    if not parsed.scheme or not parsed.netloc:
+        return "relative-or-invalid"
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _safe_download_file_id(file_id: str) -> str:
+    normalized = str(file_id or "").strip()
+    if len(normalized) <= 16:
+        return normalized or "unknown"
+    return f"{normalized[:6]}...{normalized[-6:]}"
 
 
 def _normalize_input_image_mime_type(image_bytes: bytes, response_content_type: str | None = None) -> str:
@@ -936,12 +968,42 @@ def _build_conversation_message(
     }
 
 
-def _download_image_payload(session: Session, download_url: str) -> tuple[str, str]:
+def _download_headers_for_url(download_url: str, access_token: str | None, device_id: str | None) -> dict[str, str]:
+    parsed = urlparse(str(download_url or ""))
+    if parsed.netloc != "chatgpt.com":
+        return {}
+    headers = {
+        "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "sec-fetch-dest": "image",
+        "sec-fetch-mode": "no-cors",
+        "sec-fetch-site": "same-origin",
+    }
+    normalized_token = str(access_token or "").strip()
+    normalized_device_id = str(device_id or "").strip()
+    if normalized_token:
+        headers["Authorization"] = f"Bearer {normalized_token}"
+    if normalized_device_id:
+        headers["oai-device-id"] = normalized_device_id
+    return headers
+
+
+def _download_image_payload(
+    session: Session,
+    download_url: str,
+    *,
+    access_token: str | None = None,
+    device_id: str | None = None,
+) -> tuple[str, str]:
     last_error: Exception | None = None
+    headers = _download_headers_for_url(download_url, access_token, device_id)
     for _ in range(3):
         try:
             response = _retry(
-                lambda: session.get(download_url, timeout=UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS),
+                lambda: session.get(
+                    download_url,
+                    headers=headers or None,
+                    timeout=UPSTREAM_IMAGE_RESULT_TIMEOUT_SECONDS,
+                ),
                 retries=2,
                 retry_on_status=TRANSIENT_HTTP_STATUS_CODES,
             )
@@ -953,7 +1015,16 @@ def _download_image_payload(session: Session, download_url: str) -> tuple[str, s
             image_bytes = response.content
             mime_type = _detect_image_mime_type(image_bytes, response.headers.get("content-type"))
             return base64.b64encode(image_bytes).decode("ascii"), mime_type
-        last_error = ImageGenerationError("download image failed")
+        content_type = _safe_content_type(response.headers.get("content-type"))
+        content_length = len(response.content or b"")
+        print(
+            "[image-download] payload failed "
+            f"url={_safe_download_url_label(download_url)} status={response.status_code} "
+            f"content_type={content_type} bytes={content_length}"
+        )
+        last_error = ImageGenerationError(
+            f"download image failed: HTTP {response.status_code} content_type={content_type} bytes={content_length}"
+        )
         time.sleep(1.0)
     raise ImageGenerationError(str(last_error or "download image failed"))
 
@@ -980,7 +1051,12 @@ def _download_generated_images(
         )
         if not download_url:
             raise ImageGenerationError(f"failed to get download url for file: {normalized_file_id}")
-        image_b64, mime_type = _download_image_payload(session, download_url)
+        image_b64, mime_type = _download_image_payload(
+            session,
+            download_url,
+            access_token=access_token,
+            device_id=device_id,
+        )
         images.append(
             GeneratedImage(
                 b64_json=image_b64,

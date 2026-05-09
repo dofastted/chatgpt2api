@@ -89,6 +89,7 @@ const IMAGE_CONVERSATIONS_KEY_PREFIX = "items";
 const IMAGE_PREFERENCE_KEY_PREFIX = "generation_preference";
 const IMAGE_SERVER_MIGRATION_KEY_PREFIX = "server_migrated";
 const IMAGE_CONVERSATIONS_DEFAULT_SCOPE = "__anonymous__";
+export const IMAGE_CONVERSATION_SUMMARY_LIMIT = 10;
 const conversationWriteQueues = new Map<string, Promise<void>>();
 const VALID_IMAGE_MODELS = new Set<ImageModel>([
   "gpt-image-2",
@@ -118,12 +119,36 @@ function buildServerMigrationKey(scope: string): string {
   return `${IMAGE_SERVER_MIGRATION_KEY_PREFIX}:${normalizeConversationScope(scope)}`;
 }
 
-async function readLocalConversations(scope: string): Promise<ImageConversation[]> {
+async function readLocalConversations(
+  scope: string,
+  options: { limit?: number } = {},
+): Promise<ImageConversation[]> {
   const localItems =
     (await imageConversationStorage.getItem<ImageConversation[]>(buildConversationStorageKey(scope))) || [];
-  return localItems
-    .map(normalizeConversation)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const sortedItems = [...localItems].sort((a, b) =>
+    String(b?.createdAt || "").localeCompare(String(a?.createdAt || "")),
+  );
+  const limit = Number(options.limit || 0);
+  const selectedItems = limit > 0 ? sortedItems.slice(0, limit) : sortedItems;
+  return selectedItems.map(normalizeConversation);
+}
+
+function sortConversationsByCreatedAt(items: ImageConversation[]): ImageConversation[] {
+  return [...items].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+function mergeConversationLists(
+  primaryItems: ImageConversation[],
+  secondaryItems: ImageConversation[],
+): ImageConversation[] {
+  const merged = new Map<string, ImageConversation>();
+  for (const item of secondaryItems) {
+    merged.set(item.id, item);
+  }
+  for (const item of primaryItems) {
+    merged.set(item.id, item);
+  }
+  return sortConversationsByCreatedAt(Array.from(merged.values()));
 }
 
 async function migrateLocalConversationsIfNeeded(
@@ -297,22 +322,59 @@ export async function listImageConversations(scope: string): Promise<ImageConver
   return normalizedLocalItems;
 }
 
+export async function listCachedImageConversationSummaries(scope: string): Promise<ImageConversation[]> {
+  return readLocalConversations(scope, {
+    limit: IMAGE_CONVERSATION_SUMMARY_LIMIT,
+  });
+}
+
 export async function listImageConversationSummaries(scope: string): Promise<ImageConversation[]> {
-  const normalizedLocalItems = await readLocalConversations(scope);
+  const localItems = await readLocalConversations(scope, {
+    limit: IMAGE_CONVERSATION_SUMMARY_LIMIT,
+  });
   try {
-    const migrated = await migrateLocalConversationsIfNeeded(scope, normalizedLocalItems);
-    const response = await fetchImageConversations({ summary: true });
+    const response = await fetchImageConversations({
+      summary: true,
+      limit: IMAGE_CONVERSATION_SUMMARY_LIMIT,
+      offset: 0,
+    });
     const serverItems = (response.items || [])
       .map((item) => normalizeConversation(item as unknown as ImageConversation))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    if (serverItems.length > 0 || migrated) {
-      await imageConversationStorage.setItem(buildConversationStorageKey(scope), serverItems);
-      return serverItems;
+    if (serverItems.length > 0 || localItems.length > 0) {
+      return mergeConversationLists(serverItems, localItems).slice(0, IMAGE_CONVERSATION_SUMMARY_LIMIT);
     }
   } catch {
-    return normalizedLocalItems;
+    return localItems;
   }
-  return normalizedLocalItems;
+  return [];
+}
+
+export async function listMoreImageConversationSummaries(
+  scope: string,
+  offset: number,
+  limit = IMAGE_CONVERSATION_SUMMARY_LIMIT,
+): Promise<ImageConversation[]> {
+  const normalizedOffset = Math.max(0, Number(offset || 0));
+  const normalizedLimit = Math.max(1, Math.min(100, Number(limit || IMAGE_CONVERSATION_SUMMARY_LIMIT)));
+  try {
+    const response = await fetchImageConversations({
+      summary: true,
+      limit: normalizedLimit,
+      offset: normalizedOffset,
+    });
+    const serverItems = (response.items || [])
+      .map((item) => normalizeConversation(item as unknown as ImageConversation))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (serverItems.length > 0) {
+      return serverItems;
+    }
+    const localItems = await readLocalConversations(scope);
+    return localItems.slice(normalizedOffset, normalizedOffset + normalizedLimit);
+  } catch {
+    const localItems = await readLocalConversations(scope);
+    return localItems.slice(normalizedOffset, normalizedOffset + normalizedLimit);
+  }
 }
 
 export async function getImageConversationDetail(scope: string, id: string): Promise<ImageConversation> {

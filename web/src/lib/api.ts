@@ -792,10 +792,18 @@ export async function fetchImageRequestRecord(requestId: string) {
   return httpRequest<ImageRequestRecord>(`/api/image-requests/${encodeURIComponent(requestId)}`);
 }
 
-export async function fetchImageConversations(options: { summary?: boolean } = {}) {
+export async function fetchImageConversations(
+  options: { summary?: boolean; limit?: number; offset?: number } = {},
+) {
   const params = new URLSearchParams();
   if (options.summary) {
     params.set("summary", "true");
+  }
+  if (options.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  if (options.offset !== undefined) {
+    params.set("offset", String(options.offset));
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return httpRequest<{ items: ImageConversationPayload[] }>(`/api/image-conversations${suffix}`);

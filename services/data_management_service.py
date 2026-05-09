@@ -425,10 +425,19 @@ class DataManagementService:
             "isSummary": True,
         }
 
-    def list_conversations(self, auth_token: str, *, summary: bool = False) -> list[dict[str, Any]]:
+    def list_conversations(
+        self,
+        auth_token: str,
+        *,
+        summary: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         owner_id = UploadedImageService.build_owner_id(auth_token)
         if not owner_id:
             return []
+        normalized_limit = max(1, min(100, int(limit or 100)))
+        normalized_offset = max(0, int(offset or 0))
         with sqlite_store.connect() as connection:
             if summary:
                 rows = connection.execute(
@@ -437,8 +446,9 @@ class DataManagementService:
                     FROM image_conversations
                     WHERE owner_id = ?
                     ORDER BY updated_at DESC
+                    LIMIT ? OFFSET ?
                     """,
-                    (owner_id,),
+                    (owner_id, normalized_limit, normalized_offset),
                 ).fetchall()
                 items: list[dict[str, Any]] = []
                 for row in rows:
@@ -451,8 +461,9 @@ class DataManagementService:
                 FROM image_conversations
                 WHERE owner_id = ?
                 ORDER BY updated_at DESC
+                LIMIT ? OFFSET ?
                 """,
-                (owner_id,),
+                (owner_id, normalized_limit, normalized_offset),
             ).fetchall()
         items: list[dict[str, Any]] = []
         for row in rows:

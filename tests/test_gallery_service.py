@@ -77,6 +77,31 @@ class GalleryServiceTests(unittest.TestCase):
         self.assertEqual(items[0]["prompt"], "生成一张成都的宣传海报")
         self.assertEqual(items[0]["assets"][0]["width"], 640)
 
+    def test_import_seed_when_user_submission_already_exists(self) -> None:
+        submitted = self.service.submit_item(
+            auth_token="plain-user-key",
+            payload={
+                "prompt": "生成一张海边日落照片",
+                "image_url": "data:image/png;base64,ZmFrZQ==",
+                "mime_type": "image/png",
+            },
+        )
+
+        items = self.service.list_public_items()
+
+        self.assertEqual([item["id"] for item in items], ["seed-2"])
+        with self.store.connect() as connection:
+            submitted_row = connection.execute(
+                "SELECT status FROM gallery_items WHERE id = ?",
+                (submitted["id"],),
+            ).fetchone()
+            seed_count = connection.execute(
+                "SELECT COUNT(*) AS count FROM gallery_items WHERE source = 'seed'",
+            ).fetchone()
+        self.assertIsNotNone(submitted_row)
+        self.assertEqual(submitted_row["status"], "pending")
+        self.assertEqual(seed_count["count"], 1)
+
     def test_submission_stores_owner_hash_and_admin_can_publish(self) -> None:
         item = self.service.submit_item(
             auth_token="plain-user-key",
@@ -94,6 +119,27 @@ class GalleryServiceTests(unittest.TestCase):
         published = self.service.admin_update_item(item["id"], {"action": "approve"})
         self.assertEqual(published["status"], "published")
         self.assertTrue(published["visibility"])
+
+    def test_admin_approval_appends_submission_to_public_gallery(self) -> None:
+        before_items = self.service.list_public_items()
+        item = self.service.submit_item(
+            auth_token="plain-user-key",
+            payload={
+                "prompt": "生成一张海边日落照片",
+                "image_url": "data:image/png;base64,ZmFrZQ==",
+                "mime_type": "image/png",
+            },
+        )
+
+        self.service.admin_update_item(item["id"], {"action": "approve"})
+        after_items = self.service.list_public_items()
+
+        self.assertEqual(len(after_items), len(before_items) + 1)
+        self.assertIn("seed-2", {entry["id"] for entry in after_items})
+        self.assertIn(item["id"], {entry["id"] for entry in after_items})
+        approved_item = next(entry for entry in after_items if entry["id"] == item["id"])
+        self.assertEqual(approved_item["prompt"], "生成一张海边日落照片")
+        self.assertEqual(len(approved_item["assets"]), 1)
 
     def test_public_event_only_updates_visible_published_items(self) -> None:
         item = self.service.submit_item(
