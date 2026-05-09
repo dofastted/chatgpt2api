@@ -62,6 +62,7 @@ class SQLiteStore:
                         owner_id TEXT NOT NULL,
                         conversation_id TEXT NOT NULL,
                         payload TEXT NOT NULL,
+                        summary_payload TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         PRIMARY KEY (owner_id, conversation_id)
@@ -157,6 +158,12 @@ class SQLiteStore:
                         ON image_request_records(auth_type, created_at DESC);
                     """
                 )
+                columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(image_conversations)").fetchall()
+                }
+                if "summary_payload" not in columns:
+                    connection.execute("ALTER TABLE image_conversations ADD COLUMN summary_payload TEXT")
             self._initialized = True
 
     def load_document(self, name: str, default: Any, import_file: Path | None = None) -> Any:

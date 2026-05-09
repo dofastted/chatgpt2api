@@ -69,6 +69,69 @@ export function useCreateUser() {
 
 ## Query Patterns
 
+### Image Gallery Asset URL Contract
+
+#### 1. Scope / Trigger
+
+- Trigger: frontend code renders images from `GET /api/gallery/public` or `GET /api/admin/gallery`.
+- Use this contract for `/image` gallery rail, `/gallery`, and admin gallery preview/review UI.
+
+#### 2. Signatures
+
+- `fetchPublicGalleryItems({ limit, redirectOnUnauthorized }) -> { items: GalleryItem[] }`
+- `fetchAdminGalleryItems({ status, limit }) -> { items: GalleryItem[] }`
+- `resolveApiAssetUrl(url: string) -> string`
+- `GalleryAsset.url` may be:
+  - absolute HTTP(S) URL
+  - data URL from local browser-only state
+  - relative API URL such as `/api/gallery/assets/{asset_id}`
+
+#### 3. Contracts
+
+- Backend gallery list responses must not contain old `data:image/*;base64,...` bodies for persisted server records.
+- When `GalleryAsset.url` starts with `/api/`, frontend rendering code must pass it through `resolveApiAssetUrl()` before assigning it to image `src`.
+- `resolveApiAssetUrl()` prefixes relative API URLs with the configured API base. This is required because static export and Next dev may serve the UI from a different origin than the FastAPI backend.
+- Do not call `resolveApiAssetUrl()` for local browser-only data URLs or absolute URLs; it must return them unchanged.
+
+#### 4. Validation & Error Matrix
+
+- `/api/gallery/assets/{asset_id}` returns image bytes -> browser displays the old asset.
+- `/api/gallery/assets/{asset_id}` returns `404` -> image card should follow existing broken-image/fallback behavior.
+- `url` is absolute HTTP(S) -> use as-is.
+- `url` is `data:image/...` from local pinned browser state -> use as-is.
+- `url` is empty -> skip or reject the gallery item according to existing builder behavior.
+
+#### 5. Good/Base/Bad Cases
+
+- Good: public gallery item with `/api/gallery/assets/asset-1` renders correctly on both static FastAPI origin and Next dev origin.
+- Base: user-local pinned image uses a data URL and remains local-only.
+- Bad: frontend assigns `/api/gallery/assets/asset-1` directly while running from a different dev origin.
+- Bad: frontend assumes gallery list always returns base64 image bodies.
+
+#### 6. Tests Required
+
+- Type check after changing `GalleryAsset` consumers.
+- Unit or focused test for URL resolver if test harness exists.
+- Browser/API verification that public gallery list response does not include `data:image` and rendered images still load.
+
+#### 7. Wrong vs Correct
+
+##### Wrong
+
+```typescript
+return {
+  imageUrl: asset.url,
+};
+```
+
+##### Correct
+
+```typescript
+return {
+  imageUrl: resolveApiAssetUrl(asset.url),
+};
+```
+
 ### Pagination
 
 ```typescript

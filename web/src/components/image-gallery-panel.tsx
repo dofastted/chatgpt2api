@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   fetchPublicGalleryItems,
   recordGalleryItemEvent,
+  resolveApiAssetUrl,
   type GalleryItem,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -127,7 +128,7 @@ function buildPublicGalleryItem(item: GalleryItem): GallerySeedItem | null {
     username,
     imageIndex,
     title: item.title || item.prompt_preview || "公开画廊",
-    imageUrl: asset.url,
+    imageUrl: resolveApiAssetUrl(asset.url),
     downloadPath: String(metadata.download_path || ""),
     postUrl: String(metadata.post_url || ""),
     prompt: item.prompt,

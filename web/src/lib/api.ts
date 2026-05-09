@@ -1,3 +1,4 @@
+import webConfig from "@/constants/common-env";
 import { httpRequest, httpStreamRequest } from "@/lib/request";
 
 export type AccountType = "Free" | "Plus" | "Pro" | "Team";
@@ -197,6 +198,15 @@ export type GalleryAsset = {
   size_bytes?: number | null;
   created_at?: string | null;
 };
+
+export function resolveApiAssetUrl(url: string): string {
+  const normalizedUrl = String(url || "").trim();
+  if (!normalizedUrl.startsWith("/api/")) {
+    return normalizedUrl;
+  }
+  const apiUrl = webConfig.apiUrl.replace(/\/$/, "");
+  return apiUrl ? `${apiUrl}${normalizedUrl}` : normalizedUrl;
+}
 
 export type GalleryItem = {
   id: string;

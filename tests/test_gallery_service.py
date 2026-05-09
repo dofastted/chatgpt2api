@@ -199,6 +199,64 @@ class GalleryApiTests(unittest.TestCase):
         self.assertEqual(item["status"], "published")
         self.assertTrue(item["is_pinned"])
 
+    def test_gallery_lists_strip_base64_assets_but_asset_endpoint_serves_image(self) -> None:
+        submit_response = self.client.post(
+            "/api/gallery/submissions",
+            headers={"Authorization": "Bearer test-auth-key"},
+            json={
+                "prompt": "生成一张适合画廊展示的花园照片",
+                "image_url": "data:image/png;base64,ZmFrZQ==",
+                "mime_type": "image/png",
+            },
+        )
+        self.assertEqual(submit_response.status_code, 200)
+        item_id = submit_response.json()["item"]["id"]
+
+        admin_response = self.client.patch(
+            f"/api/admin/gallery/{item_id}",
+            headers={"Authorization": "Bearer test-admin-key"},
+            json={"action": "approve"},
+        )
+        self.assertEqual(admin_response.status_code, 200)
+
+        list_response = self.client.get(
+            "/api/gallery/public",
+            headers={"Authorization": "Bearer test-auth-key"},
+        )
+        self.assertEqual(list_response.status_code, 200)
+        list_item = next(item for item in list_response.json()["items"] if item["id"] == item_id)
+        asset_url = list_item["assets"][0]["url"]
+        self.assertTrue(asset_url.startswith("/api/gallery/assets/"))
+        self.assertNotIn("data:image", json.dumps(list_response.json()))
+
+        asset_response = self.client.get(asset_url)
+        self.assertEqual(asset_response.status_code, 200)
+        self.assertEqual(asset_response.headers["content-type"], "image/png")
+        self.assertEqual(asset_response.content, b"fake")
+
+        admin_list_response = self.client.get(
+            "/api/admin/gallery",
+            headers={"Authorization": "Bearer test-admin-key"},
+        )
+        self.assertEqual(admin_list_response.status_code, 200)
+        admin_list_item = next(item for item in admin_list_response.json()["items"] if item["id"] == item_id)
+        self.assertEqual(admin_list_item["assets"][0]["url"], asset_url)
+        self.assertNotIn("data:image", json.dumps(admin_list_response.json()))
+
+    def test_gallery_asset_endpoint_rejects_non_base64_data_images(self) -> None:
+        item = self.gallery_service.submit_item(
+            auth_token="plain-user-key",
+            payload={
+                "prompt": "生成一张适合画廊展示的手绘插画",
+                "image_url": "data:image/svg+xml,<svg></svg>",
+                "mime_type": "image/svg+xml",
+            },
+        )
+        asset_id = item["assets"][0]["asset_id"]
+
+        asset_response = self.client.get(f"/api/gallery/assets/{asset_id}")
+        self.assertEqual(asset_response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

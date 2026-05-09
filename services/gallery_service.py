@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 import sqlite3
+from base64 import b64decode
+from binascii import Error as BinasciiError
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -86,6 +88,15 @@ def stable_hash(value: str) -> str:
 
 def owner_id_from_token(auth_token: str) -> str:
     return stable_hash(str(auth_token or "").strip())
+
+
+def is_data_image_url(url: str) -> bool:
+    return str(url or "").lower().startswith("data:image/")
+
+
+def is_base64_data_image_url(url: str) -> bool:
+    lowered = str(url or "").lower()
+    return lowered.startswith("data:image/") and ";base64," in lowered
 
 
 def is_seed_prompt_usable(prompt: str) -> bool:
@@ -295,21 +306,50 @@ class GalleryService:
             return lowered.split(";", 1)[0].replace("data:", "")
         return None
 
-    def _rows_to_items(self, connection: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    def _rows_to_items(
+            self,
+            connection: sqlite3.Connection,
+            rows: list[sqlite3.Row],
+            *,
+            asset_url_mode: str = "full",
+    ) -> list[dict[str, Any]]:
         if not rows:
             return []
         ids = [str(row["id"]) for row in rows]
         placeholders = ",".join("?" for _ in ids)
         asset_rows = connection.execute(
-            f"SELECT * FROM gallery_assets WHERE item_id IN ({placeholders}) ORDER BY item_id, sort_order ASC",
-            ids,
+            f"""
+            SELECT
+                id,
+                item_id,
+                kind,
+                CASE
+                    WHEN ? = 'asset_api' AND lower(substr(url, 1, 96)) LIKE 'data:image/%;base64,%' THEN NULL
+                    ELSE url
+                END AS url,
+                CASE
+                    WHEN ? = 'asset_api' AND lower(substr(url, 1, 96)) LIKE 'data:image/%;base64,%' THEN 1
+                    ELSE 0
+                END AS has_legacy_data_image,
+                file_id,
+                mime_type,
+                width,
+                height,
+                size_bytes,
+                created_at,
+                sort_order
+            FROM gallery_assets
+            WHERE item_id IN ({placeholders})
+            ORDER BY item_id, sort_order ASC
+            """,
+            [asset_url_mode, asset_url_mode, *ids],
         ).fetchall()
         assets_by_item: dict[str, list[dict[str, Any]]] = {}
         for row in asset_rows:
             asset = {
                 "asset_id": str(row["id"]),
                 "kind": str(row["kind"]),
-                "url": str(row["url"]),
+                "url": self._asset_url_from_row(row, mode=asset_url_mode),
                 "file_id": row["file_id"],
                 "mime_type": row["mime_type"],
                 "width": row["width"],
@@ -319,6 +359,56 @@ class GalleryService:
             }
             assets_by_item.setdefault(str(row["item_id"]), []).append(asset)
         return [self._row_to_item(row, assets_by_item.get(str(row["id"]), [])) for row in rows]
+
+    def _asset_url_from_row(self, row: sqlite3.Row, *, mode: str) -> str:
+        url = str(row["url"] or "")
+        if mode == "asset_api" and int(row["has_legacy_data_image"] or 0):
+            return f"/api/gallery/assets/{str(row['id'])}"
+        return url
+
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
+        normalized_id = str(asset_id or "").strip()
+        if not normalized_id:
+            return None
+        with self.store.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, kind, url, mime_type, width, height, size_bytes, created_at
+                FROM gallery_assets
+                WHERE id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "asset_id": str(row["id"]),
+            "kind": str(row["kind"]),
+            "url": str(row["url"]),
+            "mime_type": row["mime_type"],
+            "width": row["width"],
+            "height": row["height"],
+            "size_bytes": row["size_bytes"],
+            "created_at": row["created_at"],
+        }
+
+    def get_asset_image_response(self, asset_id: str) -> tuple[bytes, str] | None:
+        asset = self.get_asset(asset_id)
+        if asset is None:
+            return None
+        url = str(asset.get("url") or "")
+        if not is_base64_data_image_url(url):
+            return None
+        header, _, raw_data = url.partition(",")
+        if not raw_data:
+            return None
+        mime_type = str(asset.get("mime_type") or "").strip()
+        if not mime_type:
+            mime_type = header.split(";", 1)[0].replace("data:", "") or "image/png"
+        try:
+            return b64decode(raw_data, validate=True), mime_type
+        except (BinasciiError, ValueError):
+            return None
 
     def _row_to_item(self, row: sqlite3.Row, assets: list[dict[str, Any]]) -> dict[str, Any]:
         metadata = self._decode_json(row["metadata_json"], {})
@@ -370,7 +460,7 @@ class GalleryService:
                 """,
                 (max(1, min(500, int(limit or 120))),),
             ).fetchall()
-            return self._rows_to_items(connection, rows)
+            return self._rows_to_items(connection, rows, asset_url_mode="asset_api")
 
     def list_admin_items(self, *, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         self.ensure_seed_imported()
@@ -400,7 +490,7 @@ class GalleryService:
                     """,
                     (max(1, min(500, int(limit or 200))),),
                 ).fetchall()
-            return self._rows_to_items(connection, rows)
+            return self._rows_to_items(connection, rows, asset_url_mode="asset_api")
 
     def submit_item(self, *, auth_token: str, payload: dict[str, Any]) -> dict[str, Any]:
         prompt = normalize_prompt(str(payload.get("prompt") or ""))

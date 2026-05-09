@@ -404,11 +404,47 @@ class DataManagementService:
             "isSummary": True,
         }
 
+    def _parse_conversation_summary(self, value: Any) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(str(value or ""))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _build_conversation_row_summary(self, row: Any) -> dict[str, Any]:
+        conversation_id = _clean_text(row["conversation_id"])
+        created_at = _clean_text(row["created_at"] or row["updated_at"])
+        return {
+            "id": conversation_id,
+            "clientConversationId": conversation_id,
+            "title": "图片会话",
+            "createdAt": created_at,
+            "turns": [],
+            "status": "",
+            "turnCount": 0,
+            "isSummary": True,
+        }
+
     def list_conversations(self, auth_token: str, *, summary: bool = False) -> list[dict[str, Any]]:
         owner_id = UploadedImageService.build_owner_id(auth_token)
         if not owner_id:
             return []
         with sqlite_store.connect() as connection:
+            if summary:
+                rows = connection.execute(
+                    """
+                    SELECT conversation_id, summary_payload, created_at, updated_at
+                    FROM image_conversations
+                    WHERE owner_id = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (owner_id,),
+                ).fetchall()
+                items: list[dict[str, Any]] = []
+                for row in rows:
+                    summary_payload = self._parse_conversation_summary(row["summary_payload"])
+                    items.append(summary_payload if summary_payload is not None else self._build_conversation_row_summary(row))
+                return items
             rows = connection.execute(
                 """
                 SELECT conversation_id, payload
@@ -425,7 +461,7 @@ class DataManagementService:
             except json.JSONDecodeError:
                 continue
             if isinstance(payload, dict):
-                items.append(self._build_conversation_summary(payload) if summary else payload)
+                items.append(payload)
         return items
 
     def get_conversation(self, auth_token: str, conversation_id: str) -> dict[str, Any] | None:
@@ -470,13 +506,23 @@ class DataManagementService:
             created_at = str(current["created_at"]) if current else now
             connection.execute(
                 """
-                INSERT INTO image_conversations (owner_id, conversation_id, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO image_conversations (
+                    owner_id, conversation_id, payload, summary_payload, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(owner_id, conversation_id) DO UPDATE SET
                     payload = excluded.payload,
+                    summary_payload = excluded.summary_payload,
                     updated_at = excluded.updated_at
                 """,
-                (owner_id, conversation_id, json.dumps(payload, ensure_ascii=False), created_at, now),
+                (
+                    owner_id,
+                    conversation_id,
+                    json.dumps(payload, ensure_ascii=False),
+                    json.dumps(self._build_conversation_summary(payload), ensure_ascii=False),
+                    created_at,
+                    now,
+                ),
             )
         return payload
 

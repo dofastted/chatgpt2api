@@ -21,7 +21,8 @@
 - `GET /api/quota`，普通密钥返回账号池总额度。用户 key 返回自己的剩余次数和 `pricing`，位置在 `services/api.py:399`。
 - `POST /api/donations/accounts`，接收 `tokens: string[]` 或 `accounts: object[]`，把账户按“捐赠”分类入池，然后刷新账号信息，位置在 `services/api.py:635`。
 - `POST /api/redeem-codes/redeem`，只给 `user_key` 使用。请求体是 `code`。成功后返回这次增加的 `added_quota`、最新 `remaining_quota` 和兑换码条目；这次额度会直接加到当前剩余额度上。
-- `GET /api/gallery/public`，读取公开可见画廊项。只返回 `published` 且 `visibility=1` 的项，按置顶、排序和发布时间排列；首次调用时会触发静态 seed 导入。
+- `GET /api/gallery/public`，读取公开可见画廊项。只返回 `published` 且 `visibility=1` 的项，按置顶、排序和发布时间排列；首次调用时会触发静态 seed 导入。列表响应不会返回旧 base64 图片正文，旧 `data:image/*;base64,...` 资产会以 `/api/gallery/assets/{asset_id}` 形式返回。
+- `GET /api/gallery/assets/{asset_id}`，读取旧 `data:image/*;base64,...` 画廊资产的图片内容。该端点用于兼容已有记录，不改变列表响应的轻量形状；非 base64 data URL 和普通 HTTP URL 不会被这个端点解码。
 - `POST /api/gallery/{item_id}/events`，记录公开画廊项点击或使用。请求体是 `event: "click" | "use"`。只有公开可见项可记录，非公开项返回 `404`。
 - `POST /api/gallery/submissions`，普通用户提交画廊项给管理员审核。请求体包含 `prompt`、可选 `title`、`assets[]`、`source_conversation_id`、`source_turn_id` 和 `source_image_id`。后端保存当前 Bearer Token 的 owner hash，不保存原始 key。
 - `POST /backend-api/files/process_upload_stream`，接收 `multipart/form-data` 的 `file` 字段，大小上限 8 MB，返回 `file_id`、`mime_type`、尺寸、大小和下载地址，位置在 `services/api.py:859` 到 `services/api.py:880` 与 `services/uploaded_image_service.py:143` 到 `services/uploaded_image_service.py:184`。
@@ -63,10 +64,10 @@
 - `GET /api/image-requests`，管理员查询生图请求记录。支持 `request_id`、`owner_id`、`auth_type`、`status`、`model`、`endpoint`、`since`、`until`、`limit`、`cursor`。
 - `GET /api/image-requests/{request_id}`，管理员读取单条生图请求记录。记录只含摘要、哈希、耗时、扣费、错误和路线字段。
 - `GET /api/image-queue/admin`，管理员查看当前所有活动队列 ticket 和全局限制。
-- `GET /api/admin/gallery`，管理员读取公开画廊和用户投稿。支持 `status` 和 `limit` 查询参数，响应包含 `items` 和按状态统计的 `status`。
+- `GET /api/admin/gallery`，管理员读取公开画廊和用户投稿。支持 `status` 和 `limit` 查询参数，响应包含 `items` 和按状态统计的 `status`；列表里的旧 base64 资产同样返回 `/api/gallery/assets/{asset_id}`。
 - `PATCH /api/admin/gallery/{item_id}`，管理员更新画廊项。请求体可包含 `action`，支持 `approve`、`reject`、`publish`、`hide`、`delete`、`pin`、`unpin`；也可更新 `prompt`、`title`、`tags`、`sort_order`、`visibility` 和 `assets`。
 - `DELETE /api/admin/gallery/{item_id}`，管理员软删除画廊项，实际把状态改成 `deleted` 并隐藏。
-- `GET /api/image-conversations`，读取当前 Bearer Token 的图片会话；传 `summary=true` 时只返回轻量摘要，只含最新 turn、`turnCount` 和状态字段，不带生成图 base64。
+- `GET /api/image-conversations`，读取当前 Bearer Token 的图片会话；传 `summary=true` 时只读 `summary_payload` 等轻字段，返回轻量摘要，只含最新 turn、`turnCount` 和状态字段，不带生成图 base64。旧记录没有摘要时会返回可点击的行级占位摘要，单条详情仍走完整 payload。
 - `GET /api/image-conversations/{conversation_id}`，读取当前 Bearer Token 下单条图片会话的完整内容。
 - `POST /api/image-conversations`，保存或更新当前 Bearer Token 的图片会话；返回的 `items` 使用轻量摘要，避免保存后再传回完整图片列表。
 - `DELETE /api/image-conversations`，按 `id` 或 `conversation_id` 删除当前 Bearer Token 的图片会话；返回的 `items` 使用轻量摘要。

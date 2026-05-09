@@ -14,8 +14,10 @@ from fastapi.testclient import TestClient
 
 from services import api
 from services.account_service import AccountService
-from services.data_management_service import data_management_service
-from services.sqlite_store import sqlite_store
+from services import data_management_service as data_management_module
+from services.data_management_service import DataManagementService, data_management_service
+from services.sqlite_store import SQLiteStore, sqlite_store
+from services.uploaded_image_service import UploadedImageService
 
 
 def load_pricing_update_script():
@@ -108,6 +110,47 @@ class SQLiteDataManagementTests(unittest.TestCase):
         )
         self.assertEqual(admin_response.status_code, 200)
         self.assertEqual(admin_response.json()["sqlite_path"], str(sqlite_store.db_path))
+
+    def test_image_conversation_summary_reads_summary_payload_without_full_payload(self) -> None:
+        auth_token = "summary-test-key"
+        owner_id = UploadedImageService.build_owner_id(auth_token)
+        temp_store = SQLiteStore(self.temp_dir / "summary.sqlite3")
+        sqlite_patcher = patch.object(data_management_module, "sqlite_store", temp_store)
+        sqlite_patcher.start()
+        self.addCleanup(sqlite_patcher.stop)
+        service = DataManagementService()
+        conversation_id = "conv_summary_test"
+        summary_payload = {
+            "id": conversation_id,
+            "clientConversationId": conversation_id,
+            "title": "轻量摘要",
+            "createdAt": "2026-05-09 00:00:00",
+            "turns": [],
+            "turnCount": 0,
+            "isSummary": True,
+        }
+        with temp_store.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO image_conversations (
+                    owner_id, conversation_id, payload, summary_payload, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, '2026-05-09 00:00:00', '2026-05-09 00:00:00')
+                ON CONFLICT(owner_id, conversation_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    summary_payload = excluded.summary_payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    owner_id,
+                    conversation_id,
+                    "{not-json",
+                    json.dumps(summary_payload, ensure_ascii=False),
+                ),
+            )
+
+        self.assertEqual(service.list_conversations(auth_token, summary=True), [summary_payload])
+        self.assertEqual(service.list_conversations(auth_token, summary=False), [])
 
     def test_pricing_update_script_overwrites_sqlite_and_json(self) -> None:
         script = load_pricing_update_script()

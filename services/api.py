@@ -15,7 +15,7 @@ from uuid import uuid4
 from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
@@ -2206,6 +2206,18 @@ def create_app() -> FastAPI:
     ):
         require_auth_key(authorization)
         return {"items": gallery_service.list_public_items(limit=limit)}
+
+    @router.get("/api/gallery/assets/{asset_id}")
+    async def get_gallery_asset(asset_id: str):
+        image_response = gallery_service.get_asset_image_response(asset_id)
+        if image_response is None:
+            raise HTTPException(status_code=404, detail={"error": "gallery asset not found"})
+        content, media_type = image_response
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     @router.post("/api/gallery/{item_id}/events")
     async def record_gallery_event(

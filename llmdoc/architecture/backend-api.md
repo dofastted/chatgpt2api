@@ -51,11 +51,11 @@
 - 请求轨迹放在 `services/image_request_log_service.py`，会记录 `accepted / waiting / assigning_account / running / finished / failed / rejected` 状态、耗时、扣费和路线摘要。
 - 2026-04-26 云端实测 `/v1/responses` 和 `/v1/images/generations` 混合 20 并发时共享同一个 `image_queue_service` 统计：全局运行峰值 20，结束后 `waiting=0`、`running=0`。
 - 账号、用户 key、兑换码、代理、上传图元数据和 Responses 历史现在通过 `services/sqlite_store.py` 写入 SQLite；旧 JSON 文件只在对应 SQLite 文档为空时导入一次。
-- 公开画廊通过 `services/gallery_service.py` 写入 SQLite 表 `gallery_items` 和 `gallery_assets`。服务首次发现 gallery 表为空时，会从 `web/src/data/gallery-ui-seed.json` 导入初始公开项，并跳过 `未提供`、`提示词`、过短闲聊等明显不可用 prompt。
+- 公开画廊通过 `services/gallery_service.py` 写入 SQLite 表 `gallery_items` 和 `gallery_assets`。服务首次发现 gallery 表为空时，会从 `web/src/data/gallery-ui-seed.json` 导入初始公开项，并跳过 `未提供`、`提示词`、过短闲聊等明显不可用 prompt。公开和管理员列表会把旧 `data:image/*;base64,...` 资产替换成 `/api/gallery/assets/{asset_id}`，避免列表 JSON 携带图片正文；该资产读取端点只解码旧 base64 图片内容。
 - 公开画廊项记录 `prompt`、`prompt_preview`、图片 assets、状态、可见性、排序、置顶、提交者哈希、审核时间、发布时间、点击数和使用数。用户投稿只保存 owner hash，不保存原始 Bearer Token。
 - 公开统计入口只允许 `published` 且 `visibility=1` 的项记录 click/use；`pending`、`rejected`、`hidden` 和 `deleted` 不会被公开端点改动。
 - 数据管理接口在 `services/api.py` 注册，底层是 `services/data_management_service.py`。管理员可查看 SQLite 状态、备份记录、设置、S3 测试和日志；普通 key 访问会返回 `403`。
-- 图片会话服务端保存入口是 `GET/POST/DELETE /api/image-conversations`，按 Bearer Token 哈希隔离。前端仍保留本地缓存和一次上传旧会话的兼容逻辑。
+- 图片会话服务端保存入口是 `GET/POST/DELETE /api/image-conversations`，按 Bearer Token 哈希隔离。`image_conversations` 仍保存完整 `payload` 供单条详情读取，同时保存 `summary_payload` 供 `summary=true` 列表读取；列表热路径不再读取完整图片 payload。前端仍保留本地缓存和一次上传旧会话的兼容逻辑。
 
 后台线程：
 
