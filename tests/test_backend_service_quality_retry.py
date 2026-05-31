@@ -13,6 +13,7 @@ class FakeAccountService:
         self.index = 0
         self.removed: list[str] = []
         self.failed: list[str] = []
+        self.fetch_remote_info_calls: list[str] = []
         self.accounts = {
             "bad-token": {"access_token": "bad-token", "quota": 5, "status": "正常"},
             "good-token": {"access_token": "good-token", "quota": 5, "status": "正常"},
@@ -30,6 +31,7 @@ class FakeAccountService:
         return dict(item) if item is not None else None
 
     def fetch_remote_info(self, access_token: str) -> dict:
+        self.fetch_remote_info_calls.append(access_token)
         item = self.accounts.get(access_token) or {"access_token": access_token}
         return {**item, "status": "正常", "quota": 5}
 
@@ -60,6 +62,28 @@ class FakeAccountService:
 
 
 class BackendServiceQualityRetryTests(unittest.TestCase):
+    def test_generate_with_pool_uses_cached_account_state_without_remote_refresh(self) -> None:
+        account_service = FakeAccountService()
+        service = BackendService(account_service)
+
+        def fake_generate(
+            access_token: str,
+            prompt: str,
+            model: str,
+            n: int,
+            input_images: list[dict[str, str]] | None = None,
+            route: str = "legacy",
+            size: str | None = None,
+        ) -> dict:
+            del prompt, model, n, input_images, route, size
+            return {"created": 1, "data": [{"b64_json": access_token}]}
+
+        with patch("services.backend_service.generate_image_result", side_effect=fake_generate):
+            payload = service.generate_with_pool("draw ABCD", "gpt-image-2", 1)
+
+        self.assertEqual(payload["data"][0]["b64_json"], "bad-token")
+        self.assertEqual(account_service.fetch_remote_info_calls, [])
+
     def test_generate_with_pool_propagates_text_quality_error_without_retry(self) -> None:
         service = BackendService(FakeAccountService())
 

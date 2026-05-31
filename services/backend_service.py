@@ -38,26 +38,6 @@ class BackendService:
         return hashlib.sha1(str(access_token or "").encode("utf-8")).hexdigest()[:10]
 
     @staticmethod
-    def _is_transient_refresh_error(message: str) -> bool:
-        normalized = str(message or "").lower()
-        return (
-            "tls connect error" in normalized
-            or "failed to perform, curl:" in normalized
-            or "timeout" in normalized
-            or "timed out" in normalized
-            or "connection was reset" in normalized
-            or "recv failure" in normalized
-        )
-
-    @staticmethod
-    def _is_terminal_refresh_error(message: str) -> bool:
-        normalized = str(message or "").lower()
-        return (
-            "/backend-api/me failed: http 401" in normalized
-            or "/backend-api/me failed: http 402" in normalized
-        )
-
-    @staticmethod
     def _is_account_ready_for_image(account: dict | None) -> bool:
         if not isinstance(account, dict):
             return False
@@ -87,29 +67,6 @@ class BackendService:
             )
         except TypeError:
             return self.account_service.mark_image_result(access_token, success=success)
-
-    def _refresh_request_token(self, access_token: str) -> dict | None:
-        cached_account = self.account_service.get_account(access_token)
-        try:
-            remote_info = self.account_service.fetch_remote_info(access_token)
-        except Exception as exc:
-            message = str(exc)
-            print(f"[image-generate] refresh token={self._token_label(access_token)} fail {message}")
-            if self._is_terminal_refresh_error(message):
-                return self.account_service.update_account(
-                    access_token,
-                    {
-                        "status": "异常",
-                        "quota": 0,
-                        "cooldown_until": None,
-                    },
-                )
-            if self._is_transient_refresh_error(message) and self._is_account_ready_for_image(cached_account):
-                print(f"[image-generate] refresh fallback token={self._token_label(access_token)} use cached account state")
-                return cached_account
-            self.account_service.mark_request_failure(access_token)
-            return None
-        return self.account_service.update_account(access_token, remote_info)
 
     def resolve_request_token(
         self,
@@ -170,19 +127,19 @@ class BackendService:
 
             attempted_tokens.add(request_token)
             try:
-                refreshed_account = self._refresh_request_token(request_token)
-                if not self._is_account_ready_for_image(refreshed_account):
+                account = self.account_service.get_account(request_token)
+                if not self._is_account_ready_for_image(account):
                     print(
                         f"[image-generate] skip token={self._token_label(request_token)} "
-                        f"quota={refreshed_account.get('quota') if refreshed_account else 'unknown'} "
-                        f"status={refreshed_account.get('status') if refreshed_account else 'unknown'}"
+                        f"quota={account.get('quota') if account else 'unknown'} "
+                        f"status={account.get('status') if account else 'unknown'}"
                     )
                     continue
 
                 if queue_request_id:
                     image_queue_service.mark_status(queue_request_id, "running")
                 route = select_image_route(
-                    account=refreshed_account,
+                    account=account,
                     has_input_image=bool(input_images),
                     policy=config.image_route_policy,
                 )
@@ -196,7 +153,7 @@ class BackendService:
                         image_request_log_service.mark_running(
                             queue_request_id,
                             account_token=request_token,
-                            account_type=str((refreshed_account or {}).get("type") or ""),
+                            account_type=str((account or {}).get("type") or ""),
                             route=candidate_route,
                             attempt_count=len(attempted_tokens),
                             fallback_used=attempt_index > 1,

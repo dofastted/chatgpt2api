@@ -30,7 +30,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
       <body
         className={`${headingFont.variable} ${bodyFont.variable} ${monoFont.variable} app-shell antialiased`}
         style={{
@@ -38,6 +38,28 @@ export default function RootLayout({
             'var(--font-body),"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif',
         }}
       >
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(() => {
+              try {
+                const storageKey = 'chatgpt2api-theme';
+                const storedTheme = window.localStorage.getItem(storageKey);
+                const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+                const resolvedTheme = storedTheme === 'light' || storedTheme === 'dark'
+                  ? storedTheme
+                  : mediaQuery.matches
+                    ? 'dark'
+                    : 'light';
+                const root = document.documentElement;
+                root.classList.toggle('dark', resolvedTheme === 'dark');
+                root.classList.toggle('light', resolvedTheme === 'light');
+                root.style.colorScheme = resolvedTheme;
+              } catch (error) {
+                void error;
+              }
+            })();`,
+          }}
+        />
         <Toaster position="top-center" richColors />
         <main className="app-shell__main min-h-screen px-4 py-4 sm:px-6 lg:px-8">
           <div className="mx-auto flex max-w-[1440px] flex-col gap-5">

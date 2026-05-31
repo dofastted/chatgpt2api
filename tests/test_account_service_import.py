@@ -24,7 +24,7 @@ class AccountServiceImportTests(unittest.TestCase):
             self.store_file.unlink()
         return AccountService(self.store_file)
 
-    def test_bare_json_import_marks_account_for_refresh_and_makes_it_selectable(self) -> None:
+    def test_bare_json_import_marks_account_for_manual_refresh_and_keeps_it_unavailable(self) -> None:
         service = self.make_service()
 
         result = service.add_account_items(
@@ -44,7 +44,8 @@ class AccountServiceImportTests(unittest.TestCase):
         self.assertEqual(account["status"], "正常")
         self.assertEqual(account["quota"], 0)
         self.assertTrue(account["needs_refresh"])
-        self.assertEqual(service.next_token(), "token-1")
+        with self.assertRaises(RuntimeError):
+            service.next_token()
 
         saved = json.loads(self.store_file.read_text(encoding="utf-8"))
         self.assertTrue(saved[0]["needs_refresh"])
@@ -80,7 +81,8 @@ class AccountServiceImportTests(unittest.TestCase):
         self.assertEqual(account["status"], "正常")
         self.assertEqual(account["quota"], 0)
         self.assertTrue(account["needs_refresh"])
-        self.assertEqual(service.next_token(), "token-1")
+        with self.assertRaises(RuntimeError):
+            service.next_token()
 
     def test_reimport_keeps_manual_disabled_state(self) -> None:
         service = self.make_service(

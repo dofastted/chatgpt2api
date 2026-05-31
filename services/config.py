@@ -17,6 +17,7 @@ class AppSettings:
     admin_auth_key: str
     host: str
     port: int
+    public_base_url: str
     accounts_file: Path
     user_keys_file: Path
     redeem_codes_file: Path
@@ -122,6 +123,9 @@ def _load_settings() -> AppSettings:
             default=8000,
             name="port",
         ),
+        public_base_url=str(
+            os.getenv("CHATGPT2API_PUBLIC_BASE_URL") or raw_config.get("public-base-url") or ""
+        ).strip().rstrip("/"),
         accounts_file=DATA_DIR / "accounts.json",
         user_keys_file=Path(
             str(os.getenv("CHATGPT2API_USER_KEYS_FILE") or raw_config.get("user-keys-file") or DATA_DIR / "user_keys.json")

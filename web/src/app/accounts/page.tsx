@@ -833,6 +833,20 @@ export default function AccountsPage() {
     currentRows.length > 0 &&
     currentRows.every((row) => selectedIds.includes(row.id));
 
+  const selectCurrentPageAccounts = () => {
+    setSelectedIds((prev) =>
+      Array.from(new Set([...prev, ...currentRows.map((item) => item.id)])),
+    );
+  };
+
+  const selectAllFilteredAccounts = () => {
+    setSelectedIds(filteredAccounts.map((item) => item.id));
+  };
+
+  const clearSelectedAccounts = () => {
+    setSelectedIds([]);
+  };
+
   const summary = useMemo(() => {
     const total = accounts.length;
     const active = accounts.filter((item) => item.status === "正常").length;
@@ -994,7 +1008,7 @@ export default function AccountsPage() {
         );
       } else {
         toast.success(
-          `新增 ${data.added ?? 0} 个账户，跳过 ${data.skipped ?? 0} 个重复项，已自动刷新账号信息`,
+          `新增 ${data.added ?? 0} 个账户，跳过 ${data.skipped ?? 0} 个重复项，请手动刷新账号信息`,
         );
       }
     } catch (error) {
@@ -2586,6 +2600,33 @@ export default function AccountsPage() {
                       <Button
                         variant="ghost"
                         className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                        onClick={() => selectCurrentPageAccounts()}
+                        disabled={currentRows.length === 0}
+                      >
+                        <CheckCircle2 className="size-4" />
+                        选中本页
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                        onClick={() => selectAllFilteredAccounts()}
+                        disabled={filteredAccounts.length === 0}
+                      >
+                        <Database className="size-4" />
+                        选中全部筛选结果
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                        onClick={() => clearSelectedAccounts()}
+                        disabled={selectedIds.length === 0}
+                      >
+                        <CircleOff className="size-4" />
+                        清空选择
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
                         onClick={() =>
                           void handleRefreshAccounts(selectedTokens)
                         }
@@ -2640,7 +2681,14 @@ export default function AccountsPage() {
                             <Checkbox
                               checked={allCurrentSelected}
                               onCheckedChange={(checked) =>
-                                toggleSelectAll(Boolean(checked))
+                                checked
+                                  ? selectCurrentPageAccounts()
+                                  : setSelectedIds((prev) =>
+                                      prev.filter(
+                                        (id) =>
+                                          !currentRows.some((row) => row.id === id),
+                                      ),
+                                    )
                               }
                             />
                           </th>

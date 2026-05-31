@@ -604,7 +604,7 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(create_response.status_code, 200)
         self.assertEqual(len(create_response.json()["created_items"]), 200)
 
-    def test_donation_rewards_ldc_only_for_free_accounts(self) -> None:
+    def test_donation_import_does_not_reward_before_manual_refresh(self) -> None:
         created = api.user_key_service.create_user_keys(
             count=1,
             quota=10,
@@ -626,14 +626,49 @@ class UserKeyPricingTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["rewarded_accounts"], 1)
-        self.assertEqual(response.json()["rewarded_ldc"], 20)
+        self.assertEqual(response.json()["refreshed"], 0)
+        self.assertEqual(response.json()["errors"], [])
+        self.assertEqual(response.json()["rewarded_accounts"], 0)
+        self.assertEqual(response.json()["rewarded_ldc"], 0)
         self.assertEqual(response.json()["remaining_quota"], 10)
-        self.assertEqual(response.json()["ldc_balance"], 20)
+        self.assertEqual(response.json()["ldc_balance"], 0)
         current_item = api.user_key_service.get_user_key(user_key)
         self.assertIsNotNone(current_item)
         assert current_item is not None
-        self.assertEqual(current_item["ldc_balance"], 20)
+        self.assertEqual(current_item["ldc_balance"], 0)
+
+    def test_external_accounts_endpoint_requires_admin_and_accepts_payload_carrier(self) -> None:
+        payload = {
+            "payload": {
+                "data": {
+                    "accounts": [
+                        {
+                            "auth": {"accessToken": "external-token-1"},
+                            "session": {"oaiSessionId": "session-1"},
+                        }
+                    ]
+                }
+            }
+        }
+
+        with self.make_client() as client:
+            user_response = client.post(
+                "/api/external/accounts",
+                headers={"Authorization": f"Bearer {api.config.auth_key}"},
+                json=payload,
+            )
+            admin_response = client.post(
+                "/api/external/accounts",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json=payload,
+            )
+
+        self.assertEqual(user_response.status_code, 403)
+        self.assertEqual(admin_response.status_code, 200)
+        self.assertEqual(admin_response.json()["added"], 1)
+        self.assertEqual(admin_response.json()["refreshed"], 0)
+        self.assertEqual(admin_response.json()["errors"], [])
+        self.assertEqual(admin_response.json()["added_tokens"], ["external-token-1"])
 
     def test_process_upload_stream_and_recent_uploaded_images(self) -> None:
         png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)
@@ -1927,6 +1962,25 @@ class UserKeyPricingTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["data"][0]["url"], "data:image/png;base64,ZmFrZQ==")
+        self.assertNotIn("b64_json", payload["data"][0])
+
+    def test_generated_image_urls_prefer_configured_public_base_url(self) -> None:
+        original_public_base_url = api.config.public_base_url
+        try:
+            object.__setattr__(api.config, "public_base_url", "https://img.fkcodex.com/")
+            payload = api.build_images_response_payload(
+                {
+                    "created": 123,
+                    "data": [{"b64_json": "ZmFrZQ==", "mime_type": "image/png"}],
+                },
+                billing=None,
+                response_format="url",
+                base_url=api.resolve_generated_image_base_url(None),
+            )
+        finally:
+            object.__setattr__(api.config, "public_base_url", original_public_base_url)
+
+        self.assertTrue(payload["data"][0]["url"].startswith("https://img.fkcodex.com/v1/images/generated/img_"))
         self.assertNotIn("b64_json", payload["data"][0])
 
     def test_admin_login_role_and_accounts_access(self) -> None:

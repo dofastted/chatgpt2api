@@ -1,4 +1,4 @@
-import axios, {AxiosError, type AxiosRequestConfig} from "axios";
+import axios, {AxiosError, type AxiosRequestConfig, type InternalAxiosRequestConfig} from "axios";
 
 import webConfig from "@/constants/common-env";
 import {clearStoredAuthKey, getStoredAuthKey} from "@/store/auth";
@@ -26,7 +26,14 @@ type ErrorPayload = {
 
 const request = axios.create();
 
-function buildRequestHeaders(headers?: Record<string, string>, authKey?: string) {
+function applyRequestAuthHeader(config: InternalAxiosRequestConfig, authKey?: string) {
+    if (authKey && !config.headers.has("Authorization")) {
+        config.headers.setAuthorization(`Bearer ${authKey}`);
+    }
+    return config;
+}
+
+function buildFetchRequestHeaders(headers?: Record<string, string>, authKey?: string) {
     const nextHeaders = {...(headers || {})};
     if (authKey && !nextHeaders.Authorization) {
         nextHeaders.Authorization = `Bearer ${authKey}`;
@@ -53,11 +60,7 @@ function getPayloadErrorMessage(payload: ErrorPayload | undefined, fallback: str
 request.interceptors.request.use(async (config) => {
     const nextConfig = {...config};
     const authKey = await getStoredAuthKey();
-    const headers = buildRequestHeaders(nextConfig.headers as Record<string, string> | undefined, authKey);
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-expect-error
-    nextConfig.headers = headers;
-    return nextConfig;
+    return applyRequestAuthHeader(nextConfig, authKey);
 });
 
 request.interceptors.response.use(
@@ -101,7 +104,7 @@ export async function httpStreamRequest(path: string, options: StreamRequestOpti
     const authKey = await getStoredAuthKey();
     const response = await fetch(`${webConfig.apiUrl.replace(/\/$/, "")}${path}`, {
         method,
-        headers: buildRequestHeaders(headers, authKey),
+        headers: buildFetchRequestHeaders(headers, authKey),
         body,
     });
 

@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Gift, LoaderCircle, LogOut, Ticket, Upload } from "lucide-react";
+import {
+  Gift,
+  LoaderCircle,
+  LogOut,
+  Palette,
+  Ticket,
+  Upload,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -54,6 +61,16 @@ const redeemCodePurchaseLinks = [
   },
 ] as const;
 
+const THEME_STORAGE_KEY = "chatgpt2api-theme";
+
+type ThemeMode = "light" | "dark" | "system";
+
+const themeModeOptions: Array<{ label: string; value: ThemeMode }> = [
+  { label: "跟随系统", value: "system" },
+  { label: "白色", value: "light" },
+  { label: "黑色", value: "dark" },
+];
+
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
@@ -67,6 +84,20 @@ export function TopNav() {
   const [isUploadingDonation, setIsUploadingDonation] = useState(false);
   const [isRedeemingCode, setIsRedeemingCode] = useState(false);
   const [redeemInput, setRedeemInput] = useState("");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === "undefined") {
+      return "system";
+    }
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (
+      storedTheme === "light" ||
+      storedTheme === "dark" ||
+      storedTheme === "system"
+    ) {
+      return storedTheme;
+    }
+    return "system";
+  });
 
   const syncSession = async () => {
     const session = await fetchAuthSession({
@@ -123,6 +154,40 @@ export function TopNav() {
       cancelled = true;
     };
   }, [pathname]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+    const applyTheme = () => {
+      const resolvedTheme =
+        themeMode === "system"
+          ? mediaQuery.matches
+            ? "dark"
+            : "light"
+          : themeMode;
+
+      root.classList.toggle("dark", resolvedTheme === "dark");
+      root.classList.toggle("light", resolvedTheme === "light");
+      root.style.colorScheme = resolvedTheme;
+    };
+
+    applyTheme();
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+
+    if (themeMode !== "system") {
+      return;
+    }
+
+    const handleChange = () => {
+      applyTheme();
+    };
+
+    mediaQuery.addEventListener("change", handleChange);
+    return () => {
+      mediaQuery.removeEventListener("change", handleChange);
+    };
+  }, [themeMode]);
 
   const handleLogout = async () => {
     await clearStoredAuthKey();
@@ -311,6 +376,26 @@ export function TopNav() {
         </nav>
 
         <div className="flex shrink-0 items-center gap-2">
+          <div className="hidden items-center gap-2 rounded-lg border border-border bg-background px-2.5 py-1.5 text-sm text-foreground shadow-sm md:flex">
+            <Palette className="size-4 text-muted-foreground" />
+            <label className="sr-only" htmlFor="theme-mode-select">
+              颜色模式
+            </label>
+            <select
+              id="theme-mode-select"
+              value={themeMode}
+              onChange={(event) =>
+                setThemeMode(event.target.value as ThemeMode)
+              }
+              className="bg-transparent text-sm text-foreground outline-none"
+            >
+              {themeModeOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <Dialog open={centerOpen} onOpenChange={setCenterOpen}>
             <DialogTrigger asChild>
               <button

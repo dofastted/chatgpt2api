@@ -106,6 +106,17 @@ import {
   type ImageGenerationPreference,
   type ImageResolutionPreference,
 } from "@/lib/image-size";
+import {
+  acquireImageTransferLease,
+  buildImageTransferAuthScope,
+  createImageTransferOwnerId,
+  IMAGE_TRANSFER_HEARTBEAT_MS,
+  IMAGE_TRANSFER_MAX_ACTIVE_LEASES,
+  reconcileImageTransferLeases,
+  releaseImageTransferLeases,
+  subscribeImageTransferLeaseChanges,
+  type ImageTransferTarget,
+} from "@/lib/image-transfer-leases";
 
 const imageModelLabels: Record<ImageModel, string> = {
   "gpt-image-2": "基础",
@@ -127,6 +138,7 @@ const GALLERY_RAIL_ITEM_COUNT = 48;
 const DEFAULT_GALLERY_ASPECT_RATIO = 0.8;
 const GALLERY_RAIL_AUTO_SCROLL_PIXELS_PER_SECOND = 48;
 const GALLERY_RAIL_COLUMN_WIDTH_ESTIMATE = 128;
+const ORPHANED_QUEUE_REQUEST_TIMEOUT_MS = 16 * 60 * 1000;
 const INTERRUPTED_GENERATION_MESSAGE =
   "页面已重新打开，未找回这个请求。请重新发送。";
 
@@ -174,7 +186,9 @@ function buildUserPromptSuggestion(item: UserGalleryPrompt): GallerySeedItem {
   };
 }
 
-function buildUserWaterfallSeedItem(item: UserGalleryWaterfallItem): GallerySeedItem {
+function buildUserWaterfallSeedItem(
+  item: UserGalleryWaterfallItem,
+): GallerySeedItem {
   return {
     id: item.id,
     postNumber: 0,
@@ -194,8 +208,9 @@ function buildUserWaterfallSeedItem(item: UserGalleryWaterfallItem): GallerySeed
 
 function buildPublicGallerySeedItem(item: GalleryItem): GallerySeedItem | null {
   const asset =
-    item.assets.find((candidate) => candidate.asset_id === item.cover_asset_id) ||
-    item.assets[0];
+    item.assets.find(
+      (candidate) => candidate.asset_id === item.cover_asset_id,
+    ) || item.assets[0];
   if (!asset?.url) {
     return null;
   }
@@ -225,8 +240,9 @@ function buildPublicGalleryImageDimensions(items: GalleryItem[]) {
   return Object.fromEntries(
     items.flatMap((item) => {
       const asset =
-        item.assets.find((candidate) => candidate.asset_id === item.cover_asset_id) ||
-        item.assets[0];
+        item.assets.find(
+          (candidate) => candidate.asset_id === item.cover_asset_id,
+        ) || item.assets[0];
       const width = Math.max(0, Number(asset?.width || 0));
       const height = Math.max(0, Number(asset?.height || 0));
       if (!width || !height) {
@@ -332,7 +348,9 @@ function clampImageCount(value: string | number | null | undefined) {
   return Math.max(1, Math.min(MAX_IMAGES_PER_REQUEST, parsed));
 }
 
-function resolveSizeDraftMode(preference: ImageGenerationPreference): SizeDraftMode {
+function resolveSizeDraftMode(
+  preference: ImageGenerationPreference,
+): SizeDraftMode {
   const normalized = normalizeImageGenerationPreference(preference);
   if (
     normalized.resolution === IMAGE_RESOLUTION_AUTO &&
@@ -506,6 +524,40 @@ function createClientRequestId(prefix = "") {
   return prefix ? `${prefix}fallback-request-id` : "fallback-request-id";
 }
 
+function getRecoverablePendingTransferTargets(
+  conversations: ImageConversation[],
+): ImageTransferTarget[] {
+  return conversations.flatMap((conversation) =>
+    getConversationTurns(conversation).flatMap((turn) => {
+      const requestId = String(turn.queueRequestId || "").trim();
+      if (!requestId || !isPendingTurnStatus(turn.status)) {
+        return [];
+      }
+      return [
+        {
+          requestId,
+          conversationId: conversation.id,
+          turnId: turn.id,
+        },
+      ];
+    }),
+  );
+}
+
+function findLatestRecoverablePendingConversationId(
+  conversations: ImageConversation[],
+) {
+  return (
+    conversations.find((conversation) =>
+      getConversationTurns(conversation).some(
+        (turn) =>
+          Boolean(String(turn.queueRequestId || "").trim()) &&
+          isPendingTurnStatus(turn.status),
+      ),
+    )?.id || null
+  );
+}
+
 function ImageInspirationRail({
   items,
   imageDimensions,
@@ -524,7 +576,8 @@ function ImageInspirationRail({
   onOpenPreview: (item: GallerySeedItem) => void;
 }) {
   const railItems = useMemo(
-    () => items.filter((item) => item.imageUrl).slice(0, GALLERY_RAIL_ITEM_COUNT),
+    () =>
+      items.filter((item) => item.imageUrl).slice(0, GALLERY_RAIL_ITEM_COUNT),
     [items],
   );
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
@@ -600,7 +653,10 @@ function ImageInspirationRail({
       }
       const elapsed = Math.max(0, time - previousTime);
       previousTime = time;
-      const maxScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      const maxScroll = Math.max(
+        0,
+        viewport.scrollHeight - viewport.clientHeight,
+      );
       if (maxScroll > 0) {
         if (viewport.scrollTop >= maxScroll - 4) {
           autoScrollTopRef.current = 0;
@@ -616,7 +672,10 @@ function ImageInspirationRail({
           const wholePixels = Math.floor(autoScrollRemainderRef.current);
           if (wholePixels > 0) {
             autoScrollRemainderRef.current -= wholePixels;
-            autoScrollTopRef.current = Math.min(maxScroll, viewport.scrollTop + wholePixels);
+            autoScrollTopRef.current = Math.min(
+              maxScroll,
+              viewport.scrollTop + wholePixels,
+            );
             viewport.scrollTop = autoScrollTopRef.current;
           }
         }
@@ -797,6 +856,9 @@ function turnNeedsInterruptedReset(
   conversation: ImageConversation,
   turn: ImageConversationTurn,
 ) {
+  if (String(turn.queueRequestId || "").trim()) {
+    return false;
+  }
   if (!scope || isTurnActiveInCurrentSession(scope, conversation, turn)) {
     return false;
   }
@@ -804,6 +866,17 @@ function turnNeedsInterruptedReset(
     isPendingTurnStatus(turn.status) ||
     (turn.images || []).some((image) => image.status === "loading")
   );
+}
+
+function hasQueueRequestExceededOrphanTimeout(
+  turn: ImageConversationTurn,
+  nowMs = Date.now(),
+) {
+  const referenceTime = Date.parse(turn.requestStartedAt || turn.createdAt);
+  if (!Number.isFinite(referenceTime)) {
+    return true;
+  }
+  return nowMs - referenceTime >= ORPHANED_QUEUE_REQUEST_TIMEOUT_MS;
 }
 
 function resetInterruptedTurn(
@@ -926,8 +999,9 @@ function completeTurnFromGenerationResult(
     targetCount,
     data,
   );
-  const successCount = nextImages.filter((item) => item.status === "success")
-    .length;
+  const successCount = nextImages.filter(
+    (item) => item.status === "success",
+  ).length;
   const failedCount = nextImages.length - successCount;
   const returnedText = String(
     data.text_content || data.copied_text || "",
@@ -1006,6 +1080,7 @@ function readFileAsDataUrl(file: File) {
 export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
+  const transferOwnerIdRef = useRef(createImageTransferOwnerId());
   const shouldReduceMotion = useReducedMotion();
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
@@ -1018,8 +1093,7 @@ export default function ImagePage() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [isDesktopViewport, setIsDesktopViewport] = useState(false);
-  const [isInspirationRailHidden, setIsInspirationRailHidden] =
-    useState(false);
+  const [isInspirationRailHidden, setIsInspirationRailHidden] = useState(false);
   const [sizeDraftMode, setSizeDraftMode] = useState<SizeDraftMode>("auto");
   const [sizeDraft, setSizeDraft] = useState<SizeDialogState>({
     ...DEFAULT_IMAGE_GENERATION_PREFERENCE,
@@ -1035,19 +1109,28 @@ export default function ImagePage() {
   const [galleryImageDimensions, setGalleryImageDimensions] = useState<
     Record<string, GalleryImageDimension>
   >({});
-  const [userGalleryPrompts, setUserGalleryPrompts] = useState<UserGalleryPrompt[]>([]);
+  const [userGalleryPrompts, setUserGalleryPrompts] = useState<
+    UserGalleryPrompt[]
+  >([]);
   const [userGalleryWaterfallItems, setUserGalleryWaterfallItems] = useState<
     UserGalleryWaterfallItem[]
   >([]);
-  const [galleryPromptStats, setGalleryPromptStats] = useState<GalleryPromptStats>({});
-  const [galleryRandomRanks, setGalleryRandomRanks] = useState<Record<string, number>>({});
+  const [galleryPromptStats, setGalleryPromptStats] =
+    useState<GalleryPromptStats>({});
+  const [galleryRandomRanks, setGalleryRandomRanks] = useState<
+    Record<string, number>
+  >({});
   const [isGalleryDataLoading, setIsGalleryDataLoading] = useState(true);
   const [conversationScope, setConversationScope] = useState<string | null>(
     null,
   );
+  const [transferScope, setTransferScope] = useState<string | null>(null);
   const [galleryStorageScope, setGalleryStorageScope] = useState<string | null>(
     null,
   );
+  const [ownedTransferRequestIds, setOwnedTransferRequestIds] = useState<
+    string[]
+  >([]);
   const [hasLoadedHistory, setHasLoadedHistory] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingMoreHistory, setIsLoadingMoreHistory] = useState(false);
@@ -1085,17 +1168,22 @@ export default function ImagePage() {
         return;
       }
       if (galleryStorageScope) {
-        void recordGalleryPromptUse(galleryStorageScope, normalizedPrompt).then(async () => {
-          const [nextPrompts, nextStats] = await Promise.all([
-            listUserGalleryPrompts(galleryStorageScope),
-            loadGalleryPromptStats(galleryStorageScope),
-          ]);
-          setUserGalleryPrompts(nextPrompts);
-          setGalleryPromptStats(nextStats);
-        });
+        void recordGalleryPromptUse(galleryStorageScope, normalizedPrompt).then(
+          async () => {
+            const [nextPrompts, nextStats] = await Promise.all([
+              listUserGalleryPrompts(galleryStorageScope),
+              loadGalleryPromptStats(galleryStorageScope),
+            ]);
+            setUserGalleryPrompts(nextPrompts);
+            setGalleryPromptStats(nextStats);
+          },
+        );
       }
       if (galleryPreviewItem?.backendGalleryId) {
-        void recordGalleryItemEvent(galleryPreviewItem.backendGalleryId, "use").catch(() => undefined);
+        void recordGalleryItemEvent(
+          galleryPreviewItem.backendGalleryId,
+          "use",
+        ).catch(() => undefined);
       }
       setImagePrompt(normalizedPrompt);
       focusPromptInput();
@@ -1143,10 +1231,15 @@ export default function ImagePage() {
       setIsGalleryDataLoading(true);
       try {
         const [publicGallery, dimensionsMod] = await Promise.all([
-          fetchPublicGalleryItems({ limit: 300, redirectOnUnauthorized: false }).catch(() => ({
+          fetchPublicGalleryItems({
+            limit: 300,
+            redirectOnUnauthorized: false,
+          }).catch(() => ({
             items: [],
           })),
-          import("@/data/gallery-image-dimensions.json").catch(() => ({ default: [] })),
+          import("@/data/gallery-image-dimensions.json").catch(() => ({
+            default: [],
+          })),
         ]);
         if (cancelled) {
           return;
@@ -1154,21 +1247,27 @@ export default function ImagePage() {
         let nextItems = publicGallery.items
           .map(buildPublicGallerySeedItem)
           .filter((item): item is GallerySeedItem => Boolean(item));
-        let nextDimensions = buildPublicGalleryImageDimensions(publicGallery.items);
+        let nextDimensions = buildPublicGalleryImageDimensions(
+          publicGallery.items,
+        );
         if (nextItems.length === 0) {
           const itemsMod = await import("@/data/gallery-ui-seed.json");
           nextItems = (itemsMod.default || []) as GallerySeedItem[];
           nextDimensions = Object.fromEntries(
-            ((dimensionsMod.default || []) as GalleryImageDimension[]).map((item) => {
-              const id = String(item.id);
-              return [id, { ...item, id }];
-            }),
+            ((dimensionsMod.default || []) as GalleryImageDimension[]).map(
+              (item) => {
+                const id = String(item.id);
+                return [id, { ...item, id }];
+              },
+            ),
           );
         }
         setGalleryItems(nextItems);
         setGalleryImageDimensions(nextDimensions);
         setGalleryRandomRanks(
-          Object.fromEntries(nextItems.map((item) => [String(item.id), Math.random()])),
+          Object.fromEntries(
+            nextItems.map((item) => [String(item.id), Math.random()]),
+          ),
         );
       } finally {
         if (!cancelled) {
@@ -1189,7 +1288,8 @@ export default function ImagePage() {
     let cancelled = false;
     const loadGalleryPromptData = async () => {
       try {
-        const storageScope = await resolveGalleryStorageScope(galleryStorageScope);
+        const storageScope =
+          await resolveGalleryStorageScope(galleryStorageScope);
         const [nextPrompts, nextStats, nextWaterfallItems] = await Promise.all([
           listUserGalleryPrompts(storageScope),
           loadGalleryPromptStats(storageScope),
@@ -1249,10 +1349,7 @@ export default function ImagePage() {
     };
   }, [imagePrompt]);
 
-  const parsedCount = useMemo(
-    () => clampImageCount(imageCount),
-    [imageCount],
-  );
+  const parsedCount = useMemo(() => clampImageCount(imageCount), [imageCount]);
   const effectivePricing = useMemo(
     () => currentPricing || DEFAULT_IMAGE_PRICING,
     [currentPricing],
@@ -1291,33 +1388,20 @@ export default function ImagePage() {
     () => getLatestTurn(selectedConversation),
     [selectedConversation],
   );
+  const pendingTransferTargets = useMemo(
+    () => getRecoverablePendingTransferTargets(conversations),
+    [conversations],
+  );
+  const pendingTransferRequestIds = useMemo(
+    () => new Set(pendingTransferTargets.map((target) => target.requestId)),
+    [pendingTransferTargets],
+  );
   const activeRequestIds = useMemo(
     () =>
-      Array.from(
-        new Set(
-          conversations
-            .flatMap((conversation) =>
-              getConversationTurns(conversation).map((turn) => ({
-                conversation,
-                turn,
-              })),
-            )
-            .filter(
-              ({ conversation, turn }) =>
-                conversationScope !== null &&
-                isTurnActiveInCurrentSession(
-                  conversationScope,
-                  conversation,
-                  turn,
-                ) &&
-                Boolean(turn.queueRequestId) &&
-                isPendingTurnStatus(turn.status),
-            )
-            .map(({ turn }) => String(turn.queueRequestId || "").trim())
-            .filter(Boolean),
-        ),
+      ownedTransferRequestIds.filter((requestId) =>
+        pendingTransferRequestIds.has(requestId),
       ),
-    [conversationScope, conversations],
+    [ownedTransferRequestIds, pendingTransferRequestIds],
   );
   const interruptedRequestCount = useMemo(
     () =>
@@ -1332,7 +1416,9 @@ export default function ImagePage() {
     [conversationScope, conversations],
   );
   const selectedConversationRequestId = selectedTurn?.queueRequestId || null;
-  const isComposerGenerating = activeRequestIds.length > 0;
+  const hasOwnedTransferActive = activeRequestIds.length > 0;
+  const isWebTransferLimitReached =
+    activeRequestIds.length >= IMAGE_TRANSFER_MAX_ACTIVE_LEASES;
   const previewableImages = useMemo<PreviewableImage[]>(
     () =>
       (selectedTurn?.images || []).flatMap((image, index) =>
@@ -1370,52 +1456,63 @@ export default function ImagePage() {
   const hasPreviousPreviewImage = previewImageIndex > 0;
   const hasNextPreviewImage =
     previewImageIndex >= 0 && previewImageIndex < previewableImages.length - 1;
-  const emptyPromptSuggestions = useMemo(
-    () => {
-      const userItems = userGalleryPrompts.map(buildUserPromptSuggestion);
-      const seedItems = galleryItems
-        .filter((item) => item.hasPrompt && String(item.prompt || "").trim())
-        .map((item) => ({
-          ...item,
-          useCount: Math.max(0, Number(galleryPromptStats[promptKey(item.prompt)] || 0)),
-          randomRank: galleryRandomRanks[String(item.id)] ?? 0,
-        }))
-        .sort((a, b) => {
-          const usageDiff = Math.max(0, Number(b.useCount || 0)) - Math.max(0, Number(a.useCount || 0));
-          if (usageDiff !== 0) {
-            return usageDiff;
-          }
-          return Number(a.randomRank || 0) - Number(b.randomRank || 0);
-        });
-      return [...userItems, ...seedItems].slice(0, GALLERY_PROMPT_SUGGESTION_COUNT);
-    },
-    [galleryItems, galleryPromptStats, galleryRandomRanks, userGalleryPrompts],
-  );
-  const rankedGalleryItems = useMemo(
-    () => {
-      const userItems = userGalleryWaterfallItems.map(buildUserWaterfallSeedItem);
-      const seedItems = galleryItems
-        .map((item) => ({
-          ...item,
-          useCount: item.hasPrompt ? Math.max(0, Number(galleryPromptStats[promptKey(item.prompt)] || 0)) : 0,
-          randomRank: galleryRandomRanks[String(item.id)] ?? 0,
-        }))
-        .sort((a, b) => {
-          const usageDiff = Math.max(0, Number(b.useCount || 0)) - Math.max(0, Number(a.useCount || 0));
-          if (usageDiff !== 0) {
-            return usageDiff;
-          }
-          return Number(a.randomRank || 0) - Number(b.randomRank || 0);
-        });
-      return [...userItems, ...seedItems];
-    },
-    [
-      galleryItems,
-      galleryPromptStats,
-      galleryRandomRanks,
-      userGalleryWaterfallItems,
-    ],
-  );
+  const emptyPromptSuggestions = useMemo(() => {
+    const userItems = userGalleryPrompts.map(buildUserPromptSuggestion);
+    const seedItems = galleryItems
+      .filter((item) => item.hasPrompt && String(item.prompt || "").trim())
+      .map((item) => ({
+        ...item,
+        useCount: Math.max(
+          0,
+          Number(galleryPromptStats[promptKey(item.prompt)] || 0),
+        ),
+        randomRank: galleryRandomRanks[String(item.id)] ?? 0,
+      }))
+      .sort((a, b) => {
+        const usageDiff =
+          Math.max(0, Number(b.useCount || 0)) -
+          Math.max(0, Number(a.useCount || 0));
+        if (usageDiff !== 0) {
+          return usageDiff;
+        }
+        return Number(a.randomRank || 0) - Number(b.randomRank || 0);
+      });
+    return [...userItems, ...seedItems].slice(
+      0,
+      GALLERY_PROMPT_SUGGESTION_COUNT,
+    );
+  }, [
+    galleryItems,
+    galleryPromptStats,
+    galleryRandomRanks,
+    userGalleryPrompts,
+  ]);
+  const rankedGalleryItems = useMemo(() => {
+    const userItems = userGalleryWaterfallItems.map(buildUserWaterfallSeedItem);
+    const seedItems = galleryItems
+      .map((item) => ({
+        ...item,
+        useCount: item.hasPrompt
+          ? Math.max(0, Number(galleryPromptStats[promptKey(item.prompt)] || 0))
+          : 0,
+        randomRank: galleryRandomRanks[String(item.id)] ?? 0,
+      }))
+      .sort((a, b) => {
+        const usageDiff =
+          Math.max(0, Number(b.useCount || 0)) -
+          Math.max(0, Number(a.useCount || 0));
+        if (usageDiff !== 0) {
+          return usageDiff;
+        }
+        return Number(a.randomRank || 0) - Number(b.randomRank || 0);
+      });
+    return [...userItems, ...seedItems];
+  }, [
+    galleryItems,
+    galleryPromptStats,
+    galleryRandomRanks,
+    userGalleryWaterfallItems,
+  ]);
   const userWaterfallSourceImageIds = useMemo(
     () =>
       new Set(
@@ -1446,11 +1543,15 @@ export default function ImagePage() {
     ? `至少需要 ${requestCost} 额度`
     : isUploadingInputImage
       ? "图片上传中"
-      : interruptedRequestCount > 0
-        ? `${interruptedRequestCount} 个旧请求需要重置`
-        : inputImage
-          ? `已附加参考图，${formatImagePreferenceLabel(effectiveImagePreference)}`
-          : `${formatImagePreferenceLabel(effectiveImagePreference)}，Enter 发送`;
+      : isWebTransferLimitReached
+        ? `同一浏览器当前最多传输 ${IMAGE_TRANSFER_MAX_ACTIVE_LEASES} 个网页图片请求`
+        : hasOwnedTransferActive
+          ? `正在传输 ${activeRequestIds.length}/${IMAGE_TRANSFER_MAX_ACTIVE_LEASES} 个网页图片请求`
+          : interruptedRequestCount > 0
+            ? `${interruptedRequestCount} 个旧请求需要重置`
+            : inputImage
+              ? `已附加参考图，${formatImagePreferenceLabel(effectiveImagePreference)}`
+              : `${formatImagePreferenceLabel(effectiveImagePreference)}，Enter 发送`;
   const sidebarTransition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
@@ -1467,20 +1568,26 @@ export default function ImagePage() {
     const loadScope = async () => {
       try {
         const authKey = await getStoredAuthKey();
-        if (!cancelled) {
-          const nextScope = String(authKey || "").trim() || "__anonymous__";
-          const nextGalleryStorageScope = await resolveGalleryStorageScope(nextScope);
-          conversationsRef.current = [];
-          setConversations([]);
-          setSelectedConversationId(null);
-          setPreviewImageId(null);
-          setHasLoadedHistory(false);
-          setIsLoadingHistory(false);
-          setIsLoadingMoreHistory(false);
-          setHasMoreHistory(false);
-          setConversationScope(nextScope);
-          setGalleryStorageScope(nextGalleryStorageScope);
+        const nextScope = String(authKey || "").trim() || "__anonymous__";
+        const [nextGalleryStorageScope, nextTransferScope] = await Promise.all([
+          resolveGalleryStorageScope(nextScope),
+          buildImageTransferAuthScope(nextScope),
+        ]);
+        if (cancelled) {
+          return;
         }
+        conversationsRef.current = [];
+        setConversations([]);
+        setSelectedConversationId(null);
+        setPreviewImageId(null);
+        setHasLoadedHistory(false);
+        setIsLoadingHistory(false);
+        setIsLoadingMoreHistory(false);
+        setHasMoreHistory(false);
+        setConversationScope(nextScope);
+        setTransferScope(nextTransferScope);
+        setGalleryStorageScope(nextGalleryStorageScope);
+        setOwnedTransferRequestIds([]);
       } catch (error) {
         if (!cancelled) {
           conversationsRef.current = [];
@@ -1492,7 +1599,9 @@ export default function ImagePage() {
           setIsLoadingMoreHistory(false);
           setHasMoreHistory(false);
           setConversationScope("__anonymous__");
+          setTransferScope("__anonymous__");
           setGalleryStorageScope("__anonymous__");
+          setOwnedTransferRequestIds([]);
         }
       }
     };
@@ -1510,7 +1619,8 @@ export default function ImagePage() {
 
     setPreviewImageId(null);
     const now = new Date().toISOString();
-    const cachedItems = await listCachedImageConversationSummaries(conversationScope);
+    const cachedItems =
+      await listCachedImageConversationSummaries(conversationScope);
     if (cachedItems.length > 0) {
       const normalizedCachedItems = cachedItems.map(
         (item) =>
@@ -1519,8 +1629,18 @@ export default function ImagePage() {
       );
       conversationsRef.current = normalizedCachedItems;
       setConversations(normalizedCachedItems);
+      const pendingConversationId = findLatestRecoverablePendingConversationId(
+        normalizedCachedItems,
+      );
+      if (pendingConversationId) {
+        setSelectedConversationId(
+          (current) => current || pendingConversationId,
+        );
+      }
       setHasLoadedHistory(true);
-      setHasMoreHistory(normalizedCachedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT);
+      setHasMoreHistory(
+        normalizedCachedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT,
+      );
     }
     setIsLoadingHistory(cachedItems.length === 0);
     try {
@@ -1532,8 +1652,17 @@ export default function ImagePage() {
       );
       conversationsRef.current = normalizedItems;
       setConversations(normalizedItems);
+      const pendingConversationId =
+        findLatestRecoverablePendingConversationId(normalizedItems);
+      if (pendingConversationId) {
+        setSelectedConversationId(
+          (current) => current || pendingConversationId,
+        );
+      }
       setHasLoadedHistory(true);
-      setHasMoreHistory(normalizedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT);
+      setHasMoreHistory(
+        normalizedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT,
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "读取会话记录失败";
@@ -1576,7 +1705,9 @@ export default function ImagePage() {
       ];
       conversationsRef.current = mergedItems;
       setConversations(mergedItems);
-      setHasMoreHistory(normalizedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT);
+      setHasMoreHistory(
+        normalizedItems.length >= IMAGE_CONVERSATION_SUMMARY_LIMIT,
+      );
       setHasLoadedHistory(true);
     } catch (error) {
       const message =
@@ -1589,9 +1720,6 @@ export default function ImagePage() {
 
   useEffect(() => {
     if (conversationScope === null || hasLoadedHistory || isLoadingHistory) {
-      return;
-    }
-    if (!isSidebarOpen && isSidebarCollapsed) {
       return;
     }
 
@@ -1611,8 +1739,6 @@ export default function ImagePage() {
     conversationScope,
     hasLoadedHistory,
     isLoadingHistory,
-    isSidebarCollapsed,
-    isSidebarOpen,
     loadConversationHistory,
   ]);
 
@@ -1719,6 +1845,48 @@ export default function ImagePage() {
   }, [loadQuota]);
 
   useEffect(() => {
+    if (!transferScope) {
+      return;
+    }
+
+    let cancelled = false;
+    const ownerId = transferOwnerIdRef.current;
+    const syncLeases = () => {
+      const result = reconcileImageTransferLeases({
+        scope: transferScope,
+        ownerId,
+        targets: pendingTransferTargets,
+      });
+      if (!cancelled) {
+        setOwnedTransferRequestIds(result.ownedRequestIds);
+      }
+    };
+
+    syncLeases();
+    const intervalId = window.setInterval(
+      syncLeases,
+      IMAGE_TRANSFER_HEARTBEAT_MS,
+    );
+    const unsubscribe = subscribeImageTransferLeaseChanges(syncLeases);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      unsubscribe();
+    };
+  }, [pendingTransferTargets, transferScope]);
+
+  useEffect(() => {
+    if (!transferScope) {
+      return;
+    }
+    const ownerId = transferOwnerIdRef.current;
+    return () => {
+      releaseImageTransferLeases({ scope: transferScope, ownerId });
+    };
+  }, [transferScope]);
+
+  useEffect(() => {
     if (conversationScope === null) {
       return;
     }
@@ -1751,6 +1919,33 @@ export default function ImagePage() {
               .filter((turn) => isPendingTurnStatus(turn.status))
               .map((turn) => String(turn.queueRequestId || "").trim())
               .filter(Boolean),
+          );
+          const pendingTurnsByRequestId = new Map<
+            string,
+            ImageConversationTurn
+          >();
+          for (const turn of conversationsRef.current
+            .flatMap((conversation) => getConversationTurns(conversation))
+            .filter((item) => isPendingTurnStatus(item.status))) {
+            const requestId = String(turn.queueRequestId || "").trim();
+            if (requestId) {
+              pendingTurnsByRequestId.set(requestId, turn);
+            }
+          }
+          const knownRequestIds = new Set(
+            uniqueItems.map((item) => item.request_id),
+          );
+          const orphanedRequestIds = new Set(
+            activeRequestIds.filter((requestId) => {
+              const turn = pendingTurnsByRequestId.get(requestId);
+              if (!turn) {
+                return false;
+              }
+              return (
+                !knownRequestIds.has(requestId) &&
+                hasQueueRequestExceededOrphanTimeout(turn)
+              );
+            }),
           );
           const failedTerminalItems = uniqueItems.filter(
             (item) =>
@@ -1808,7 +2003,9 @@ export default function ImagePage() {
             }
           }
           if (
-            (failedTerminalItems.length > 0 || recoveryResults.size > 0) &&
+            (failedTerminalItems.length > 0 ||
+              recoveryResults.size > 0 ||
+              orphanedRequestIds.size > 0) &&
             conversationScope
           ) {
             const failedItemsByRequestId = new Map(
@@ -1823,7 +2020,22 @@ export default function ImagePage() {
                   const failedItem = failedItemsByRequestId.get(requestId);
                   if (failedItem && isPendingTurnStatus(turn.status)) {
                     changed = true;
-                    return failTurnFromQueueStatus(turn, failedItem, finishedAt);
+                    return failTurnFromQueueStatus(
+                      turn,
+                      failedItem,
+                      finishedAt,
+                    );
+                  }
+                  if (
+                    orphanedRequestIds.has(requestId) &&
+                    isPendingTurnStatus(turn.status)
+                  ) {
+                    changed = true;
+                    return failTurnFromRecovery(
+                      turn,
+                      INTERRUPTED_GENERATION_MESSAGE,
+                      finishedAt,
+                    );
                   }
 
                   const recovery = recoveryResults.get(requestId);
@@ -1875,6 +2087,19 @@ export default function ImagePage() {
                 ),
               );
             }
+            if (transferScope) {
+              const terminalRequestIds = [
+                ...failedTerminalItems.map((item) => item.request_id),
+                ...Array.from(recoveryResults.keys()),
+                ...Array.from(orphanedRequestIds),
+              ];
+              const releaseResult = releaseImageTransferLeases({
+                scope: transferScope,
+                ownerId: transferOwnerIdRef.current,
+                requestIds: terminalRequestIds,
+              });
+              setOwnedTransferRequestIds(releaseResult.ownedRequestIds);
+            }
           }
         }
       } catch {
@@ -1898,10 +2123,15 @@ export default function ImagePage() {
       window.clearInterval(intervalId);
       window.removeEventListener("focus", handleFocus);
     };
-  }, [activeRequestIds, conversationScope, selectedConversationRequestId]);
+  }, [
+    activeRequestIds,
+    conversationScope,
+    selectedConversationRequestId,
+    transferScope,
+  ]);
 
   useEffect(() => {
-    if (!selectedConversation && !isComposerGenerating) {
+    if (!selectedConversation && !hasOwnedTransferActive) {
       return;
     }
 
@@ -1909,7 +2139,7 @@ export default function ImagePage() {
       top: resultsViewportRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [selectedConversation, isComposerGenerating]);
+  }, [selectedConversation, hasOwnedTransferActive]);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -2050,7 +2280,10 @@ export default function ImagePage() {
 
   const handleApplyImageSize = async () => {
     try {
-      const nextPreference = normalizeImagePreferenceForMode(sizeDraftMode, sizeDraft);
+      const nextPreference = normalizeImagePreferenceForMode(
+        sizeDraftMode,
+        sizeDraft,
+      );
       const nextSize = calculateImageSizeFromPreference(nextPreference);
       if (conversationScope) {
         await saveImageGenerationPreference(conversationScope, nextPreference);
@@ -2122,11 +2355,17 @@ export default function ImagePage() {
       toast.error("当前登录信息还在初始化，请稍后再试");
       return;
     }
+    if (!transferScope) {
+      toast.error("当前传输状态还在初始化，请稍后再试");
+      return;
+    }
     const prompt = String(retry?.turn.prompt || imagePrompt).trim();
     const currentInputImage = retry?.turn.inputImage || inputImage;
-    const targetPreference = normalizeImageGenerationPreference(imagePreference);
+    const targetPreference =
+      normalizeImageGenerationPreference(imagePreference);
     const targetModel =
-      retry?.turn.model || resolveImageModelFromPreference(targetPreference, prompt);
+      retry?.turn.model ||
+      resolveImageModelFromPreference(targetPreference, prompt);
     const targetCount = Math.max(
       1,
       Math.min(
@@ -2135,8 +2374,12 @@ export default function ImagePage() {
       ),
     );
     const targetSize =
-      String(retry?.turn.size || calculateImageSizeFromPreference(targetPreference) || imageSize || "auto").trim() ||
-      "auto";
+      String(
+        retry?.turn.size ||
+          calculateImageSizeFromPreference(targetPreference) ||
+          imageSize ||
+          "auto",
+      ).trim() || "auto";
     const targetUnitCost = Math.max(
       0,
       Number(effectivePricing[targetModel] || 0),
@@ -2214,15 +2457,33 @@ export default function ImagePage() {
       conversationRecordId,
       turnId,
     );
+    const leaseResult = acquireImageTransferLease({
+      scope: transferScope,
+      ownerId: transferOwnerIdRef.current,
+      target: {
+        requestId: queueRequestId,
+        conversationId: conversationRecordId,
+        turnId,
+      },
+    });
+    if (!leaseResult.ownedRequestIds.includes(queueRequestId)) {
+      toast.error(
+        `同一浏览器当前最多传输 ${IMAGE_TRANSFER_MAX_ACTIVE_LEASES} 个网页图片请求，请稍后再试。`,
+      );
+      return;
+    }
+    setOwnedTransferRequestIds(leaseResult.ownedRequestIds);
     if (galleryStorageScope) {
-      void recordGalleryPromptUse(galleryStorageScope, prompt).then(async () => {
-        const [nextPrompts, nextStats] = await Promise.all([
-          listUserGalleryPrompts(galleryStorageScope),
-          loadGalleryPromptStats(galleryStorageScope),
-        ]);
-        setUserGalleryPrompts(nextPrompts);
-        setGalleryPromptStats(nextStats);
-      });
+      void recordGalleryPromptUse(galleryStorageScope, prompt).then(
+        async () => {
+          const [nextPrompts, nextStats] = await Promise.all([
+            listUserGalleryPrompts(galleryStorageScope),
+            loadGalleryPromptStats(galleryStorageScope),
+          ]);
+          setUserGalleryPrompts(nextPrompts);
+          setGalleryPromptStats(nextStats);
+        },
+      );
     }
 
     setSelectedConversationId(conversationRecordId);
@@ -2280,10 +2541,8 @@ export default function ImagePage() {
       }
 
       await updateConversation(conversationRecordId, (current) =>
-        updateConversationTurn(
-          current ?? draftConversation,
-          turnId,
-          (turn) => completeTurnFromGenerationResult(turn, data),
+        updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
+          completeTurnFromGenerationResult(turn, data),
         ),
       );
       await loadQuota();
@@ -2300,15 +2559,19 @@ export default function ImagePage() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "生成图片失败";
       await updateConversation(conversationRecordId, (current) =>
-        updateConversationTurn(
-          current ?? draftConversation,
-          turnId,
-          (turn) => failTurnFromRecovery(turn, message),
+        updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
+          failTurnFromRecovery(turn, message),
         ),
       );
       toast.error(message);
     } finally {
       activeGenerationKeys.delete(activeGenerationKey);
+      const releaseResult = releaseImageTransferLeases({
+        scope: transferScope,
+        ownerId: transferOwnerIdRef.current,
+        requestIds: [queueRequestId],
+      });
+      setOwnedTransferRequestIds(releaseResult.ownedRequestIds);
     }
   };
 
@@ -2417,7 +2680,8 @@ export default function ImagePage() {
     }
     const prompt = String(turn.prompt || "").trim();
     const mimeType =
-      String(image.mimeType || "").trim() || detectImageMimeType(image.b64_json);
+      String(image.mimeType || "").trim() ||
+      detectImageMimeType(image.b64_json);
     try {
       const localItem = await addUserGalleryWaterfallItem(galleryStorageScope, {
         prompt,
@@ -2451,16 +2715,22 @@ export default function ImagePage() {
         ),
       })
         .then(async (response) => {
-          await updateUserGalleryWaterfallItemSubmission(galleryStorageScope, localItem.id, {
-            submissionId: response.item.id,
-            submissionStatus: "pending",
-          });
-          const submittedItems = await listUserGalleryWaterfallItems(galleryStorageScope);
+          await updateUserGalleryWaterfallItemSubmission(
+            galleryStorageScope,
+            localItem.id,
+            {
+              submissionId: response.item.id,
+              submissionStatus: "pending",
+            },
+          );
+          const submittedItems =
+            await listUserGalleryWaterfallItems(galleryStorageScope);
           setUserGalleryWaterfallItems(submittedItems);
           toast.success("已提交审核");
         })
         .catch((error) => {
-          const message = error instanceof Error ? error.message : "提交审核失败";
+          const message =
+            error instanceof Error ? error.message : "提交审核失败";
           toast.error(`已保存到本地，${message}`);
         });
       const nextItems =
@@ -2550,15 +2820,11 @@ export default function ImagePage() {
                       <motion.div
                         key={conversation.id}
                         initial={
-                          shouldReduceMotion
-                            ? false
-                            : { opacity: 0, y: 8 }
+                          shouldReduceMotion ? false : { opacity: 0, y: 8 }
                         }
                         animate={{ opacity: 1, y: 0 }}
                         exit={
-                          shouldReduceMotion
-                            ? undefined
-                            : { opacity: 0, y: -6 }
+                          shouldReduceMotion ? undefined : { opacity: 0, y: -6 }
                         }
                         transition={listTransition}
                         className={cn(
@@ -2846,7 +3112,7 @@ export default function ImagePage() {
                           type="button"
                           variant="outline"
                           size="sm"
-                          disabled={isComposerGenerating}
+                          disabled={isWebTransferLimitReached}
                           onClick={() =>
                             void handleGenerateImage({
                               conversation: selectedConversation,
@@ -2855,7 +3121,7 @@ export default function ImagePage() {
                           }
                           className="h-9 shrink-0 disabled:opacity-60"
                         >
-                          {isComposerGenerating ? (
+                          {isWebTransferLimitReached ? (
                             <LoaderCircle className="size-4 animate-spin" />
                           ) : (
                             <RotateCcw className="size-4" />
@@ -2876,12 +3142,14 @@ export default function ImagePage() {
                       >
                         {turn.images.map((image, index) => {
                           const isSuccessImage =
-                            image.status === "success" && Boolean(image.b64_json);
-                          const waterfallSourceImageId = buildWaterfallSourceImageId(
-                            selectedConversation.id,
-                            turn.id,
-                            image.id,
-                          );
+                            image.status === "success" &&
+                            Boolean(image.b64_json);
+                          const waterfallSourceImageId =
+                            buildWaterfallSourceImageId(
+                              selectedConversation.id,
+                              turn.id,
+                              image.id,
+                            );
                           const isAlreadyInWaterfall =
                             userWaterfallSourceImageIds.has(
                               waterfallSourceImageId,
@@ -2983,7 +3251,7 @@ export default function ImagePage() {
                           type="button"
                           variant="outline"
                           size="sm"
-                          disabled={isComposerGenerating}
+                          disabled={isWebTransferLimitReached}
                           onClick={() =>
                             void handleGenerateImage({
                               conversation: selectedConversation,
@@ -2992,7 +3260,7 @@ export default function ImagePage() {
                           }
                           className="h-9 shrink-0 disabled:opacity-60"
                         >
-                          {isComposerGenerating ? (
+                          {isWebTransferLimitReached ? (
                             <LoaderCircle className="size-4 animate-spin" />
                           ) : (
                             <RotateCcw className="size-4" />
@@ -3070,7 +3338,7 @@ export default function ImagePage() {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
                     if (
-                      !isComposerGenerating &&
+                      !isWebTransferLimitReached &&
                       !isQuotaInsufficient &&
                       !isUploadingInputImage
                     ) {
@@ -3204,14 +3472,14 @@ export default function ImagePage() {
                   type="button"
                   onClick={() => void handleGenerateImage()}
                   disabled={
-                    isComposerGenerating ||
+                    isWebTransferLimitReached ||
                     isQuotaInsufficient ||
                     isUploadingInputImage
                   }
                   className="ml-auto size-10 shrink-0 rounded-full p-0 disabled:opacity-50"
                   aria-label="发送"
                 >
-                  {isComposerGenerating ? (
+                  {isWebTransferLimitReached ? (
                     <LoaderCircle className="size-4 animate-spin" />
                   ) : (
                     <ArrowUp className="size-4" />
@@ -3242,7 +3510,9 @@ export default function ImagePage() {
           onOpenPreview={(item) => {
             setGalleryPreviewItem(item);
             if (item.backendGalleryId) {
-              void recordGalleryItemEvent(item.backendGalleryId, "click").catch(() => undefined);
+              void recordGalleryItemEvent(item.backendGalleryId, "click").catch(
+                () => undefined,
+              );
             }
           }}
         />

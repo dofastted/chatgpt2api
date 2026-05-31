@@ -130,6 +130,34 @@ class ChatImageMigrationTests(unittest.TestCase):
         self.assertEqual(accounts[0]["proxy_key"], "proxy-a")
         self.assertEqual(accounts[0]["model_mapping"], {"x": "y"})
 
+    def test_external_nested_account_payload_preserves_session_fingerprint(self) -> None:
+        accounts = normalize_account_carrier(
+            {
+                "data": {
+                    "items": [
+                        {
+                            "auth": {
+                                "authorization": "Bearer " + "x" * 48,
+                                "refreshToken": "refresh-2",
+                            },
+                            "session": {
+                                "oaiDeviceId": "device-2",
+                                "oaiSessionId": "session-2",
+                                "userAgent": "agent-2",
+                            },
+                        }
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["access_token"], "x" * 48)
+        self.assertEqual(accounts[0]["refresh_token"], "refresh-2")
+        self.assertEqual(accounts[0]["oai-device-id"], "device-2")
+        self.assertEqual(accounts[0]["oai-session-id"], "session-2")
+        self.assertEqual(accounts[0]["user-agent"], "agent-2")
+
     def test_route_selector_uses_images_for_text_only_and_responses_for_paid_input_images(self) -> None:
         self.assertEqual(select_image_route(account={"type": "Free"}), "images")
         self.assertEqual(select_image_route(account={"type": "Free"}, has_input_image=True), "images_edit")

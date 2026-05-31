@@ -13,6 +13,7 @@ from services.sqlite_store import sqlite_store
 
 class ProxyService:
     SUPPORTED_PROTOCOLS = {"http", "socks5"}
+    DEFAULT_PROXY_URL = "http://127.0.0.1:10808"
 
     def __init__(self, store_file: Path):
         self.store_file = store_file
@@ -116,8 +117,10 @@ class ProxyService:
         with self._lock:
             for item in self._items:
                 if item.get("enabled"):
-                    return self.build_proxy_url(item)
-        return None
+                    proxy_url = self.build_proxy_url(item)
+                    if proxy_url:
+                        return proxy_url
+        return self.DEFAULT_PROXY_URL
 
     def _disable_all_locked(self) -> None:
         for item in self._items:

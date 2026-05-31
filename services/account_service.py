@@ -113,8 +113,6 @@ class AccountService:
             return False
         if AccountService._is_in_cooldown(account):
             return False
-        if bool(account.get("needs_refresh")):
-            return True
         return int(account.get("quota") or 0) > 0
 
     @classmethod

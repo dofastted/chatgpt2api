@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from threading import Lock
-from threading import Event, Thread
+from threading import Event
 from time import time
 from typing import Any
 from uuid import uuid4
@@ -113,9 +113,15 @@ class ResponsesCreateRequest(BaseModel):
     stream: bool = False
     metadata: dict[str, Any] | None = None
 
+
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     accounts: list[dict[str, Any]] = Field(default_factory=list)
+    payload: Any | None = None
+    account_json: Any | None = Field(default=None, alias="accountJson")
+    category: str | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 class AccountDeleteRequest(BaseModel):
@@ -1073,6 +1079,16 @@ def save_generated_image_url(image_b64: str, mime_type: str | None, base_url: st
     return f"{normalized_base_url}/v1/images/generated/{image_id}"
 
 
+def resolve_generated_image_base_url(request: Request | None = None) -> str | None:
+    configured_base_url = str(config.public_base_url or "").strip().rstrip("/")
+    if configured_base_url:
+        return configured_base_url
+    if request is None:
+        return None
+    request_base_url = str(request.base_url or "").strip().rstrip("/")
+    return request_base_url or None
+
+
 def build_images_response_payload(
         image_result: dict[str, object],
         billing: dict[str, object] | None,
@@ -1551,24 +1567,58 @@ def normalize_account_request_items(accounts: list[dict[str, Any]]) -> list[dict
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
 
-def start_limited_account_watcher(stop_event: Event) -> Thread:
-    def worker() -> None:
-        while not stop_event.is_set():
-            try:
-                if hasattr(account_service, "list_refreshable_tokens"):
-                    refreshable_tokens = account_service.list_refreshable_tokens()
-                else:
-                    refreshable_tokens = account_service.list_limited_tokens()
-                if refreshable_tokens:
-                    print(f"[account-limited-watcher] checking {len(refreshable_tokens)} recoverable accounts")
-                    account_service.refresh_accounts(refreshable_tokens)
-            except Exception as exc:
-                print(f"[account-limited-watcher] fail {exc}")
-            stop_event.wait(300)
+def resolve_account_create_payload(body: AccountCreateRequest) -> tuple[list[dict[str, Any]], list[str], str | None]:
+    carriers: list[Any] = []
+    if body.accounts:
+        carriers.append({"accounts": [dict(item) for item in body.accounts if isinstance(item, dict)]})
+    for item in (body.payload, body.account_json):
+        if item is not None:
+            carriers.append(item)
 
-    thread = Thread(target=worker, name="limited-account-watcher", daemon=True)
-    thread.start()
-    return thread
+    imported_accounts: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
+    for carrier in carriers:
+        try:
+            normalized_accounts = normalize_account_carrier(carrier)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        for account in normalized_accounts:
+            access_token = str(account.get("access_token") or "").strip()
+            if not access_token or access_token in seen_tokens:
+                continue
+            seen_tokens.add(access_token)
+            imported_accounts.append(account)
+
+    tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
+    category = str(body.category or "").strip() or None
+    return imported_accounts, tokens, category
+
+
+def create_accounts_result(body: AccountCreateRequest, *, category_override: str | None = None) -> dict:
+    imported_accounts, tokens, request_category = resolve_account_create_payload(body)
+    category = category_override if category_override is not None else request_category
+    if not imported_accounts and not tokens:
+        raise HTTPException(status_code=400, detail={"error": "tokens or accounts is required"})
+    if imported_accounts:
+        result = account_service.add_account_items(imported_accounts, category=category)
+    else:
+        result = account_service.add_accounts(tokens, category=category)
+    return {
+        **result,
+        "refreshed": 0,
+        "errors": [],
+        "items": result.get("items", []),
+    }
+
+
+class DisabledAccountRefreshWatcher:
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+
+
+def start_limited_account_watcher(stop_event: Event) -> DisabledAccountRefreshWatcher:
+    del stop_event
+    return DisabledAccountRefreshWatcher()
 
 
 def resolve_web_asset(requested_path: str) -> Path | None:
@@ -1611,13 +1661,11 @@ def create_app() -> FastAPI:
         )
         if interrupted_count:
             print(f"[image-request-log] marked {interrupted_count} active requests as interrupted")
-        thread = start_limited_account_watcher(stop_event)
         backup_thread = start_backup_scheduler(stop_event)
         try:
             yield
         finally:
             stop_event.set()
-            thread.join(timeout=1)
             backup_thread.join(timeout=1)
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
@@ -1702,7 +1750,15 @@ def create_app() -> FastAPI:
             record = image_request_log_service.get_record(request_id)
             if record and record.get("owner_id") == owner_id:
                 record_status = str(record.get("status") or "").strip()
-                if record_status in {"finished", "failed", "rejected"}:
+                if record_status in {
+                    "accepted",
+                    "waiting",
+                    "assigning_account",
+                    "running",
+                    "finished",
+                    "failed",
+                    "rejected",
+                }:
                     request_payload = enrich_queue_request_payload_from_record(
                         {
                             "request_id": request_id,
@@ -1793,7 +1849,7 @@ def create_app() -> FastAPI:
                 image_result,
                 billing_payload,
                 response_format=body.response_format,
-                base_url=str(request.base_url),
+                base_url=resolve_generated_image_base_url(request),
             )
 
         try:
@@ -1908,7 +1964,7 @@ def create_app() -> FastAPI:
                 image_result,
                 billing_payload,
                 response_format=response_format,
-                base_url=str(request.base_url),
+                base_url=resolve_generated_image_base_url(request),
             )
 
         try:
@@ -2444,27 +2500,7 @@ def create_app() -> FastAPI:
             authorization: str | None = Header(default=None),
     ):
         require_admin_auth_key(authorization)
-        imported_accounts = normalize_account_request_items([dict(item) for item in body.accounts if isinstance(item, dict)])
-        tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
-        if not imported_accounts and not tokens:
-            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        if imported_accounts:
-            result = account_service.add_account_items(imported_accounts)
-            refresh_targets = [
-                str(item.get("access_token") or "").strip()
-                for item in imported_accounts
-                if str(item.get("access_token") or "").strip()
-            ]
-        else:
-            result = account_service.add_accounts(tokens)
-            refresh_targets = tokens
-        refresh_result = account_service.refresh_accounts(refresh_targets)
-        return {
-            **result,
-            "refreshed": refresh_result.get("refreshed", 0),
-            "errors": refresh_result.get("errors", []),
-            "items": refresh_result.get("items", result.get("items", [])),
-        }
+        return create_accounts_result(body)
 
     @router.post("/api/proxies")
     async def upsert_proxy(
@@ -2488,41 +2524,9 @@ def create_app() -> FastAPI:
             authorization: str | None = Header(default=None),
     ):
         context = require_auth_key(authorization)
-        imported_accounts = normalize_account_request_items([dict(item) for item in body.accounts if isinstance(item, dict)])
-        tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
-        if not imported_accounts and not tokens:
-            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        if imported_accounts:
-            result = account_service.add_account_items(imported_accounts, category=account_service.DONATION_CATEGORY)
-            refresh_targets = [
-                str(item.get("access_token") or "").strip()
-                for item in imported_accounts
-                if str(item.get("access_token") or "").strip()
-            ]
-        else:
-            result = account_service.add_accounts(tokens, category=account_service.DONATION_CATEGORY)
-            refresh_targets = tokens
-        refresh_result = account_service.refresh_accounts(refresh_targets)
-        added_tokens = {
-            str(token or "").strip()
-            for token in result.get("added_tokens", [])
-            if str(token or "").strip()
-        }
-        failed_tokens = {
-            str(item.get("access_token") or "").strip()
-            for item in refresh_result.get("errors", [])
-            if str(item.get("access_token") or "").strip()
-        }
-        rewarded_accounts = len(
-            {
-                str(item.get("access_token") or "").strip()
-                for item in refresh_result.get("items", [])
-                if str(item.get("access_token") or "").strip() in added_tokens
-                and str(item.get("access_token") or "").strip() not in failed_tokens
-                and str(item.get("type") or "").strip() == "Free"
-            }
-        )
-        rewarded_ldc = rewarded_accounts * FREE_DONATION_REWARD_LDC
+        result = create_accounts_result(body, category_override=account_service.DONATION_CATEGORY)
+        rewarded_accounts = 0
+        rewarded_ldc = 0
         remaining_quota = context.remaining_quota
         ldc_balance = context.ldc_balance
         if context.auth_type == "user_key" and rewarded_ldc > 0:
@@ -2532,14 +2536,20 @@ def create_app() -> FastAPI:
                 ldc_balance = max(0, int(rewarded_user_key.get("ldc_balance") or 0))
         return {
             **result,
-            "refreshed": refresh_result.get("refreshed", 0),
-            "errors": refresh_result.get("errors", []),
-            "items": refresh_result.get("items", result.get("items", [])),
+            "items": result.get("items", []),
             "rewarded_accounts": rewarded_accounts,
             "rewarded_ldc": rewarded_ldc,
             "remaining_quota": remaining_quota,
             "ldc_balance": ldc_balance,
         }
+
+    @router.post("/api/external/accounts")
+    async def create_external_accounts(
+            body: AccountCreateRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin_auth_key(authorization)
+        return create_accounts_result(body)
 
     @router.post("/api/user-keys")
     async def create_user_keys(
