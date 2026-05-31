@@ -1,6 +1,6 @@
 # llmdoc
 
-这个目录记录 `chatgpt2api` 的稳定说明。先读 `llmdoc/startup.md`，再读 `llmdoc/must/`。
+这个目录记录 `chatgpt2api` 的稳定说明。本文件是目录总览；启动阅读顺序见 `llmdoc/startup.md`。
 
 ## 起步
 
@@ -38,6 +38,7 @@
 ## 指南
 
 - `llmdoc/guides/local-run.md`
+- `llmdoc/guides/api-usage.md`
 - `llmdoc/guides/domain-and-frp.md`
 
 ## 记忆区

@@ -4,12 +4,15 @@
 
 - 主配置类是 `services/config.py:15` 的 `AppSettings`。
 - `auth_key`、`admin_auth_key`、`accounts_file`、`user_keys_file`、`proxies_file`、`sqlite_path`、`backup_dir`、`backup_max_bytes`、`backup_interval_minutes`、`tls_verify` 和图片迁移开关都在这里定义，见 `services/config.py`。
+- Python 运行版本要求见 `pyproject.toml`，当前要求 `>=3.13`。
 
 配置加载规则：
 
 - `auth-key` 从环境变量 `CHATGPT2API_AUTH_KEY` 或 `config.json` 读取，见 `services/config.py:49`。
 - `admin-auth-key` 从环境变量 `CHATGPT2API_ADMIN_AUTH_KEY` 或 `config.json` 读取，见 `services/config.py:54`。
 - `tls-verify` 走布尔解析，见 `services/config.py:62`。
+- `CHATGPT2API_DATA_DIR` 可覆盖默认数据根目录；未设置时使用仓库根目录下的 `data/`。
+- `CHATGPT2API_PUBLIC_BASE_URL` 或 `public-base-url` 可覆盖对外生成图链接的基址；设置后，`response_format=url` 返回的 `/v1/images/generated/{image_id}` 会优先拼到这个公开基址下。
 - SQLite 主库默认写到 `data/chatgpt2api.sqlite3`，可用 `CHATGPT2API_SQLITE_PATH` 或 `sqlite-path` 覆盖。
 - `data/accounts.json`、`data/user_keys.json`、`data/redeem_codes.json`、`data/proxies.json`、`data/uploaded_images.json` 只作为对应 SQLite 文档为空时的首次导入来源。
 - 用户 key 导入来源可用 `CHATGPT2API_USER_KEYS_FILE` 或 `user-keys-file` 覆盖，见 `services/config.py`。
@@ -24,6 +27,7 @@
 - `IMAGE_QUEUE_GLOBAL_WAIT_LIMIT` 默认 `2000`，限制全局等待请求。
 - `IMAGE_QUEUE_GLOBAL_START_LIMIT` 默认 `60`，配合启动窗口限制生图启动速率。
 - `IMAGE_QUEUE_GLOBAL_START_WINDOW_SECONDS` 默认 `60`。
+- `IMAGE_GENERATION_TIMEOUT_SECONDS` 或 `image-generation-timeout-seconds` 默认 `900`，用于限制单次生图等待、队列 stale ticket 清理和活动请求超时收尾。
 - `IMAGE_GENERATION_MAX_ACCOUNT_ATTEMPTS` 默认 `4`，限制单次生图最多尝试多少个账号；超过后返回失败，避免某个提示词或上游异常让 Web 请求一直停在生成中。
 - 主容器默认不需要在 `config.json` 里显式写 `image-engine` 或 `image-route-policy`；不写时就是 `chat_image` 加 `plan_type`。只有排障或临时回退时才改这些值。
 

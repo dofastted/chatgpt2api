@@ -69,6 +69,27 @@ export function useCreateUser() {
 
 ## Query Patterns
 
+### Image Web Transfer Lease Contract
+
+#### 1. Scope / Trigger
+
+- Trigger: `/image` needs to resume or coordinate pending image turns across multiple browser windows or tabs.
+- Use this contract for browser-side transfer ownership only. Do not apply it to public API clients or backend queue/account concurrency.
+
+#### 2. Contracts
+
+- The Web UI may limit active browser transfer owners to 3 per hashed auth scope.
+- The Web UI limit must not change `IMAGE_QUEUE_PER_USER_ACTIVE_LIMIT`, `IMAGE_QUEUE_PER_USER_WAIT_LIMIT`, account slot limits, or public `/v1/responses`, `/v1/images/generations`, and `/v1/images/edits` semantics.
+- Pending turns with `queueRequestId` must not be marked interrupted only because the page was reopened or another conversation is selected.
+- A different `/image` window can adopt a stale transfer lease and recover terminal results through `GET /api/image-queue/me?request_id=...` plus `GET /v1/responses/{response_id}`.
+- If a window owns a transfer lease but the backend queue and terminal request record cannot find the request after a short local protection window, the UI must turn the pending turn into a retryable error instead of waiting forever.
+
+#### 3. Tests Required
+
+- Unit tests for lease max-count enforcement, stale-owner adoption, hashed auth scope, and single-acquire behavior that preserves existing owned leases.
+- Type check and lint after touching `/image` queue polling or lease code.
+- Backend queue tests when reviewing this feature, to confirm Web-only max-count changes did not alter external API queue behavior.
+
 ### Image Gallery Asset URL Contract
 
 #### 1. Scope / Trigger

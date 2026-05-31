@@ -6,6 +6,7 @@
   "backup-dir": "data/backups",
   "backup-max-bytes": 524288000,
   "backup-interval-minutes": 0,
+  "public-base-url": "https://img.fkcodex.com",
   "image-queue-per-user-active-limit": 10,
   "image-queue-per-user-wait-limit": 10,
   "image-queue-global-wait-limit": 2000,

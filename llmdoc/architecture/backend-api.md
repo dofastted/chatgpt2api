@@ -59,7 +59,7 @@
 
 后台线程：
 
-- `services/api.py:206` 会每 300 秒刷新一次可恢复账号。
-- 线程会处理 `account_service.list_refreshable_tokens()` 返回的 token，范围包括“限流”账号和冷静期已结束的账号，不会全量刷新所有账号。
-- 图片请求前如果刷新账号信息时只遇到 TLS、连接重置、超时这类瞬时错误，而本地缓存账号仍可用，会先用缓存状态继续尝试，逻辑在 `services/backend_service.py:20` 到 `services/backend_service.py:59`。
+- 账号远端信息不再自动刷新。启动时不会开账号刷新线程，新增账号和图片请求前也不会访问远端刷新账号信息。
+- `POST /api/accounts/refresh` 是唯一账号远端刷新入口；它需要管理员鉴权。
+- 图片请求只会选择本地已知可用、额度大于 0、未禁用、未异常且未处于冷却期的账号。`needs_refresh=true` 的账号必须先手动刷新。
 - `services/data_management_service.py` 会按设置启动备份线程。默认 `backup_interval_minutes=0`，不自动备份；开启后会把 SQLite 快照、上传图目录和生成图目录打包到 `data/backups/`。

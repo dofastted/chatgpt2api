@@ -23,7 +23,7 @@
 运行后会得到：
 
 - 前端静态站点由同一个 FastAPI 进程提供，见 `services/api.py:278`。
-- 账号数据写到宿主机 `./data/accounts.json`，见 `docker-compose-local.yml:10` 和 `services/config.py:72`。
+- 运行数据默认写到宿主机 `./data/chatgpt2api.sqlite3`。旧 `./data/accounts.json` 等 JSON 只作为 SQLite 对应文档为空时的一次性导入来源或人工备份来源。
 - 本地容器会带 `restart: unless-stopped`，也就是 Docker daemon 自己恢复后会自动拉起当前服务，定义见 `docker-compose-local.yml:3`。
 
 接管或重启主容器前：

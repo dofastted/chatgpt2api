@@ -2,7 +2,7 @@
 
 前端鉴权分三层：
 
-- 存储层：`web/src/store/auth.ts:12`、`web/src/store/auth.ts:20`、`web/src/store/auth.ts:29` 用 `localforage` 读取、写入、清空密钥。
+- 存储层：`web/src/store/auth.ts` 通过内存缓存、`localStorage` 和 `localforage` 三层读写密钥，用于兼顾同步读取、刷新保留和旧数据兼容。
 - 请求层：`web/src/lib/request.ts:14` 自动加 Bearer Token，`web/src/lib/request.ts:27` 统一处理响应错误。API 基址优先取 `NEXT_PUBLIC_API_URL`；未配置时，浏览器里默认跟当前页面 origin 走，只有本机 `localhost:3000` 开发态才回退到 `127.0.0.1:8000`，入口在 `web/src/constants/common-env.ts:1`。
 - 页面层：各页面再根据 `role` 做跳转或隐藏入口；画图页另外会根据 `/api/quota` 返回的余额和 `pricing` 限制发送。
 
@@ -10,7 +10,7 @@
 
 - 首页 `web/src/app/page.tsx:8` 启动后读取会话并按角色分流。
 - 登录页 `web/src/app/login/page.tsx:28` 登录成功后也按角色分流。
-- 当前四页共用一套 minimal-dark 主题入口：`web/src/app/layout.tsx` 负责字体和全局壳子，`web/src/app/globals.css` 提供暗色 token、页面壳子和导航样式，基础控件默认外观在 `web/src/components/ui/`。
+- 主要可见业务页共用一套 minimal-dark 主题入口：`web/src/app/layout.tsx` 负责字体和全局壳子，`web/src/app/globals.css` 提供暗色 token、页面壳子和导航样式，基础控件默认外观在 `web/src/components/ui/`。
 - 顶部导航 `web/src/components/top-nav.tsx` 对所有已登录用户显示“画图”和“画廊”，只在 `admin` 时显示“号池管理”。所有已登录用户都能看到“兑换中心”；里面保留捐赠上传，也给 `user_key` 提供兑换码输入和直达购买链接。
 - 兑换中心的购买链接是 `https://ldc.fkcodex.com/buy/4` 和 `https://ldc.fkcodex.com/buy/5`，分别对应 20 额度和 100 额度兑换码；弹窗里不再显示购买积分。
 - 账号页 `web/src/app/accounts/page.tsx:251` 会再次检查角色，普通用户会被送回 `/image`。如果只是会话探测失败或请求地址不通，不会再直接误跳 `/login`，而是停留当前页报错。
@@ -46,7 +46,8 @@
 - 右侧“画廊灵感”的公开图仍先按 prompt 使用次数排序，再按页面加载时生成的随机权重排序；用户本地添加的生成图在公开图之前。空状态快捷 prompt 仍只展示 prompt，不展示用户生成图。
 - 画图页空状态标题是“今天你想创造什么?”。标题下方展示 `gallery-ui-seed.json` 中有 prompt 的前 8 条快捷 prompt，点击后直接写入 composer 并聚焦输入框，不跳转。
 - 画图页 composer 在 `web/src/app/image/page.tsx` 中实现，结构接近 ChatGPT 输入栏：大圆角输入框，上方是 prompt textarea，下方是上传、画廊、1 到 10 张的张数快捷按钮和数字输入、状态提示和圆形发送按钮。上传图预览仍在输入框内显示，Enter 发送、Shift+Enter 换行。
-- 画图页会把页面重新打开后遗留的 `queued`、`assigning_account`、`running` 和 `loading` 图片状态改成可重试错误态。composer 旁会显示“重置”按钮，用于手动清掉旧请求状态，避免发送按钮被旧运行态占用。
+- 画图页会保留带 `queueRequestId` 的 `queued`、`assigning_account` 和 `running` turn。另一个 `/image` 窗口加载历史后，会用 `web/src/lib/image-transfer-leases.ts` 的浏览器端租约接管最多 3 个网页传输，再通过 `GET /api/image-queue/me?request_id=...` 和 `GET /v1/responses/{response_id}` 恢复终态。这个 3 个上限只限制同一浏览器 profile 下的网页窗口或标签，不改变后端公共 API 队列上限。
+- 没有 `queueRequestId` 的遗留 `queued`、`assigning_account`、`running` 和 `loading` 图片状态仍会被改成可重试错误态。带 `queueRequestId` 的 turn 只有在当前窗口拿到租约、后端队列和终态记录都找不到该 request、且本地请求开始超过短保护时间后，才会改成“未找回这个请求”。composer 旁的“重置”按钮仍可手动清掉旧请求状态。
 - 画图页的聊天区图片按中间聊天栏宽度自适应。参考图在用户消息里使用 `object-contain`，结果图单张时占满聊天栏，多张时最多两列，避免右侧画廊栏显示时结果图被压得过小。
 - 前端发送时会先按当前 key 的模型单价和张数算成本，默认单价是 `1K=2`、`2K=2`、`4K=8`。画图页模型按钮提供 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`，默认模型是 `gpt-image-2`。
 - 前端画图页向 `/v1/responses` 发送请求时，会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。配置保持自动时，prompt 里明确写到 `1K`、`2K`、`4K`、`1024`、`2048`、`4096` 或常见高分辨率词时，页面只用它推断显示和模型档位，`tools[].size` 仍保持 `auto`。

@@ -5,7 +5,7 @@
 | Endpoint | 当前状态 | 迁移路径 |
 |---|---|---|
 | `POST /v1/responses` | 保留，Responses 主入口 | 经 `BackendService` 选号后按输入图分流；无输入图默认走 Images，上游为 `/backend-api/f/conversation`；Plus/Pro/Team 带输入图走 `/backend-api/codex/responses` |
-| `GET /v1/responses/{response_id}` | 保留，读取进程内结果 | 继续读 `RESPONSES_STORE` |
+| `GET /v1/responses/{response_id}` | 保留，读取本服务保存过的结果 | 优先读进程内 `RESPONSES_STORE`，未命中时回退 SQLite response 记录；容器重启后仍可读取已持久化 response |
 | `POST /v1/response` | 不注册 | 单数路径按 workflow v2 视为无效 |
 | `GET /v1/response/{response_id}` | 不注册 | 单数路径按 workflow v2 视为无效 |
 | `POST /v1/images/generations` | 保留，第三方客户端兼容入口 | JSON 请求进入 `generate_image_payload`；`response_format=url` 会保存生成图并返回 HTTP 图片 URL |

@@ -17,9 +17,8 @@
 - 当 `n > 1` 时，服务端会把它拆成 `n` 次内部生成调用，每次传给 `BackendService.generate_with_pool` 的 `n` 都是 `1`。单次公开请求最多 10 张，聚合层最多同时启动 3 个内部槽位；这样单张图命中 `524` 之类的上游错误时，不会丢掉已经成功的其他图片。
 - 批量请求如果至少一张成功，会返回成功图片，并在响应顶层带 `partial_errors` 记录失败图片的 `index` 和错误信息；每个成功图片项也带原始 `index`，方便前端放回对应位置。`user_key` 只按成功张数扣费，`billing` 会带 `requested_count`、`succeeded_count` 和 `failed_count`。
 - 批量请求如果全部失败，会保持失败响应，不扣 `user_key` 额度。
-- 先从账号池选一个当前可用的 token，逻辑在 `services/backend_service.py:38`。
-- 再用 `services/backend_service.py:21` 先刷新这个 token 的远端信息，确认它还有额度、状态也可用。
-- 刷新结果不满足条件时会跳过这个 token，继续尝试下一个。
+- 先从账号池选一个当前可用的 token，逻辑在 `services/backend_service.py`。
+- 选号只使用账号池本地状态；禁用、异常、额度为 0，或 `needs_refresh=true` 但未刷新完成的账号不参与生图。图片请求前不再同步刷新远端账号信息。
 - 选号后会按是否带输入图选择内部执行路线：无输入图默认走 `images`，Free 有输入图走 `images_edit`，Plus/Pro/Team 有输入图走 `responses`，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
 - 带输入图请求会优先选择最近在 input image responses 路线成功过的账号。账号侧记录 `input_image_success`、`input_image_fail`、`last_input_image_used_at` 和 `last_input_image_success_at`，选择逻辑在 `services/account_service.py`，调用点在 `services/backend_service.py`。
 - 如果临时用 `IMAGE_ROUTE_POLICY=force_responses` 让无输入图走 Responses，遇到 `429`、网关超时或其他瞬时上游错误时，同一个账号会先退到 Images 路线再试一次；仍失败才换下一个账号。带输入图的付费账号请求不会退到 `images_edit`。
@@ -59,6 +58,7 @@
 - `/v1/responses` 流式时，服务端会先返回 `response.created` 和 `response.in_progress`，然后在队列等待和上游生成期间继续发送 `response.in_progress` 心跳，避免 Cloudflare 长时间空等后返回 `524`。最终如果有图片，每张成功图都会有一条 `response.image_generation_call.completed`，事件顶层带原始 `index`、图片 `result` 和完整 `item`；如果只有文本，最终 Response 会带 `message/output_text`。两种成功结果最后都给 `response.completed` 和 `data: [DONE]`。前端会在 `response.created` 或 `response.completed` 里尽早保存 `responseId`。
 - 前端收到对应完成事件和 `[DONE]` 后，才能把会话状态从生成中改为完成。只收到图片内容但没有结束事件时，应继续视为协议错误。收到 `response.failed` 或浏览器流异常时，要把本地 turn 和所有 loading 图片改成错误态，数量保持为本次请求的 `n`。
 - 前端图片页调用 `/v1/responses` 时默认传 `stream: true`，会把选中的公开模型放到 `tools[].model`，把当前尺寸选择放到 `tools[].size`，再从 SSE 的 `response.completed` 事件读取最终 Response。它还会累积 `response.image_generation_call.completed` 和 `response.output_item.done` 中的图片项，再合进最终 Response，避免批量生成时逐张图片事件已到、但最终 `output` 不完整导致 Web 占位图一直等待。配置保持自动时，prompt 中明确出现的 `1K`、`2K`、`4K`、`1024`、`2048`、`4096` 或常见高分辨率词只用于页面显示和模型档位推断，不会把 `tools[].size` 从 `auto` 改成固定宽高。它既读取图片项，也读取 `text_content/copied_text`；没有图片但有文本时会结束生成并展示“可复制文本”。公开的 `/v1/images/generations` 和 `/v1/images/edits` 只作为外部兼容入口，项目自带网页不使用。
+- 前端图片页会为带 `queueRequestId` 的 pending turn 建立浏览器端传输租约。租约 scope 来自当前 auth key 的哈希，同一浏览器 profile 最多 3 个 `/image` 窗口或标签拥有活跃网页传输；租约超时后，其他窗口可接管并通过队列状态和 `responseId` 恢复结果。这个限制只在 Web UI 生效，不改变 `/v1/responses`、`/v1/images/generations` 或 `/v1/images/edits` 的后端队列、账号槽位和外部 API 并发语义。
 - 前端图片页现在会把 session 存成多轮 `turns[]`，主存储是后端 `/api/image-conversations`，本地 `localforage` 只做缓存和旧数据上传来源。每轮保存 prompt、模型、张数、尺寸、参考图、结果图、队列 id、`responseId` 和 `copied_text`；旧单轮记录读取时会映射成一个 turn，实现见 `web/src/store/image-conversations.ts`。
 - 同一页面里切到别的会话时，仍在生成的请求不会被立刻改成“页面已刷新，生成已中断”；真正落盘结果回来后会继续写回原会话，处理点在 `web/src/app/image/page.tsx` 和 `web/src/store/image-conversations.ts`。
 - 在同一 session 继续发送新 prompt 时，前端复用 `clientConversationId`，并把上一轮 `responseId` 作为 `previous_response_id` 发给 `/v1/responses`。
@@ -81,7 +81,7 @@
 - JSON 请求成功返回前写 `finished`；SSE 请求在最终事件和 `data: [DONE]` 发完后写 `finished`。异常路径写 `failed`，队列或活动数超限写 `rejected`。
 - 成功和失败统计都回写账号池，见 `services/account_service.py:329`。
 - 如果报错命中失效 token 条件，判断在 `services/image_service.py:205`，随后 `services/backend_service.py:68` 会把 token 从池里删掉。
-- 如果请求前刷新失败，`services/backend_service.py:27` 会把这个账号标成 3 分钟冷却，跳过后继续试下一个。
+- 图片请求前不再刷新账号远端信息。`BackendService.generate_with_pool` 只使用账号池本地状态；`needs_refresh=true` 或额度为 0 的账号不会参与选号。
 - 如果上游会话返回瞬时错误，`services/image_service.py` 会把 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit、temporarily unavailable 这类信号都当作可重试失败；`services/backend_service.py` 会跳过当前账号继续试。
 - 如果本机代理报 `curl: (7) Failed to connect ... 10808`，先按本机 Clash 或代理瞬时连接失败处理：先测代理是否还能连通，再走代码层短退避重试。不要把这类错误先归因到 `low quality text render`、prompt 质量或账号质量。
 - 如果整个池里没有可用 token，`services/backend_service.py:38` 会抛出 `503`。
