@@ -23,6 +23,7 @@ export type ImageBilling = {
 };
 
 export type ImageQueueItemStatus =
+  | "accepted"
   | "waiting"
   | "assigning_account"
   | "running"

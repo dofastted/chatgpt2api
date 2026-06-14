@@ -47,8 +47,8 @@
 - 右侧“画廊灵感”的公开图仍先按 prompt 使用次数排序，再按页面加载时生成的随机权重排序；用户本地添加的生成图在公开图之前。空状态快捷 prompt 仍只展示 prompt，不展示用户生成图。
 - 画图页空状态标题是“今天你想创造什么?”。标题下方展示 `gallery-ui-seed.json` 中有 prompt 的前 8 条快捷 prompt，点击后直接写入 composer 并聚焦输入框，不跳转。
 - 画图页 composer 在 `web/src/app/image/page.tsx` 中实现，结构接近 ChatGPT 输入栏：大圆角输入框，上方是 prompt textarea，下方是上传、画廊、1 到 10 张的张数快捷按钮和数字输入、状态提示和圆形发送按钮。上传图预览仍在输入框内显示，Enter 发送、Shift+Enter 换行。
-- 画图页会保留带 `queueRequestId` 的 `queued`、`assigning_account` 和 `running` turn。另一个 `/image` 窗口加载历史后，会用 `web/src/lib/image-transfer-leases.ts` 的浏览器端租约接管最多 3 个网页传输，再通过 `GET /api/image-queue/me?request_id=...` 和 `GET /v1/responses/{response_id}` 恢复终态。这个 3 个上限只限制同一浏览器 profile 下的网页窗口或标签，不改变后端公共 API 队列上限。
-- 没有 `queueRequestId` 的遗留 `queued`、`assigning_account`、`running` 和 `loading` 图片状态仍会被改成可重试错误态。带 `queueRequestId` 的 turn 只有在当前窗口拿到租约、后端队列和终态记录都找不到该 request、且本地请求开始超过短保护时间后，才会改成“未找回这个请求”。composer 旁的“重置”按钮仍可手动清掉旧请求状态。
+- 画图页会保留带 `queueRequestId` 的 `queued`、`assigning_account` 和 `running` turn。等待界面按 `GET /api/image-queue/me?request_id=...` 展示“接收/排队/派号/出图/同步”阶段、已等待时间、本 key 活动数和全局运行数；每秒刷新本地计时，队列状态按短间隔轮询。
+- 另一个 `/image` 窗口加载历史后，会用 `web/src/lib/image-transfer-leases.ts` 的浏览器端租约接管最多 3 个网页传输，再通过队列状态和 `GET /v1/responses/{response_id}` 恢复终态。浏览器流异常时，前端不会立刻把带 `queueRequestId` 的请求终止；只要后端还能查到活动或终态记录，就继续后台恢复。错误卡片也提供“恢复状态”和“重试”。没有 `queueRequestId` 的遗留 pending 状态仍会被改成可重试错误态。
 - 画图页的聊天区图片按中间聊天栏宽度自适应。参考图在用户消息里使用 `object-contain`，结果图单张时占满聊天栏，多张时最多两列，避免右侧画廊栏显示时结果图被压得过小。
 - 前端发送时会先按当前 key 的模型单价和张数算成本，默认单价是 `1K=2`、`2K=2`、`4K=8`。画图页模型按钮提供 `gpt-image-2`、`gpt-image-2-2K`、`gpt-image-2-4K`，默认模型是 `gpt-image-2`。
 - 前端画图页向 `/v1/responses` 发送请求时，会把选中的公开模型放在 `tools[].model`，并把当前尺寸选择放在 `tools[].size`。配置保持自动时，prompt 里明确写到 `1K`、`2K`、`4K`、`1024`、`2048`、`4096` 或常见高分辨率词时，页面只用它推断显示和模型档位，`tools[].size` 仍保持 `auto`。

@@ -455,15 +455,67 @@ function formatInputImageSize(sizeBytes: number) {
   return `${Math.max(1, Math.round(sizeBytes / 1024))} KB`;
 }
 
-function formatQueueProgressText(item: ImageQueueItem | null | undefined) {
+function formatElapsedDuration(valueMs: number | null | undefined) {
+  const totalSeconds = Math.max(0, Math.floor(Number(valueMs || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function timestampToMs(value?: string | null) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getTurnElapsedMs(turn: ImageConversationTurn, nowMs: number) {
+  const startedAt = timestampToMs(turn.requestStartedAt || turn.createdAt);
+  return startedAt === null ? 0 : Math.max(0, nowMs - startedAt);
+}
+
+function getQueueItemForTurn(
+  snapshot: ImageQueueStatusSnapshot | null,
+  turn: ImageConversationTurn,
+) {
+  const requestId = String(turn.queueRequestId || "").trim();
+  if (!requestId) {
+    return null;
+  }
+  return (
+    (snapshot?.items || []).find((item) => item.request_id === requestId) ||
+    (snapshot?.request?.request_id === requestId ? snapshot.request : null)
+  );
+}
+
+function getQueueStageIndex(
+  turn: ImageConversationTurn,
+  item: ImageQueueItem | null | undefined,
+) {
+  const status = item?.status || turn.status;
+  if (status === "finished" || turn.status === "success") return 4;
+  if (status === "running" || turn.status === "running") return 3;
+  if (status === "assigning_account" || turn.status === "assigning_account") return 2;
+  if (status === "waiting" || turn.status === "queued") return 1;
+  return 0;
+}
+
+function formatQueueProgressText(
+  item: ImageQueueItem | null | undefined,
+  turn?: ImageConversationTurn | null,
+) {
   if (!item) {
-    return "正在同步排队状态";
+    return turn?.lastError || "正在同步排队状态";
+  }
+  if (item.status === "accepted") {
+    return "请求已接收，正在进入队列";
   }
   if (item.status === "waiting") {
     if (item.position) {
       return `排队中，第 ${item.position} 位，前面还有 ${Math.max(0, Number(item.ahead || 0))} 个`;
     }
-    return "排队中";
+    return "排队中，正在等待启动名额";
   }
   if (item.status === "assigning_account") {
     return "已轮到当前请求，正在等待可用账号";
@@ -471,13 +523,114 @@ function formatQueueProgressText(item: ImageQueueItem | null | undefined) {
   if (item.status === "running") {
     return "已开始生成，正在等待图片返回";
   }
-  if (item.status === "failed") {
-    return item.error || "生成失败";
+  if (item.status === "failed" || item.status === "rejected") {
+    return item.error || "生成失败，可重新发送";
   }
   if (item.status === "finished") {
-    return "已完成";
+    return "已完成，正在同步结果";
   }
-  return "正在同步排队状态";
+  return turn?.lastError || "正在同步排队状态";
+}
+
+function buildQueueProgressMeta(
+  turn: ImageConversationTurn,
+  item: ImageQueueItem | null | undefined,
+  snapshot: ImageQueueStatusSnapshot | null,
+  nowMs: number,
+) {
+  const elapsedMs = item?.total_ms ?? getTurnElapsedMs(turn, nowMs);
+  const meta = [
+    { label: "已等待", value: formatElapsedDuration(elapsedMs) },
+    {
+      label: "本 Key 活动",
+      value: `${Math.max(0, Number(snapshot?.user.active || 0))}`,
+    },
+    {
+      label: "全局运行",
+      value: `${Math.max(0, Number(snapshot?.global.running || 0))}`,
+    },
+  ];
+  if (item?.queue_wait_ms !== undefined && item.queue_wait_ms !== null) {
+    meta.push({ label: "排队耗时", value: formatElapsedDuration(item.queue_wait_ms) });
+  }
+  if (item?.running_ms !== undefined && item.running_ms !== null) {
+    meta.push({ label: "生成耗时", value: formatElapsedDuration(item.running_ms) });
+  }
+  return meta;
+}
+
+function QueueProgressPanel({
+  turn,
+  item,
+  snapshot,
+  nowMs,
+}: {
+  turn: ImageConversationTurn;
+  item: ImageQueueItem | null | undefined;
+  snapshot: ImageQueueStatusSnapshot | null;
+  nowMs: number;
+}) {
+  const stageIndex = getQueueStageIndex(turn, item);
+  const stages = ["接收", "排队", "派号", "出图", "同步"];
+  const meta = buildQueueProgressMeta(turn, item, snapshot, nowMs);
+  const detail = formatQueueProgressText(item, turn);
+  return (
+    <div className="rounded-2xl border border-border bg-card px-4 py-4 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <LoaderCircle className="size-4 animate-spin" />
+            实时出图状态
+          </div>
+          <div className="text-sm leading-6 text-foreground">{detail}</div>
+          {turn.lastError ? (
+            <div className="text-xs leading-5 text-amber-600 dark:text-amber-300">
+              {turn.lastError}
+            </div>
+          ) : null}
+        </div>
+        <div className="grid grid-cols-3 gap-2 text-right sm:min-w-[220px]">
+          {meta.slice(0, 3).map((entry) => (
+            <div key={entry.label} className="rounded-xl bg-muted px-2 py-2">
+              <div className="text-[10px] text-muted-foreground">{entry.label}</div>
+              <div className="mt-1 text-sm font-semibold tabular-nums text-foreground">
+                {entry.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="mt-4 grid grid-cols-5 gap-1.5">
+        {stages.map((stage, index) => (
+          <div key={stage} className="min-w-0">
+            <div
+              className={cn(
+                "h-1.5 rounded-full transition-colors",
+                index <= stageIndex ? "bg-primary" : "bg-muted",
+              )}
+            />
+            <div
+              className={cn(
+                "mt-1 truncate text-center text-[10px]",
+                index === stageIndex ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              {stage}
+            </div>
+          </div>
+        ))}
+      </div>
+      {meta.length > 3 ? (
+        <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+          {meta.slice(3).map((entry) => (
+            <span key={entry.label} className="rounded-full bg-muted px-2 py-1">
+              {entry.label} {entry.value}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function buildTerminalImagesFromGenerationResult(
@@ -971,6 +1124,30 @@ function terminalizeLoadingImages(
   });
 }
 
+function updateTurnFromActiveQueueStatus(
+  turn: ImageConversationTurn,
+  item: ImageQueueItem,
+  message?: string,
+): ImageConversationTurn {
+  const status =
+    item.status === "running"
+      ? "running"
+      : item.status === "assigning_account"
+        ? "assigning_account"
+        : "queued";
+  return {
+    ...turn,
+    status,
+    lastError: message || turn.lastError,
+    responseId: String(item.response_id || "").trim() || turn.responseId,
+    images: (turn.images || []).map((image) =>
+      image.status === "error" && !image.b64_json
+        ? { ...image, status: "loading" as const, error: undefined }
+        : image,
+    ),
+  };
+}
+
 function failTurnFromQueueStatus(
   turn: ImageConversationTurn,
   item: ImageQueueItem,
@@ -1146,6 +1323,7 @@ export default function ImagePage() {
   > | null>(null);
   const [queueStatus, setQueueStatus] =
     useState<ImageQueueStatusSnapshot | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputImageRef = useRef<HTMLInputElement>(null);
@@ -1522,23 +1700,6 @@ export default function ImagePage() {
       ),
     [userGalleryWaterfallItems],
   );
-  const currentQueueRequest = useMemo(() => {
-    if (!selectedTurn?.queueRequestId) {
-      return null;
-    }
-    return (
-      (queueStatus?.items || []).find(
-        (item) => item.request_id === selectedTurn.queueRequestId,
-      ) ||
-      (queueStatus?.request?.request_id === selectedTurn.queueRequestId
-        ? queueStatus.request
-        : null)
-    );
-  }, [queueStatus, selectedTurn]);
-  const currentQueueProgressText = useMemo(
-    () => formatQueueProgressText(currentQueueRequest),
-    [currentQueueRequest],
-  );
   const composerStatusText = isQuotaInsufficient
     ? `至少需要 ${requestCost} 额度`
     : isUploadingInputImage
@@ -1561,6 +1722,15 @@ export default function ImagePage() {
   const isSidebarVisible = isDesktopViewport
     ? !isSidebarCollapsed
     : isSidebarOpen;
+
+  useEffect(() => {
+    if (!hasOwnedTransferActive && !isPendingTurnStatus(selectedTurn?.status || "draft")) {
+      return;
+    }
+    setNowMs(Date.now());
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [hasOwnedTransferActive, selectedTurn?.status]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2347,6 +2517,88 @@ export default function ImagePage() {
     toast.success(`已重置 ${resetCount} 个旧请求`);
   };
 
+  const handleRecoverTurn = async (
+    conversation: ImageConversation,
+    turn: ImageConversationTurn,
+  ) => {
+    if (!conversationScope) {
+      toast.error("当前登录信息还在初始化，请稍后再试");
+      return;
+    }
+    const requestId = String(turn.queueRequestId || "").trim();
+    const knownResponseId = String(turn.responseId || "").trim();
+    try {
+      if (knownResponseId) {
+        const data = await fetchImageResponseResult(knownResponseId);
+        await updateConversation(conversation.id, (current) =>
+          updateConversationTurn(current ?? conversation, turn.id, (currentTurn) =>
+            completeTurnFromGenerationResult(currentTurn, data),
+          ),
+        );
+        await loadQuota();
+        toast.success("已恢复生成结果");
+        return;
+      }
+
+      if (!requestId) {
+        toast.error("这个错误没有请求编号，无法自动恢复");
+        return;
+      }
+
+      const snapshot = await fetchImageQueueStatus(requestId);
+      const item = getQueueItemForTurn(snapshot, turn);
+      setQueueStatus(snapshot);
+      if (!item) {
+        toast.error("没有找到这个请求，请重新发送");
+        return;
+      }
+      if (item.status === "finished" && item.response_id) {
+        const data = await fetchImageResponseResult(item.response_id);
+        await updateConversation(conversation.id, (current) =>
+          updateConversationTurn(current ?? conversation, turn.id, (currentTurn) =>
+            completeTurnFromGenerationResult(
+              { ...currentTurn, responseId: item.response_id || currentTurn.responseId },
+              data,
+            ),
+          ),
+        );
+        await loadQuota();
+        toast.success("已恢复生成结果");
+        return;
+      }
+      if (item.status === "failed" || item.status === "rejected") {
+        await updateConversation(conversation.id, (current) =>
+          updateConversationTurn(current ?? conversation, turn.id, (currentTurn) =>
+            failTurnFromQueueStatus(currentTurn, item),
+          ),
+        );
+        toast.error(buildQueueFailureMessage(item));
+        return;
+      }
+
+      if (transferScope) {
+        const leaseResult = acquireImageTransferLease({
+          scope: transferScope,
+          ownerId: transferOwnerIdRef.current,
+          target: { requestId, conversationId: conversation.id, turnId: turn.id },
+        });
+        setOwnedTransferRequestIds(leaseResult.ownedRequestIds);
+      }
+      await updateConversation(conversation.id, (current) =>
+        updateConversationTurn(current ?? conversation, turn.id, (currentTurn) =>
+          updateTurnFromActiveQueueStatus(
+            currentTurn,
+            item,
+            "已重新接管请求，正在继续同步状态。",
+          ),
+        ),
+      );
+      toast.success("已重新接管请求");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "恢复失败");
+    }
+  };
+
   const handleGenerateImage = async (retry?: {
     conversation: ImageConversation;
     turn: ImageConversationTurn;
@@ -2492,6 +2744,8 @@ export default function ImagePage() {
       setInputImage(null);
     }
 
+    let shouldReleaseTransferLease = true;
+
     try {
       activeGenerationKeys.add(activeGenerationKey);
       await persistConversation(draftConversation);
@@ -2558,20 +2812,82 @@ export default function ImagePage() {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "生成图片失败";
-      await updateConversation(conversationRecordId, (current) =>
-        updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
-          failTurnFromRecovery(turn, message),
-        ),
+      const snapshot = await fetchImageQueueStatus(queueRequestId).catch(
+        () => null,
       );
-      toast.error(message);
+      const item = snapshot ? getQueueItemForTurn(snapshot, draftTurn) : null;
+      if (snapshot) {
+        setQueueStatus(snapshot);
+      }
+      if (item?.status === "finished" && item.response_id) {
+        try {
+          const data = await fetchImageResponseResult(item.response_id);
+          await updateConversation(conversationRecordId, (current) =>
+            updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
+              completeTurnFromGenerationResult(
+                { ...turn, responseId: item.response_id || turn.responseId },
+                data,
+              ),
+            ),
+          );
+          await loadQuota();
+          toast.success("连接中断后已恢复生成结果");
+        } catch (recoveryError) {
+          await updateConversation(conversationRecordId, (current) =>
+            updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
+              failTurnFromRecovery(
+                { ...turn, responseId: item.response_id || turn.responseId },
+                recoveryError instanceof Error
+                  ? recoveryError.message
+                  : "恢复图片结果失败",
+              ),
+            ),
+          );
+          toast.error("恢复图片结果失败");
+        }
+      } else if (item?.status === "failed" || item?.status === "rejected") {
+        await updateConversation(conversationRecordId, (current) =>
+          updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
+            failTurnFromQueueStatus(turn, item),
+          ),
+        );
+        toast.error(buildQueueFailureMessage(item));
+      } else if (item || !snapshot) {
+        shouldReleaseTransferLease = false;
+        await updateConversation(conversationRecordId, (current) =>
+          updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
+            item
+              ? updateTurnFromActiveQueueStatus(
+                  turn,
+                  item,
+                  `网页连接中断：${message}。正在后台恢复。`,
+                )
+              : {
+                  ...turn,
+                  status: turn.status === "queued" ? "queued" : "running",
+                  lastError: `状态同步失败：${message}。恢复后会继续同步。`,
+                },
+          ),
+        );
+        toast.message("连接中断，已转入后台恢复");
+      } else {
+        await updateConversation(conversationRecordId, (current) =>
+          updateConversationTurn(current ?? draftConversation, turnId, (turn) =>
+            failTurnFromRecovery(turn, message),
+          ),
+        );
+        toast.error(message);
+      }
     } finally {
       activeGenerationKeys.delete(activeGenerationKey);
-      const releaseResult = releaseImageTransferLeases({
-        scope: transferScope,
-        ownerId: transferOwnerIdRef.current,
-        requestIds: [queueRequestId],
-      });
-      setOwnedTransferRequestIds(releaseResult.ownedRequestIds);
+      if (shouldReleaseTransferLease) {
+        const releaseResult = releaseImageTransferLeases({
+          scope: transferScope,
+          ownerId: transferOwnerIdRef.current,
+          requestIds: [queueRequestId],
+        });
+        setOwnedTransferRequestIds(releaseResult.ownedRequestIds);
+      }
     }
   };
 
@@ -3062,19 +3378,13 @@ export default function ImagePage() {
                       </span>
                     </div>
 
-                    {(turn.status === "queued" ||
-                      turn.status === "assigning_account" ||
-                      turn.status === "running") &&
-                    turn.id === selectedTurn?.id ? (
-                      <div className="rounded-xl border border-border bg-card px-4 py-4">
-                        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                          <LoaderCircle className="size-4 animate-spin" />
-                          排队进度
-                        </div>
-                        <div className="mt-3 text-sm leading-6 text-foreground">
-                          {currentQueueProgressText}
-                        </div>
-                      </div>
+                    {isPendingTurnStatus(turn.status) ? (
+                      <QueueProgressPanel
+                        turn={turn}
+                        item={getQueueItemForTurn(queueStatus, turn)}
+                        snapshot={queueStatus}
+                        nowMs={nowMs}
+                      />
                     ) : null}
 
                     {turn.copiedText ? (
@@ -3108,26 +3418,42 @@ export default function ImagePage() {
                     {turn.status === "error" && turn.images.length === 0 ? (
                       <div className="flex flex-col gap-3 rounded-xl border border-rose-300/70 bg-rose-50 px-4 py-4 text-sm leading-6 text-rose-700 sm:flex-row sm:items-center sm:justify-between dark:bg-rose-950/30 dark:text-rose-200">
                         <span>{turn.error || "生成失败"}</span>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={isWebTransferLimitReached}
-                          onClick={() =>
-                            void handleGenerateImage({
-                              conversation: selectedConversation,
-                              turn,
-                            })
-                          }
-                          className="h-9 shrink-0 disabled:opacity-60"
-                        >
-                          {isWebTransferLimitReached ? (
-                            <LoaderCircle className="size-4 animate-spin" />
-                          ) : (
-                            <RotateCcw className="size-4" />
-                          )}
-                          重试
-                        </Button>
+                        <div className="flex shrink-0 flex-wrap gap-2">
+                          {turn.queueRequestId || turn.responseId ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                void handleRecoverTurn(selectedConversation, turn)
+                              }
+                              className="h-9 disabled:opacity-60"
+                            >
+                              <RotateCcw className="size-4" />
+                              恢复状态
+                            </Button>
+                          ) : null}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={isWebTransferLimitReached}
+                            onClick={() =>
+                              void handleGenerateImage({
+                                conversation: selectedConversation,
+                                turn,
+                              })
+                            }
+                            className="h-9 disabled:opacity-60"
+                          >
+                            {isWebTransferLimitReached ? (
+                              <LoaderCircle className="size-4 animate-spin" />
+                            ) : (
+                              <RotateCcw className="size-4" />
+                            )}
+                            重试
+                          </Button>
+                        </div>
                       </div>
                     ) : null}
 
@@ -3235,7 +3561,17 @@ export default function ImagePage() {
                                   <div className="rounded-full bg-background p-3 shadow-sm">
                                     <LoaderCircle className="size-5 animate-spin" />
                                   </div>
-                                  <p className="text-sm">正在生成图片...</p>
+                                  <div className="space-y-1">
+                                    <p className="text-sm">
+                                      {formatQueueProgressText(
+                                        getQueueItemForTurn(queueStatus, turn),
+                                        turn,
+                                      )}
+                                    </p>
+                                    <p className="text-xs tabular-nums text-muted-foreground">
+                                      已等待 {formatElapsedDuration(getTurnElapsedMs(turn, nowMs))}
+                                    </p>
+                                  </div>
                                 </div>
                               )}
                             </motion.div>
@@ -3247,26 +3583,42 @@ export default function ImagePage() {
                     {turn.status === "error" && turn.images.length > 0 ? (
                       <div className="flex flex-col gap-3 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800 sm:flex-row sm:items-center sm:justify-between dark:bg-amber-950/30 dark:text-amber-100">
                         <span>{turn.error}</span>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={isWebTransferLimitReached}
-                          onClick={() =>
-                            void handleGenerateImage({
-                              conversation: selectedConversation,
-                              turn,
-                            })
-                          }
-                          className="h-9 shrink-0 disabled:opacity-60"
-                        >
-                          {isWebTransferLimitReached ? (
-                            <LoaderCircle className="size-4 animate-spin" />
-                          ) : (
-                            <RotateCcw className="size-4" />
-                          )}
-                          重试
-                        </Button>
+                        <div className="flex shrink-0 flex-wrap gap-2">
+                          {turn.queueRequestId || turn.responseId ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                void handleRecoverTurn(selectedConversation, turn)
+                              }
+                              className="h-9 disabled:opacity-60"
+                            >
+                              <RotateCcw className="size-4" />
+                              恢复状态
+                            </Button>
+                          ) : null}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={isWebTransferLimitReached}
+                            onClick={() =>
+                              void handleGenerateImage({
+                                conversation: selectedConversation,
+                                turn,
+                              })
+                            }
+                            className="h-9 disabled:opacity-60"
+                          >
+                            {isWebTransferLimitReached ? (
+                              <LoaderCircle className="size-4 animate-spin" />
+                            ) : (
+                              <RotateCcw className="size-4" />
+                            )}
+                            重试
+                          </Button>
+                        </div>
                       </div>
                     ) : null}
                   </motion.div>
