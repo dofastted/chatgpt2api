@@ -60,7 +60,6 @@ export function Toaster() {
 
   useEffect(() => {
     listeners.add(setItems);
-    setItems([...currentToasts]);
     return () => {
       listeners.delete(setItems);
     };
