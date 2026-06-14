@@ -1,22 +1,12 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono, Space_Grotesk } from "next/font/google";
+import { Inter } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
 
-const headingFont = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-heading",
-});
-
 const bodyFont = Inter({
   subsets: ["latin"],
   variable: "--font-body",
-});
-
-const monoFont = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
@@ -32,7 +22,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <body
-        className={`${headingFont.variable} ${bodyFont.variable} ${monoFont.variable} app-shell antialiased`}
+        className={`${bodyFont.variable} app-shell antialiased`}
         style={{
           fontFamily:
             'var(--font-body),"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif',
