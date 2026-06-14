@@ -75,7 +75,7 @@
 - 请求记录由 `services/image_request_log_service.py` 写入 SQLite。它只保存 prompt 前 80 字、prompt sha256、Bearer Token 哈希、账号哈希、耗时、扣费、错误和路线摘要，不保存完整 prompt、原始请求体或 base64 图片。
 - 请求先进入 `services/image_queue_service.py` 的进程内队列。等待中的请求按全局 FIFO 排；同一个 Bearer Token 默认最多保留 10 个活动请求，活动数按 `waiting + running` 计算；全局等待数超过 2000 时直接拒绝。
 - 队列启动运行前还有全局 60 次/60 秒限制。超过这个速率的生图请求继续停在等待态，直到滑动窗口释放名额；健康检查、登录、额度和上传接口不计入。
-- 进入运行阶段后，真正的并发上限由 `services/account_service.py` 的账号槽位控制。单个账号最多同时跑 2 个生图；如果没有空闲槽位，请求会保持在 `assigning_account` 状态继续等。
+- 进入运行阶段后，真正的并发上限由 `services/account_service.py` 的账号槽位控制。单个账号最多同时跑 1 个生图；10 个可用账号可同时匹配 10 个请求，每个请求占用不同账号。如果没有空闲槽位，请求会保持在 `assigning_account` 状态继续等。
 - 前端会给每次请求附带 `X-Image-Queue-Request-Id`，再通过 `GET /api/image-queue/me` 查询当前 Bearer Token 的等待数、运行数、活动数、当前请求位置和状态。查询时服务端同时清理超时的内存队列 ticket 和 SQLite 里的活动请求记录；如果内存队列已经丢失，但 SQLite 记录已进入 `failed/rejected/finished`，接口仍会返回这条 `request`。当前 Bearer Token 是记录 owner 时，`request` 会带 `response_id`、`requested_count`、`succeeded_count`、`failed_count`、`http_status` 和耗时字段。前端看到 pending turn 对应的 `finished` 后，会用 `response_id` 读取 `GET /v1/responses/{response_id}`，再按普通完成结果把每个图片槽位收尾；恢复失败或缺少 `response_id` 时，剩余 loading 槽位会转成错误态。
 - `wait_for_turn` 通过后，请求记录进入 `assigning_account`；`BackendService.generate_with_pool` 选到账户并开始上游调用时进入 `running`，同时记录账号哈希、账号类型、内部路线和尝试次数。
 - JSON 请求成功返回前写 `finished`；SSE 请求在最终事件和 `data: [DONE]` 发完后写 `finished`。异常路径写 `failed`，队列或活动数超限写 `rejected`。

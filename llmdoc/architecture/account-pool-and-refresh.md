@@ -22,7 +22,7 @@
 额度与状态：
 
 - 图像额度和恢复时间从 `limits_progress` 提取，逻辑在 `services/account_service.py:139`。
-- 管理面板汇总剩余额度时只累加 `quotaKnown=true` 的账号；待刷新账号单独计数，不把未知额度算成真实 0，页面逻辑在 `web/src/app/accounts/page.tsx`。
+- 管理面板只展示账号资产汇总，不展示 token、邮箱、恢复时间等明细；汇总时只把 `status=正常`、`quotaKnown=true` 且 `quota>0` 的账号计入“可用”和“可使用生图次数”，待刷新或不可用账号计入“无效”，页面逻辑在 `web/src/app/accounts/page.tsx`。
 - 成功生成后会更新 `success`、`last_used_at` 并扣减 `quota`，见 `services/account_service.py:329`。
 - `quota` 降到 0 时状态切到“限流”；刷新后恢复额度则会回到“正常”。
 - 如果旧账号已经是“异常”，后面再次导入同一个 token 的 bare auth JSON，会回到“正常 + needs_refresh=true”。它仍需管理员手动刷新后才会重新进入可用池。

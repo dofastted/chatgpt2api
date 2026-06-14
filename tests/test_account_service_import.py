@@ -170,7 +170,7 @@ class AccountServiceImportTests(unittest.TestCase):
         self.assertIsNotNone(updated)
         self.assertEqual(service.next_token(), "token-1")
 
-    def test_single_account_slot_limit_is_two(self) -> None:
+    def test_single_account_slot_limit_is_one(self) -> None:
         service = self.make_service(
             [
                 {
@@ -180,16 +180,27 @@ class AccountServiceImportTests(unittest.TestCase):
                     "status": "正常",
                     "quota": 5,
                     "needs_refresh": False,
-                }
+                },
+                {
+                    "access_token": "token-2",
+                    "category": "普通",
+                    "type": "Plus",
+                    "status": "正常",
+                    "quota": 5,
+                    "needs_refresh": False,
+                },
             ]
         )
 
-        self.assertEqual(service.try_acquire_token_slot(), "token-1")
-        self.assertEqual(service.try_acquire_token_slot(), "token-1")
+        first_token = service.try_acquire_token_slot()
+        second_token = service.try_acquire_token_slot()
+        self.assertEqual({first_token, second_token}, {"token-1", "token-2"})
         self.assertIsNone(service.try_acquire_token_slot())
+        self.assertIsNone(service.acquire_token_slot(timeout_seconds=0))
 
-        service.release_token_slot("token-1")
-        self.assertEqual(service.try_acquire_token_slot(), "token-1")
+        assert first_token is not None
+        service.release_token_slot(first_token)
+        self.assertEqual(service.try_acquire_token_slot(), first_token)
 
     def test_input_image_token_slot_prefers_recent_successful_accounts(self) -> None:
         service = self.make_service(

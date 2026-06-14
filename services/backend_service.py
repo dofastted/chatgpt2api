@@ -74,6 +74,18 @@ class BackendService:
         *,
         prefer_input_image: bool = False,
     ) -> str:
+        if hasattr(self.account_service, "acquire_token_slot"):
+            try:
+                token = self.account_service.acquire_token_slot(
+                    excluded_tokens=excluded_tokens,
+                    prefer_input_image=prefer_input_image,
+                    timeout_seconds=config.image_generation_timeout_seconds,
+                )
+            except TypeError:
+                token = self.account_service.acquire_token_slot(excluded_tokens=excluded_tokens)
+            if token:
+                return token
+            raise HTTPException(status_code=503, detail={"error": "No available account slots found"})
         if hasattr(self.account_service, "try_acquire_token_slot"):
             try:
                 token = self.account_service.try_acquire_token_slot(
@@ -84,6 +96,7 @@ class BackendService:
                 token = self.account_service.try_acquire_token_slot(excluded_tokens=excluded_tokens)
             if token:
                 return token
+            raise HTTPException(status_code=503, detail={"error": "No available account slots found"})
         try:
             try:
                 return self.account_service.next_token(

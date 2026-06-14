@@ -148,29 +148,25 @@ const statusMeta: Record<
   禁用: { icon: Ban, badge: "secondary" },
 };
 
-const metricCards = [
-  { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
+const accountAssetCards = [
   {
-    key: "active",
-    label: "正常账户",
+    key: "available",
+    label: "可用",
     color: "text-emerald-600",
     icon: CheckCircle2,
   },
   {
-    key: "limited",
-    label: "限流账户",
-    color: "text-orange-500",
-    icon: CircleAlert,
-  },
-  {
-    key: "abnormal",
-    label: "异常账户",
+    key: "invalid",
+    label: "无效",
     color: "text-rose-500",
     icon: CircleOff,
   },
-  { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
-  { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
-  { key: "pending", label: "待刷新", color: "text-amber-500", icon: RefreshCw },
+  {
+    key: "quota",
+    label: "可使用生图次数",
+    color: "text-blue-500",
+    icon: Images,
+  },
 ] as const;
 
 const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
@@ -247,14 +243,25 @@ function formatRestoreAt(value?: string | null) {
   return { absolute, relative };
 }
 
-function formatQuotaSummary(accounts: Account[]) {
-  return formatCompact(
-    accounts.reduce(
-      (sum, account) =>
-        isAccountQuotaKnown(account) ? sum + Math.max(0, account.quota) : sum,
-      0,
-    ),
+function countUsableImageQuota(accounts: Account[]) {
+  return accounts.reduce(
+    (sum, account) =>
+      isUsableImageAccount(account) ? sum + Math.max(0, account.quota) : sum,
+    0,
   );
+}
+
+function isUsableImageAccount(account: Account) {
+  return (
+    account.status === "正常" &&
+    isAccountQuotaKnown(account) &&
+    Math.max(0, account.quota) > 0
+  );
+}
+
+function formatPanelCount(value: number) {
+  const normalized = Math.max(0, Math.floor(value));
+  return normalized < 100 ? String(normalized).padStart(2, "0") : String(normalized);
 }
 
 function formatUserKeyQuotaSummary(userKeys: UserKey[]) {
@@ -857,15 +864,15 @@ export default function AccountsPage() {
   };
 
   const summary = useMemo(() => {
-    const total = accounts.length;
-    const active = accounts.filter((item) => item.status === "正常").length;
-    const limited = accounts.filter((item) => item.status === "限流").length;
-    const abnormal = accounts.filter((item) => item.status === "异常").length;
-    const disabled = accounts.filter((item) => item.status === "禁用").length;
-    const pending = accounts.filter((item) => !isAccountQuotaKnown(item)).length;
-    const quota = formatQuotaSummary(accounts);
+    const available = accounts.filter(isUsableImageAccount).length;
+    const invalid = Math.max(0, accounts.length - available);
+    const quota = countUsableImageQuota(accounts);
 
-    return { total, active, limited, abnormal, disabled, quota, pending };
+    return {
+      available: formatPanelCount(available),
+      invalid: formatPanelCount(invalid),
+      quota: formatPanelCount(quota),
+    };
   }, [accounts]);
 
   const selectedTokens = useMemo(() => {
@@ -2400,7 +2407,7 @@ export default function AccountsPage() {
                 <RefreshCw
                   className={cn("size-4", isLoading ? "animate-spin" : "")}
                 />
-                刷新
+                重新加载面板
               </Button>
               <Button
                 variant="outline"
@@ -2421,560 +2428,113 @@ export default function AccountsPage() {
                 <RefreshCw
                   className={cn("size-4", isRefreshing ? "animate-spin" : "")}
                 />
-                一键刷新所有账号信息和额度
+                手动刷新额度
               </Button>
               <Button
                 className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
                 onClick={() => setOpen(true)}
               >
                 <Plus className="size-4" />
-                新增
-              </Button>
-              <Button
-                variant="outline"
-                className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-                onClick={() => downloadTokens(accounts)}
-                disabled={accounts.length === 0}
-              >
-                <Download className="size-4" />
-                导出全部 Token
+                导入账号
               </Button>
             </div>
           </section>
 
           <section className="minimal-fade-soft space-y-3 [animation-delay:120ms]">
-            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-7">
-              {metricCards.map((item, index) => {
-                const Icon = item.icon;
-                const value = summary[item.key];
-                return (
-                  <Card
-                    key={item.key}
-                    className={cn(
-                      "minimal-fade-soft minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm",
-                      index === 0
-                        ? "[animation-delay:80ms]"
-                        : index === 1
-                          ? "[animation-delay:120ms]"
-                          : index === 2
-                            ? "[animation-delay:160ms]"
-                            : index === 3
-                              ? "[animation-delay:200ms]"
-                              : index === 4
-                                ? "[animation-delay:240ms]"
-                                : "[animation-delay:280ms]",
-                    )}
-                  >
-                    <CardContent className="p-4">
-                      <div className="mb-4 flex items-start justify-between">
-                        <span className="text-xs font-medium text-stone-400">
-                          {item.label}
-                        </span>
-                        <Icon className="size-4 text-stone-400" />
-                      </div>
-                      <div
-                        className={cn(
-                          "text-[1.75rem] font-semibold tracking-tight",
-                          item.color,
-                        )}
-                      >
-                        <span
-                          className={
-                            typeof value === "number" ? "" : "text-[1.1rem]"
-                          }
-                        >
-                          {typeof value === "number"
-                            ? formatCompact(value)
-                            : value}
-                        </span>
-                      </div>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="minimal-fade-soft grid gap-4 xl:grid-cols-[minmax(0,1.8fr)_380px] [animation-delay:180ms]">
-            <div className="space-y-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex items-center gap-3">
-                  <h2 className="text-lg font-semibold tracking-tight">
-                    账户列表
-                  </h2>
+            <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <CardContent className="space-y-4 p-5">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+                      Account Assets
+                    </div>
+                    <h3 className="text-xl font-semibold tracking-tight">
+                      账号资产面板
+                    </h3>
+                    <p className="text-sm leading-6 text-stone-500">
+                      只显示汇总，不展示 token、邮箱和恢复时间等账号明细。页面不会自动刷新远端账号信息。
+                    </p>
+                  </div>
                   <Badge
                     variant="secondary"
-                    className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700"
+                    className="w-fit rounded-lg bg-stone-100 px-3 py-1 text-stone-600"
                   >
-                    {filteredAccounts.length}
+                    手动刷新
                   </Badge>
                 </div>
 
-                <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-                  <div className="relative min-w-[260px]">
-                    <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
-                    <Input
-                      value={query}
-                      onChange={(event) => {
-                        setQuery(event.target.value);
-                        setPage(1);
-                      }}
-                      placeholder="搜索邮箱"
-                      className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
-                    />
-                  </div>
-                  <Select
-                    value={categoryFilter}
-                    onValueChange={(value) => {
-                      setCategoryFilter(value as AccountCategory | "all");
-                      setPage(1);
-                    }}
-                  >
-                    <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accountCategoryOptions.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Select
-                    value={typeFilter}
-                    onValueChange={(value) => {
-                      setTypeFilter(value as AccountType | "all");
-                      setPage(1);
-                    }}
-                  >
-                    <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accountTypeOptions.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Select
-                    value={statusFilter}
-                    onValueChange={(value) => {
-                      setStatusFilter(value as AccountStatus | "all");
-                      setPage(1);
-                    }}
-                  >
-                    <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {accountStatusOptions.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              {isLoading && accounts.length === 0 ? (
-                <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
-                  <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                    <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                      <LoaderCircle className="size-5 animate-spin" />
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-stone-700">
-                        正在加载账户
-                      </p>
-                      <p className="text-sm text-stone-500">
-                        从后端同步账号列表和状态。
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : null}
-
-              <Card
-                className={cn(
-                  "minimal-surface-hover overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
-                  isLoading && accounts.length === 0 ? "hidden" : "",
-                )}
-              >
-                <CardContent className="space-y-0 p-0">
-                  <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
-                      <Button
-                        variant="ghost"
-                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                        onClick={() => selectCurrentPageAccounts()}
-                        disabled={currentRows.length === 0}
-                      >
-                        <CheckCircle2 className="size-4" />
-                        选中本页
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                        onClick={() => selectAllFilteredAccounts()}
-                        disabled={filteredAccounts.length === 0}
-                      >
-                        <Database className="size-4" />
-                        选中全部筛选结果
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                        onClick={() => clearSelectedAccounts()}
-                        disabled={selectedIds.length === 0}
-                      >
-                        <CircleOff className="size-4" />
-                        清空选择
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
-                        onClick={() =>
-                          void handleRefreshAccounts(selectedTokens)
-                        }
-                        disabled={selectedTokens.length === 0 || isRefreshing}
-                      >
-                        {isRefreshing ? (
-                          <LoaderCircle className="size-4 animate-spin" />
-                        ) : (
-                          <RefreshCw className="size-4" />
+                <div className="grid gap-3 md:grid-cols-3">
+                  {accountAssetCards.map((item, index) => {
+                    const Icon = item.icon;
+                    const value = summary[item.key];
+                    return (
+                      <div
+                        key={item.key}
+                        className={cn(
+                          "minimal-fade-soft rounded-2xl border border-stone-100 bg-stone-50/80 p-4",
+                          index === 0
+                            ? "[animation-delay:80ms]"
+                            : index === 1
+                              ? "[animation-delay:120ms]"
+                              : "[animation-delay:160ms]",
                         )}
-                        刷新选中账号信息和额度
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                        onClick={() => void handleDeleteTokens(abnormalTokens)}
-                        disabled={abnormalTokens.length === 0 || isDeleting}
                       >
-                        {isDeleting ? (
-                          <LoaderCircle className="size-4 animate-spin" />
-                        ) : (
-                          <Trash2 className="size-4" />
-                        )}
-                        移除异常账号
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                        onClick={() => void handleDeleteTokens(selectedTokens)}
-                        disabled={selectedTokens.length === 0 || isDeleting}
-                      >
-                        {isDeleting ? (
-                          <LoaderCircle className="size-4 animate-spin" />
-                        ) : (
-                          <Trash2 className="size-4" />
-                        )}
-                        删除所选
-                      </Button>
-                      {selectedIds.length > 0 ? (
-                        <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
-                          已选择 {selectedIds.length} 项
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[920px] text-left">
-                      <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
-                        <tr>
-                          <th className="w-12 px-4 py-3">
-                            <Checkbox
-                              checked={allCurrentSelected}
-                              onCheckedChange={(checked) =>
-                                checked
-                                  ? selectCurrentPageAccounts()
-                                  : setSelectedIds((prev) =>
-                                      prev.filter(
-                                        (id) =>
-                                          !currentRows.some((row) => row.id === id),
-                                      ),
-                                    )
-                              }
-                            />
-                          </th>
-                          <th className="w-56 px-4 py-3">token</th>
-                          <th className="w-24 px-4 py-3">来源</th>
-                          <th className="w-28 px-4 py-3">类型</th>
-                          <th className="w-24 px-4 py-3">状态</th>
-                          <th className="w-56 px-4 py-3">账号信息</th>
-                          <th className="w-24 px-4 py-3">额度</th>
-                          <th className="w-40 px-4 py-3">恢复时间</th>
-                          <th className="w-18 px-4 py-3">成功</th>
-                          <th className="w-18 px-4 py-3">失败</th>
-                          <th className="w-24 px-4 py-3">操作</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {currentRows.map((account) => {
-                          const status = statusMeta[account.status];
-                          const StatusIcon = status.icon;
-
-                          return (
-                            <tr
-                              key={account.id}
-                              className="minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
-                            >
-                              <td className="px-4 py-3">
-                                <Checkbox
-                                  checked={selectedIds.includes(account.id)}
-                                  onCheckedChange={(checked) => {
-                                    setSelectedIds((prev) =>
-                                      checked
-                                        ? Array.from(
-                                            new Set([...prev, account.id]),
-                                          )
-                                        : prev.filter(
-                                            (item) => item !== account.id,
-                                          ),
-                                    );
-                                  }}
-                                />
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-medium tracking-tight text-stone-700">
-                                    {maskToken(account.access_token)}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                                    onClick={() => {
-                                      void navigator.clipboard.writeText(
-                                        account.access_token,
-                                      );
-                                      toast.success("token 已复制");
-                                    }}
-                                  >
-                                    <Copy className="size-4" />
-                                  </button>
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant={
-                                    account.category === "捐赠"
-                                      ? "info"
-                                      : "secondary"
-                                  }
-                                  className="rounded-md"
-                                >
-                                  {account.category}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant="secondary"
-                                  className="rounded-md bg-stone-100 text-stone-700"
-                                >
-                                  {account.type}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant={status.badge}
-                                  className="inline-flex items-center gap-1 rounded-md px-2 py-1"
-                                >
-                                  <StatusIcon className="size-3.5" />
-                                  {account.status}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="text-xs leading-5 text-stone-500">
-                                  {account.email ?? "—"}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant={
-                                    isAccountQuotaKnown(account)
-                                      ? "info"
-                                      : "warning"
-                                  }
-                                  className="rounded-md"
-                                >
-                                  {isAccountQuotaKnown(account)
-                                    ? formatQuota(account.quota)
-                                    : "待刷新"}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                                {(() => {
-                                  const restore = formatRestoreAt(
-                                    account.restoreAt,
-                                  );
-                                  return (
-                                    <div className="space-y-0.5">
-                                      {restore.relative ? (
-                                        <div className="font-medium text-stone-700">
-                                          {restore.relative}
-                                        </div>
-                                      ) : null}
-                                      <div>{restore.absolute}</div>
-                                    </div>
-                                  );
-                                })()}
-                              </td>
-                              <td className="px-4 py-3 text-stone-500">
-                                {account.success}
-                              </td>
-                              <td className="px-4 py-3 text-stone-500">
-                                {account.fail}
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="flex items-center gap-1 text-stone-400">
-                                  <button
-                                    type="button"
-                                    className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                                    onClick={() => openEditDialog(account)}
-                                    disabled={isUpdating}
-                                  >
-                                    <Pencil className="size-4" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                                    onClick={() =>
-                                      void handleRefreshAccounts([
-                                        account.access_token,
-                                      ])
-                                    }
-                                    disabled={isRefreshing}
-                                  >
-                                    <RefreshCw
-                                      className={cn(
-                                        "size-4",
-                                        isRefreshing ? "animate-spin" : "",
-                                      )}
-                                    />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                                    onClick={() =>
-                                      void handleDeleteTokens([
-                                        account.access_token,
-                                      ])
-                                    }
-                                    disabled={isDeleting}
-                                  >
-                                    <Trash2 className="size-4" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-
-                    {!isLoading && currentRows.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-                        <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
-                          <Search className="size-5" />
-                        </div>
-                        <div className="space-y-1">
-                          <p className="text-sm font-medium text-stone-700">
-                            没有匹配的账户
-                          </p>
-                          <p className="text-sm text-stone-500">
-                            调整筛选条件或搜索关键字后重试。
-                          </p>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="border-t border-stone-100 px-4 py-4">
-                    <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
-                      <div className="shrink-0 text-sm text-stone-500">
-                        显示第{" "}
-                        {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                        {Math.min(
-                          startIndex + Number(pageSize),
-                          filteredAccounts.length,
-                        )}{" "}
-                        条，共 {filteredAccounts.length} 条
-                      </div>
-
-                      <span className="shrink-0 text-sm leading-none text-stone-500">
-                        {safePage} / {pageCount} 页
-                      </span>
-                      <Select
-                        value={pageSize}
-                        onValueChange={(value) => {
-                          setPageSize(value);
-                          setPage(1);
-                        }}
-                      >
-                        <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="10">10 / 页</SelectItem>
-                          <SelectItem value="20">20 / 页</SelectItem>
-                          <SelectItem value="50">50 / 页</SelectItem>
-                          <SelectItem value="100">100 / 页</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                        disabled={safePage <= 1}
-                        onClick={() => setPage((prev) => Math.max(1, prev - 1))}
-                      >
-                        <ChevronLeft className="size-4" />
-                      </Button>
-                      {paginationItems.map((item, index) =>
-                        item === "..." ? (
-                          <span
-                            key={`ellipsis-${index}`}
-                            className="px-1 text-sm text-stone-400"
-                          >
-                            ...
+                        <div className="mb-4 flex items-start justify-between">
+                          <span className="text-xs font-medium text-stone-400">
+                            {item.label}
                           </span>
-                        ) : (
-                          <Button
-                            key={item}
-                            variant={item === safePage ? "default" : "outline"}
-                            className={cn(
-                              "h-10 min-w-10 shrink-0 rounded-lg px-3",
-                              item === safePage
-                                ? "bg-stone-950 text-white hover:bg-stone-800"
-                                : "border-stone-200 bg-white text-stone-700",
-                            )}
-                            onClick={() => setPage(item)}
-                          >
-                            {item}
-                          </Button>
-                        ),
-                      )}
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
-                        disabled={safePage >= pageCount}
-                        onClick={() =>
-                          setPage((prev) => Math.min(pageCount, prev + 1))
-                        }
-                      >
-                        <ChevronRight className="size-4" />
-                      </Button>
+                          <Icon className="size-4 text-stone-400" />
+                        </div>
+                        <div
+                          className={cn(
+                            "text-[2rem] font-semibold tracking-tight tabular-nums",
+                            item.color,
+                          )}
+                        >
+                          {value}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+
+          <section className="minimal-fade-soft grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px] [animation-delay:180ms]">
+            <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+              <CardContent className="space-y-4 p-5">
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+                    Dispatch
+                  </div>
+                  <h3 className="text-xl font-semibold tracking-tight">
+                    派发规则
+                  </h3>
+                  <p className="text-sm leading-6 text-stone-500">
+                    单一账号同一时间只跑 1 个生图进程。可用账号数就是可同时派发的账号槽位；10 个可用账号可同时匹配 10 个请求，每个请求占用不同账号。
+                  </p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-stone-100 bg-stone-50/80 p-4">
+                    <div className="text-xs font-medium tracking-[0.18em] text-stone-400 uppercase">
+                      单账号进程
+                    </div>
+                    <div className="mt-3 text-3xl font-semibold tracking-tight text-stone-900 tabular-nums">
+                      01
                     </div>
                   </div>
-                </CardContent>
-              </Card>
-            </div>
+                  <div className="rounded-2xl border border-stone-100 bg-stone-50/80 p-4">
+                    <div className="text-xs font-medium tracking-[0.18em] text-stone-400 uppercase">
+                      当前可派发槽位
+                    </div>
+                    <div className="mt-3 text-3xl font-semibold tracking-tight text-emerald-600 tabular-nums">
+                      {summary.available}
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
 
             <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
               <CardContent className="space-y-5 p-5">

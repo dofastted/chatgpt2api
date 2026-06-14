@@ -20,7 +20,7 @@ class AccountService:
     DEFAULT_CATEGORY = "普通"
     DONATION_CATEGORY = "捐赠"
     FAILURE_COOLDOWN_SECONDS = 180
-    MAX_INFLIGHT_PER_ACCOUNT = 2
+    MAX_INFLIGHT_PER_ACCOUNT = 1
 
     ACCOUNT_TYPE_MAP = {
         "free": "Free",
@@ -357,6 +357,7 @@ class AccountService:
         excluded_tokens: set[str] | None = None,
         *,
         prefer_input_image: bool = False,
+        require_capacity: bool = True,
     ) -> list[str]:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
         candidates: list[tuple[str, dict[str, Any]]] = []
@@ -366,7 +367,7 @@ class AccountService:
             token = self._clean_token(item.get("access_token"))
             if not token or token in excluded:
                 continue
-            if not self._has_account_capacity(int(self._inflight_counts.get(token) or 0)):
+            if require_capacity and not self._has_account_capacity(int(self._inflight_counts.get(token) or 0)):
                 continue
             candidates.append((token, item))
         if prefer_input_image:
@@ -388,6 +389,15 @@ class AccountService:
                 self._index += 1
             return access_token
 
+    def _reserve_token_slot_locked(self, tokens: list[str], *, prefer_input_image: bool = False) -> str:
+        if prefer_input_image:
+            access_token = tokens[0]
+        else:
+            access_token = tokens[self._index % len(tokens)]
+            self._index += 1
+        self._inflight_counts[access_token] = int(self._inflight_counts.get(access_token) or 0) + 1
+        return access_token
+
     def try_acquire_token_slot(
         self,
         excluded_tokens: set[str] | None = None,
@@ -401,13 +411,42 @@ class AccountService:
             )
             if not tokens:
                 return None
-            if prefer_input_image:
-                access_token = tokens[0]
-            else:
-                access_token = tokens[self._index % len(tokens)]
-                self._index += 1
-            self._inflight_counts[access_token] = int(self._inflight_counts.get(access_token) or 0) + 1
-            return access_token
+            return self._reserve_token_slot_locked(tokens, prefer_input_image=prefer_input_image)
+
+    def acquire_token_slot(
+        self,
+        excluded_tokens: set[str] | None = None,
+        *,
+        prefer_input_image: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> str | None:
+        deadline = None
+        if timeout_seconds is not None:
+            deadline = datetime.now() + timedelta(seconds=max(0.0, float(timeout_seconds)))
+        with self._slot_condition:
+            while True:
+                tokens = self._candidate_tokens_locked(
+                    excluded_tokens=excluded_tokens,
+                    prefer_input_image=prefer_input_image,
+                )
+                if tokens:
+                    return self._reserve_token_slot_locked(tokens, prefer_input_image=prefer_input_image)
+                has_waitable_account = bool(
+                    self._candidate_tokens_locked(
+                        excluded_tokens=excluded_tokens,
+                        prefer_input_image=prefer_input_image,
+                        require_capacity=False,
+                    )
+                )
+                if not has_waitable_account:
+                    return None
+                if deadline is not None:
+                    remaining = (deadline - datetime.now()).total_seconds()
+                    if remaining <= 0:
+                        return None
+                    self._slot_condition.wait(timeout=min(1.0, remaining))
+                    continue
+                self._slot_condition.wait(timeout=1.0)
 
     def release_token_slot(self, access_token: str) -> None:
         normalized_access_token = self._clean_token(access_token)
