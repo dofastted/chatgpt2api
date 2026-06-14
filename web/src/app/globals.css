@@ -45,6 +45,7 @@
 
 :root {
   --radius: 0.75rem;
+  --font-body: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --background: #f7f7f5;
   --foreground: #202123;
   --card: #ffffff;

@@ -1,13 +1,7 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import { Toaster } from "@/components/ui/toast";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
-
-const bodyFont = Inter({
-  subsets: ["latin"],
-  variable: "--font-body",
-});
 
 export const metadata: Metadata = {
   title: "image-2",
@@ -22,7 +16,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <body
-        className={`${bodyFont.variable} app-shell antialiased`}
+        className="app-shell antialiased"
         style={{
           fontFamily:
             'var(--font-body),"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif',
