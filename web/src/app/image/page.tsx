@@ -10,7 +10,6 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -716,7 +715,6 @@ function ImageInspirationRail({
   imageDimensions,
   isHidden,
   isLoading,
-  shouldReduceMotion,
   onHide,
   onOpenPreview,
 }: {
@@ -724,7 +722,6 @@ function ImageInspirationRail({
   imageDimensions: Record<string, GalleryImageDimension>;
   isHidden: boolean;
   isLoading: boolean;
-  shouldReduceMotion: boolean;
   onHide: () => void;
   onOpenPreview: (item: GallerySeedItem) => void;
 }) {
@@ -738,9 +735,6 @@ function ImageInspirationRail({
   const autoScrollRemainderRef = useRef(0);
   const resumeTimerRef = useRef<number | null>(null);
   const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
-  const transition = shouldReduceMotion
-    ? { duration: 0 }
-    : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
   const railColumns = useMemo(() => {
     const columns: GallerySeedItem[][] = [[], []];
     const columnHeights = [0, 0];
@@ -840,15 +834,16 @@ function ImageInspirationRail({
   }, [isAutoScrollPaused, isHidden, isLoading, railItems.length]);
 
   return (
-    <motion.aside
+    <aside
       className="image-chat-gallery-rail hidden h-full min-w-0 shrink-0 overflow-hidden border-l border-border bg-background lg:flex"
-      initial={false}
-      animate={{
+      style={{
         width: isHidden ? 0 : 286,
         opacity: isHidden ? 0 : 1,
-        x: isHidden ? 16 : 0,
+        transform: `translateX(${isHidden ? 16 : 0}px)`,
+        transition:
+          "width 500ms cubic-bezier(0.22, 1, 0.36, 1), opacity 500ms cubic-bezier(0.22, 1, 0.36, 1), transform 500ms cubic-bezier(0.22, 1, 0.36, 1)",
+        pointerEvents: isHidden ? "none" : "auto",
       }}
-      transition={transition}
       aria-hidden={isHidden}
     >
       <div className="flex h-full w-[286px] shrink-0 flex-col">
@@ -941,7 +936,7 @@ function ImageInspirationRail({
           )}
         </div>
       </div>
-    </motion.aside>
+    </aside>
   );
 }
 
@@ -1254,11 +1249,25 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const syncPreference = () => setPrefersReducedMotion(mediaQuery.matches);
+    syncPreference();
+    mediaQuery.addEventListener("change", syncPreference);
+    return () => mediaQuery.removeEventListener("change", syncPreference);
+  }, []);
+
+  return prefersReducedMotion;
+}
+
 export default function ImagePage() {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
   const transferOwnerIdRef = useRef(createImageTransferOwnerId());
-  const shouldReduceMotion = useReducedMotion();
+  const shouldReduceMotion = usePrefersReducedMotion();
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("auto");
@@ -1713,12 +1722,6 @@ export default function ImagePage() {
             : inputImage
               ? `已附加参考图，${formatImagePreferenceLabel(effectiveImagePreference)}`
               : `${formatImagePreferenceLabel(effectiveImagePreference)}，Enter 发送`;
-  const sidebarTransition = shouldReduceMotion
-    ? { duration: 0 }
-    : { duration: 0.5, ease: [0.22, 1, 0.36, 1] as const };
-  const listTransition = shouldReduceMotion
-    ? { duration: 0 }
-    : { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const };
   const isSidebarVisible = isDesktopViewport
     ? !isSidebarCollapsed
     : isSidebarOpen;
@@ -3062,33 +3065,30 @@ export default function ImagePage() {
   return (
     <>
       <section className="minimal-page-shell minimal-image-shell mx-auto flex h-[calc(100dvh-4.75rem)] min-h-[520px] w-full max-w-[1440px] overflow-hidden rounded-none border border-transparent bg-background lg:rounded-xl lg:border-border">
-        <AnimatePresence>
-          {isSidebarOpen ? (
-            <motion.button
-              type="button"
-              className="fixed inset-0 z-40 bg-black/35 lg:hidden"
-              aria-label="关闭侧栏"
-              onClick={() => setIsSidebarOpen(false)}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: shouldReduceMotion ? 0 : 0.18 }}
-            />
-          ) : null}
-        </AnimatePresence>
+        {isSidebarOpen ? (
+          <button
+            type="button"
+            className="fixed inset-0 z-40 bg-black/35 lg:hidden"
+            aria-label="关闭侧栏"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+        ) : null}
 
-        <motion.aside
-          initial={false}
-          animate={{
+        <aside
+          style={{
             width: isDesktopViewport
               ? isSidebarCollapsed
                 ? 0
                 : 280
               : "min(88vw, 320px)",
             opacity: isSidebarVisible ? 1 : 0,
-            x: isDesktopViewport || isSidebarOpen ? 0 : "-100%",
+            transform:
+              isDesktopViewport || isSidebarOpen
+                ? "translateX(0)"
+                : "translateX(-100%)",
+            transition:
+              "width 500ms cubic-bezier(0.22, 1, 0.36, 1), opacity 500ms cubic-bezier(0.22, 1, 0.36, 1), transform 500ms cubic-bezier(0.22, 1, 0.36, 1)",
           }}
-          transition={sidebarTransition}
           className={cn(
             "image-chat-sidebar fixed inset-y-0 left-0 z-50 flex min-w-0 shrink-0 flex-col overflow-hidden border-r border-sidebar-border lg:static lg:z-auto lg:h-full",
             isSidebarVisible ? "pointer-events-auto" : "pointer-events-none",
@@ -3133,16 +3133,8 @@ export default function ImagePage() {
                     const isLoadingDetail =
                       loadingConversationDetailId === conversation.id;
                     return (
-                      <motion.div
+                      <div
                         key={conversation.id}
-                        initial={
-                          shouldReduceMotion ? false : { opacity: 0, y: 8 }
-                        }
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={
-                          shouldReduceMotion ? undefined : { opacity: 0, y: -6 }
-                        }
-                        transition={listTransition}
                         className={cn(
                           "group relative w-full rounded-lg border px-2.5 py-2 text-left transition",
                           active
@@ -3187,7 +3179,7 @@ export default function ImagePage() {
                         >
                           <Trash2 className="size-3.5" />
                         </button>
-                      </motion.div>
+                      </div>
                     );
                   })}
                   <div className="pt-2">
@@ -3230,7 +3222,7 @@ export default function ImagePage() {
               </div>
             </div>
           </div>
-        </motion.aside>
+        </aside>
 
         <div className="image-chat-main flex min-w-0 flex-1 flex-col">
           <div className="flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-2 sm:px-4">
@@ -3336,13 +3328,7 @@ export default function ImagePage() {
             ) : (
               <div className="mx-auto flex w-full max-w-[900px] flex-col gap-6">
                 {getConversationTurns(selectedConversation).map((turn) => (
-                  <motion.div
-                    key={turn.id}
-                    className="space-y-4"
-                    initial={shouldReduceMotion ? false : { opacity: 0, y: 16 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={listTransition}
-                  >
+                  <div key={turn.id} className="space-y-4">
                     <div className="flex justify-end">
                       <div className="flex w-full max-w-full flex-col items-end gap-3 sm:max-w-[80%]">
                         {turn.inputImage ? (
@@ -3481,18 +3467,7 @@ export default function ImagePage() {
                               waterfallSourceImageId,
                             );
                           return (
-                            <motion.div
-                              key={image.id}
-                              layout
-                              initial={
-                                shouldReduceMotion
-                                  ? false
-                                  : { opacity: 0, y: 14, scale: 0.98 }
-                              }
-                              animate={{ opacity: 1, y: 0, scale: 1 }}
-                              transition={listTransition}
-                              className="overflow-hidden rounded-xl"
-                            >
+                            <div key={image.id} className="overflow-hidden rounded-xl">
                               {isSuccessImage && image.b64_json ? (
                                 <>
                                   <button
@@ -3574,7 +3549,7 @@ export default function ImagePage() {
                                   </div>
                                 </div>
                               )}
-                            </motion.div>
+                            </div>
                           );
                         })}
                       </div>
@@ -3621,18 +3596,15 @@ export default function ImagePage() {
                         </div>
                       </div>
                     ) : null}
-                  </motion.div>
+                  </div>
                 ))}
               </div>
             )}
           </div>
 
           <div className="shrink-0 border-t border-border bg-background/95 px-3 py-3 sm:px-6">
-            <motion.div
+            <div
               className="image-composer mx-auto max-h-[42dvh] w-full max-w-[900px] overflow-y-auto rounded-[28px] border px-3 pt-3 pb-2 transition focus-within:border-ring focus-within:ring-4 focus-within:ring-ring/15 sm:px-4 sm:pt-4 sm:pb-3"
-              initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={listTransition}
               onClick={() => {
                 textareaRef.current?.focus();
               }}
@@ -3848,7 +3820,7 @@ export default function ImagePage() {
               >
                 {composerStatusText}
               </div>
-            </motion.div>
+            </div>
           </div>
         </div>
 
@@ -3857,7 +3829,6 @@ export default function ImagePage() {
           imageDimensions={galleryImageDimensions}
           isHidden={isInspirationRailHidden}
           isLoading={isGalleryDataLoading}
-          shouldReduceMotion={Boolean(shouldReduceMotion)}
           onHide={() => setIsInspirationRailHidden(true)}
           onOpenPreview={(item) => {
             setGalleryPreviewItem(item);
