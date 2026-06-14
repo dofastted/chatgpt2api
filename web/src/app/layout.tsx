@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
-import { Toaster } from "sonner";
+import { Toaster } from "@/components/ui/toast";
 import "./globals.css";
 import { TopNav } from "@/components/top-nav";
 
@@ -50,7 +50,7 @@ export default function RootLayout({
             })();`,
           }}
         />
-        <Toaster position="top-center" richColors />
+        <Toaster />
         <main className="app-shell__main min-h-screen px-4 py-4 sm:px-6 lg:px-8">
           <div className="mx-auto flex max-w-[1440px] flex-col gap-5">
             <TopNav />

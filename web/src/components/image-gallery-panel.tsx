@@ -5,7 +5,7 @@ import { Copy, Expand, LoaderCircle, Plus, Search, Sparkles, Trash2 } from "luci
 import NextImage from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { toast } from "sonner";
+import { toast } from "@/components/ui/toast";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
