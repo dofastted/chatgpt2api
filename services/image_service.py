@@ -284,6 +284,8 @@ def is_token_invalid_error(message: str) -> bool:
         or "token_revoked" in text
         or "authentication token has been invalidated" in text
         or "invalidated oauth token" in text
+        or "token_expired" in text
+        or "authentication token is expired" in text
     )
 
 

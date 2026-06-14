@@ -12,7 +12,7 @@ from services.backend_service import BackendService
 from services.chat_image.account_import import normalize_account_carrier
 from services.chat_image.gateway import ImageGateway
 from services.chat_image.route_selector import select_image_route
-from services.image_service import ImageGenerationError
+from services.image_service import ImageGenerationError, is_token_invalid_error
 
 
 class FakeRouteAccountService:
@@ -95,6 +95,45 @@ class ChatImageMigrationTests(unittest.TestCase):
         self.assertEqual(account["type"], "Team")
         self.assertEqual(account["auth_source"], "single_json")
         self.assertNotIn("refresh_token", account["auth_data"])
+
+    def test_account_carrier_preserves_runtime_snapshot_fields(self) -> None:
+        accounts = normalize_account_carrier(
+            {
+                "accounts": [
+                    {
+                        "access_token": "access-1",
+                        "category": "捐赠",
+                        "status": "正常",
+                        "type": "Plus",
+                        "quota": 7,
+                        "limits_progress": [
+                            {
+                                "feature_name": "image_gen",
+                                "remaining": 7,
+                                "reset_after": "2026-04-23T10:00:00+00:00",
+                            }
+                        ],
+                        "restore_at": "2026-04-23T10:00:00+00:00",
+                        "needs_refresh": False,
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(len(accounts), 1)
+        account = accounts[0]
+        self.assertEqual(account["category"], "捐赠")
+        self.assertEqual(account["status"], "正常")
+        self.assertEqual(account["quota"], 7)
+        self.assertFalse(account["needs_refresh"])
+        self.assertEqual(account["limits_progress"][0]["remaining"], 7)
+
+    def test_token_expired_error_is_invalid_token(self) -> None:
+        self.assertTrue(
+            is_token_invalid_error(
+                '{"code":"token_expired","message":"Provided authentication token is expired."}'
+            )
+        )
 
     def test_sub2api_accounts_carrier_extracts_credentials_and_dedupes(self) -> None:
         accounts = normalize_account_carrier(
