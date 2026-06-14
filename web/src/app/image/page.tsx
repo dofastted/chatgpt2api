@@ -3508,8 +3508,8 @@ export default function ImagePage() {
                                     >
                                       <CirclePlus className="size-3.5" />
                                       {isAlreadyInWaterfall
-                                        ? "已在瀑布流"
-                                        : "添加到瀑布流"}
+                                        ? "已在本地画廊"
+                                        : "添加到本地画廊"}
                                     </Button>
                                   </div>
                                 </>
