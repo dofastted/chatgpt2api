@@ -44,6 +44,10 @@ class AccountServiceImportTests(unittest.TestCase):
         self.assertEqual(account["status"], "正常")
         self.assertEqual(account["quota"], 0)
         self.assertTrue(account["needs_refresh"])
+        public_item = result["items"][0]
+        self.assertEqual(public_item["quota"], 0)
+        self.assertFalse(public_item["quotaKnown"])
+        self.assertTrue(public_item["needsRefresh"])
         with self.assertRaises(RuntimeError):
             service.next_token()
 
@@ -137,6 +141,9 @@ class AccountServiceImportTests(unittest.TestCase):
         self.assertEqual(account["type"], "Plus")
         self.assertEqual(account["quota"], 7)
         self.assertFalse(account["needs_refresh"])
+        public_item = service.list_accounts()[0]
+        self.assertEqual(public_item["quota"], 7)
+        self.assertTrue(public_item["quotaKnown"])
 
     def test_failed_account_enters_cooldown_for_three_minutes(self) -> None:
         service = self.make_service(

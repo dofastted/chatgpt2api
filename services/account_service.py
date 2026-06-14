@@ -316,6 +316,7 @@ class AccountService:
                 "type": account.get("type") or "Free",
                 "status": account.get("status") or "正常",
                 "quota": account.get("quota") if account.get("quota") is not None else 0,
+                "quotaKnown": not bool(account.get("needs_refresh")),
                 "email": account.get("email"),
                 "user_id": account.get("user_id"),
                 "limits_progress": account.get("limits_progress") or [],

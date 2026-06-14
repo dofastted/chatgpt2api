@@ -170,6 +170,7 @@ const metricCards = [
   },
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
+  { key: "pending", label: "待刷新", color: "text-amber-500", icon: RefreshCw },
 ] as const;
 
 const DEFAULT_USER_KEY_PRICING: UserKeyPricing = {
@@ -218,6 +219,10 @@ function formatQuota(value: number) {
   return String(Math.max(0, value));
 }
 
+function isAccountQuotaKnown(account: Account) {
+  return account.quotaKnown !== false && !account.needsRefresh;
+}
+
 function formatRestoreAt(value?: string | null) {
   if (!value) {
     return { absolute: "—", relative: "" };
@@ -244,7 +249,11 @@ function formatRestoreAt(value?: string | null) {
 
 function formatQuotaSummary(accounts: Account[]) {
   return formatCompact(
-    accounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0),
+    accounts.reduce(
+      (sum, account) =>
+        isAccountQuotaKnown(account) ? sum + Math.max(0, account.quota) : sum,
+      0,
+    ),
   );
 }
 
@@ -853,9 +862,10 @@ export default function AccountsPage() {
     const limited = accounts.filter((item) => item.status === "限流").length;
     const abnormal = accounts.filter((item) => item.status === "异常").length;
     const disabled = accounts.filter((item) => item.status === "禁用").length;
+    const pending = accounts.filter((item) => !isAccountQuotaKnown(item)).length;
     const quota = formatQuotaSummary(accounts);
 
-    return { total, active, limited, abnormal, disabled, quota };
+    return { total, active, limited, abnormal, disabled, quota, pending };
   }, [accounts]);
 
   const selectedTokens = useMemo(() => {
@@ -2433,7 +2443,7 @@ export default function AccountsPage() {
           </section>
 
           <section className="minimal-fade-soft space-y-3 [animation-delay:120ms]">
-            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-7">
               {metricCards.map((item, index) => {
                 const Icon = item.icon;
                 const value = summary[item.key];
@@ -2784,8 +2794,17 @@ export default function AccountsPage() {
                                 </div>
                               </td>
                               <td className="px-4 py-3">
-                                <Badge variant="info" className="rounded-md">
-                                  {formatQuota(account.quota)}
+                                <Badge
+                                  variant={
+                                    isAccountQuotaKnown(account)
+                                      ? "info"
+                                      : "warning"
+                                  }
+                                  className="rounded-md"
+                                >
+                                  {isAccountQuotaKnown(account)
+                                    ? formatQuota(account.quota)
+                                    : "待刷新"}
                                 </Badge>
                               </td>
                               <td className="px-4 py-3 text-xs leading-5 text-stone-500">

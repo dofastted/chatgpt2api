@@ -67,6 +67,7 @@ export type Account = {
   type: AccountType;
   status: AccountStatus;
   quota: number;
+  quotaKnown?: boolean;
   email?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{

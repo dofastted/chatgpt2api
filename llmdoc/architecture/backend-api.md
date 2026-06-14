@@ -25,6 +25,7 @@
 - 本地上传：`/backend-api/files/process_upload_stream`、`/backend-api/my/recent/uploaded_images`、`/backend-api/files/{file_id}/content`，位置在 `services/api.py:859` 到 `services/api.py:913`。
 - 登录与会话：`/auth/login`、`/auth/session`，位置在 `services/api.py:283` 与 `services/api.py:288`。
 - 账号池：`/api/accounts`、`/api/accounts/refresh`、`/api/accounts/update`，位置在 `services/api.py:297`、`services/api.py:412`、`services/api.py:425`。
+- `GET /api/accounts` 的账号项会带 `quotaKnown`。它为 `false` 时表示上传账号仍待刷新，`quota=0` 只是路由保护值，不应当被当成确认的剩余额度。
 - 用户 key：`/api/user-keys`、`/api/user-keys/update`，位置在 `services/api.py:302`、`services/api.py:362`、`services/api.py:388`、`services/api.py:453`。
 - 兑换码：`/api/redeem-codes`、`/api/redeem-codes/redeem`，位置在 `services/api.py:302` 之后的管理路由段。
 - 额度接口：`/api/quota`，位置在 `services/api.py:399`。

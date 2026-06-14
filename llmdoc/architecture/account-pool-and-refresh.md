@@ -8,6 +8,7 @@
 - 所有账号最终都会规范成统一字段集合，见 `services/account_service.py:117`。
 - 账号现在带 `category`，只接受“普通”和“捐赠”两类，默认是“普通”，规范化逻辑也在 `services/account_service.py:117`。
 - 纯 token 或只带 auth 产物字段的 JSON 导入，会被标成 `needs_refresh=true`。这类账号在手动刷新前不参与图片选号；手动刷新成功后才会补全额度并清掉 `needs_refresh`，逻辑在 `services/account_service.py`。
+- 列表接口会额外返回 `quotaKnown`。`needs_refresh=true` 时 `quotaKnown=false`，表示额度未知，不等同于确认额度为 0，生成选号仍然必须等刷新完成。
 - 写回只走 `services/account_service.py` 的保存方法，最终进入 `services/sqlite_store.py`。不要绕开服务手动改结构。
 
 增删改查：
@@ -21,6 +22,7 @@
 额度与状态：
 
 - 图像额度和恢复时间从 `limits_progress` 提取，逻辑在 `services/account_service.py:139`。
+- 管理面板汇总剩余额度时只累加 `quotaKnown=true` 的账号；待刷新账号单独计数，不把未知额度算成真实 0，页面逻辑在 `web/src/app/accounts/page.tsx`。
 - 成功生成后会更新 `success`、`last_used_at` 并扣减 `quota`，见 `services/account_service.py:329`。
 - `quota` 降到 0 时状态切到“限流”；刷新后恢复额度则会回到“正常”。
 - 如果旧账号已经是“异常”，后面再次导入同一个 token 的 bare auth JSON，会回到“正常 + needs_refresh=true”。它仍需管理员手动刷新后才会重新进入可用池。
