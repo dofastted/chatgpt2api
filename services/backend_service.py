@@ -52,7 +52,10 @@ class BackendService:
             return None
         if input_images:
             return None
-        return "images"
+        # Legacy "images" conversation route is broken upstream (always times out
+        # with "no image returned"); falling back to it only wastes the poll
+        # timeout. Disable fallback so a responses failure rotates accounts fast.
+        return None
 
     @staticmethod
     def _is_responses_input_image_rejection(exc: ImageGenerationError, input_images: list[dict[str, str]] | None) -> bool:
