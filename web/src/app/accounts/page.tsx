@@ -243,20 +243,21 @@ function formatRestoreAt(value?: string | null) {
   return { absolute, relative };
 }
 
+// 「可使用生图次数」：只累计 AT/session 有效（状态正常）且额度已刷新的账号的剩余额度。
 function countUsableImageQuota(accounts: Account[]) {
   return accounts.reduce(
     (sum, account) =>
-      isUsableImageAccount(account) ? sum + Math.max(0, account.quota) : sum,
+      isUsableImageAccount(account) && isAccountQuotaKnown(account)
+        ? sum + Math.max(0, account.quota)
+        : sum,
     0,
   );
 }
 
+// 「可用」口径：只看 AT/session 是否有效（状态正常），不依赖额度是否已刷新。
+// 刚导入、尚未刷新额度的账号同样计入「可用」；额度数值由刷新单独填充。
 function isUsableImageAccount(account: Account) {
-  return (
-    account.status === "正常" &&
-    isAccountQuotaKnown(account) &&
-    Math.max(0, account.quota) > 0
-  );
+  return account.status === "正常";
 }
 
 function formatPanelCount(value: number) {
