@@ -11,5 +11,5 @@
 - `data-migration/` 只适合隔离验证和人工比较。不要用它直接覆盖主工作树 `data/`；先比较 `accounts.json`、`user_keys.json`、`redeem_codes.json`、`uploaded_images.json` 和 `uploaded_images/` 文件数，再合并缺失记录。
 - Dockerfile 先编前端，再装 Python 依赖，最后复制 `web/out` 到 `web_dist`，见 `Dockerfile:1` 到 `Dockerfile:29`。
 - 如果不走容器，`python main.py` 也能起服务，监听地址来自 `services/config.py:70` 和 `main.py:10`。
-- 当前项目还有一条仓库外入口 `img.fkcodex.com`。主线路已经迁到 VPS：远端宿主机 Nginx 当前反代 `127.0.0.1:3304`，live 容器是 `chatgpt2api-green-ecbb260`（镜像 `chatgpt2api:ecbb260`），旧 `chatgpt2api` 容器仍在 `127.0.0.1:3303` 作为回滚目标；live 容器在 `apps-interconnect` Docker 内网里有别名 `img`，同网容器可用 `http://img` 内网访问；旧 FRP 回本机 `3003` 的链路保留为二级回滚路径，细节见 `llmdoc/guides/domain-and-frp.md`。
+- 当前项目还有一条仓库外入口 `img.fkcodex.com`。主线路已经迁到 VPS：远端宿主机 Nginx 当前反代 `127.0.0.1:3305`，live 容器是 `chatgpt2api-green-92129ec`（镜像 `chatgpt2api:92129ec`，含账号统计口径修复，整 HEAD 构建）；上一版 `chatgpt2api-green-ecbb260`（镜像 `chatgpt2api:ecbb260`）仍在 `127.0.0.1:3304` 作为一级回滚目标，更旧的 `chatgpt2api`（`chatgpt2api:vps-20260614`）仍在 `127.0.0.1:3303` 作为二级回滚目标；live 容器在 `apps-interconnect` Docker 内网里有别名 `img`，同网容器可用 `http://img` 内网访问；旧 FRP 回本机 `3003` 的链路保留为再下一级回滚路径，细节见 `llmdoc/guides/domain-and-frp.md`。
 - Git 操作继续用 Windows Git。遇到 Git 代理失败时，只做一次性命令级绕过，例如 `git -c http.proxy= -c https.proxy= fetch` 或 `push`；不要改全局 Git 代理配置。

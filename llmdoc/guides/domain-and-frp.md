@@ -3,10 +3,10 @@
 `img.fkcodex.com` 当前主访问线路已经迁到 VPS 直部署：
 
 - 域名入口是 `img.fkcodex.com`。
-- 远端服务器宿主机 Nginx 接收 HTTPS 请求，并反代到 `127.0.0.1:3304`。
-- 当前 live 容器是 `chatgpt2api-green-ecbb260`，镜像标签是 `chatgpt2api:ecbb260`，端口只绑定 `127.0.0.1:3304:80`。
-- 旧 compose 容器 `chatgpt2api` 仍运行 `chatgpt2api:vps-20260614`，端口 `127.0.0.1:3303:80`，作为本次蓝绿发布的快速回滚目标。两个容器都加入 VPS Docker bridge `apps-interconnect`。
-- 同一台 VPS 的 `apps-interconnect` Docker 内网里，live 容器 `chatgpt2api-green-ecbb260` 已加网络别名 `img`；同网容器（例如 `newapi-app`）应使用 `http://img` 访问站点，不走公网，也不加 `:3003`。
+- 远端服务器宿主机 Nginx 接收 HTTPS 请求，并反代到 `127.0.0.1:3305`（配置在 `/etc/nginx/sites-available/img.fkcodex.com`，切流量只改这一行 `proxy_pass` 端口后 `nginx -t && nginx -s reload`）。
+- 当前 live 容器是 `chatgpt2api-green-92129ec`，镜像标签是 `chatgpt2api:92129ec`（整 HEAD 构建，含账号「可用/无效」统计口径修复：可用按 AT/session 有效判定，不再依赖额度刷新），端口只绑定 `127.0.0.1:3305:80`。
+- 上一版蓝绿容器 `chatgpt2api-green-ecbb260`（镜像 `chatgpt2api:ecbb260`）仍运行在 `127.0.0.1:3304`，作为一级快速回滚目标；更旧的 compose 容器 `chatgpt2api`（`chatgpt2api:vps-20260614`）仍在 `127.0.0.1:3303`，作为二级回滚目标。三个容器都加入 VPS Docker bridge `apps-interconnect`。
+- 同一台 VPS 的 `apps-interconnect` Docker 内网里，live 容器 `chatgpt2api-green-92129ec` 已加网络别名 `img`；同网容器（例如 `newapi-app`）应使用 `http://img` 访问站点，不走公网，也不加 `:3003`。
 - 容器挂载 `/opt/chatgpt2api/data` 到 `/app/data`，只读挂载 `/opt/chatgpt2api/config.json` 到 `/app/config.json`。
 - 生成图 URL 仍依赖 `CHATGPT2API_PUBLIC_BASE_URL=https://img.fkcodex.com`。
 
