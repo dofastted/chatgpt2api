@@ -3266,7 +3266,7 @@ export default function AccountsPage() {
                         onChange={(event) =>
                           setProxyUsername(event.target.value)
                         }
-                        placeholder="可留空"
+                        placeholder={editingProxyId ? "留空则保留现有用户名" : "可留空"}
                         className="h-11 rounded-xl border-stone-200 bg-white"
                       />
                     </div>
@@ -3279,7 +3279,7 @@ export default function AccountsPage() {
                         onChange={(event) =>
                           setProxyPassword(event.target.value)
                         }
-                        placeholder="可留空"
+                        placeholder={editingProxyId ? "留空则保留现有密码" : "可留空"}
                         className="h-11 rounded-xl border-stone-200 bg-white"
                       />
                     </div>

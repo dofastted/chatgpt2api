@@ -107,6 +107,7 @@ export type ProxyItem = {
   port: number;
   username?: string | null;
   password?: string | null;
+  has_auth?: boolean;
   enabled: boolean;
   url?: string | null;
 };

@@ -22,6 +22,7 @@ sys.modules.setdefault("pybase64", base64)
 
 from services import api  # noqa: E402
 from services.image_service import ImageGenerationError  # noqa: E402
+from services.proxy_service import ProxyService  # noqa: E402
 from services.uploaded_image_service import uploaded_image_service  # noqa: E402
 from services.user_key_service import UserKeyService  # noqa: E402
 
@@ -671,6 +672,53 @@ class UserKeyPricingTests(unittest.TestCase):
         self.assertEqual(admin_response.json()["errors"], [])
         self.assertEqual(admin_response.json()["available"], 1)
         self.assertEqual(admin_response.json()["added_tokens"], ["external-token-1"])
+
+    def test_proxy_admin_api_masks_credentials_and_preserves_omitted_secrets(self) -> None:
+        proxy_service = ProxyService(self.temp_dir / "proxies.json")
+        with patch.object(api, "proxy_service", proxy_service), self.make_client() as client:
+            create_response = client.post(
+                "/api/proxies",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json={
+                    "id": "proxy-1",
+                    "name": "authenticated proxy",
+                    "protocol": "http",
+                    "host": "proxy.example.com",
+                    "port": 8080,
+                    "username": "secret-user",
+                    "password": "secret-password",
+                    "enabled": True,
+                },
+            )
+            update_response = client.post(
+                "/api/proxies",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+                json={
+                    "id": "proxy-1",
+                    "name": "renamed proxy",
+                    "protocol": "http",
+                    "host": "proxy.example.com",
+                    "port": 8080,
+                    "enabled": True,
+                },
+            )
+            list_response = client.get(
+                "/api/proxies",
+                headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
+            )
+
+        self.assertEqual(create_response.status_code, 200)
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(list_response.status_code, 200)
+        for response in (create_response, update_response, list_response):
+            serialized = json.dumps(response.json())
+            self.assertNotIn("secret-user", serialized)
+            self.assertNotIn("secret-password", serialized)
+            self.assertIn("http://***:***@proxy.example.com:8080", serialized)
+        self.assertEqual(
+            proxy_service.get_enabled_proxy_url(),
+            "http://secret-user:secret-password@proxy.example.com:8080",
+        )
 
     def test_process_upload_stream_and_recent_uploaded_images(self) -> None:
         png_bytes = base64.b64decode(TEST_UPLOAD_PNG_B64)

@@ -71,6 +71,72 @@ class ProxyServiceTests(unittest.TestCase):
         self.assertNotIn("secret-password", result["proxy_url"])
         session.close.assert_called_once_with()
 
+    def test_public_proxy_payloads_never_expose_credentials(self) -> None:
+        service = self.make_service(
+            [
+                {
+                    "id": "proxy-1",
+                    "name": "authenticated proxy",
+                    "protocol": "http",
+                    "host": "proxy.example.com",
+                    "port": 8080,
+                    "username": "secret-user",
+                    "password": "secret-password",
+                    "enabled": True,
+                }
+            ]
+        )
+
+        item = service.list_public_items()[0]
+        serialized = json.dumps(item)
+
+        self.assertIsNone(item["username"])
+        self.assertIsNone(item["password"])
+        self.assertTrue(item["has_auth"])
+        self.assertEqual(item["url"], "http://***:***@proxy.example.com:8080")
+        self.assertEqual(
+            service.get_public_enabled_proxy_url(),
+            "http://***:***@proxy.example.com:8080",
+        )
+        self.assertNotIn("secret-user", serialized)
+        self.assertNotIn("secret-password", serialized)
+
+    def test_upsert_preserves_credentials_when_public_client_omits_them(self) -> None:
+        service = self.make_service(
+            [
+                {
+                    "id": "proxy-1",
+                    "name": "authenticated proxy",
+                    "protocol": "http",
+                    "host": "proxy.example.com",
+                    "port": 8080,
+                    "username": "secret-user",
+                    "password": "secret-password",
+                    "enabled": True,
+                }
+            ]
+        )
+
+        result = service.upsert_proxy(
+            {
+                "id": "proxy-1",
+                "name": "renamed proxy",
+                "protocol": "http",
+                "host": "proxy.example.com",
+                "port": 8080,
+                "enabled": True,
+            }
+        )
+
+        self.assertEqual(
+            service.get_enabled_proxy_url(),
+            "http://secret-user:secret-password@proxy.example.com:8080",
+        )
+        self.assertEqual(result["name"], "renamed proxy")
+        self.assertIsNone(result["username"])
+        self.assertIsNone(result["password"])
+        self.assertTrue(result["has_auth"])
+
     def test_get_enabled_proxy_url_prefers_enabled_proxy(self) -> None:
         service = self.make_service(
             [

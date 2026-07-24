@@ -155,6 +155,23 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
         self.assertEqual(service.account_service.disabled, [])
         self.assertIn(("bad-token", "download image failed"), service.account_service.image_errors)
 
+    def test_generate_with_pool_preserves_transient_error_when_no_other_account_exists(self) -> None:
+        account_service = FakeAccountService()
+        account_service.tokens = ["bad-token"]
+        service = BackendService(account_service)
+
+        with patch(
+            "services.backend_service.generate_image_result",
+            side_effect=ImageGenerationError("responses failed: 503"),
+        ):
+            with self.assertRaises(ImageGenerationError) as raised:
+                service.generate_with_pool("draw ABCD", "gpt-image-2", 1)
+
+        self.assertEqual(
+            str(raised.exception),
+            "image generation failed after 1 account attempts: responses failed: 503",
+        )
+
     def test_generate_with_pool_disables_invalid_token_and_uses_next_account(self) -> None:
         account_service = FakeAccountService()
         service = BackendService(account_service)

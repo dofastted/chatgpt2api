@@ -125,16 +125,18 @@ class ProxyService:
 
     @classmethod
     def _serialize_public(cls, item: dict[str, Any]) -> dict[str, Any]:
+        proxy_url = cls.build_proxy_url(item)
         return {
             "id": item.get("id"),
             "name": item.get("name"),
             "protocol": item.get("protocol"),
             "host": item.get("host"),
             "port": item.get("port"),
-            "username": item.get("username"),
-            "password": item.get("password"),
+            "username": None,
+            "password": None,
+            "has_auth": bool(item.get("username") or item.get("password")),
             "enabled": bool(item.get("enabled")),
-            "url": cls.build_proxy_url(item),
+            "url": cls._masked_proxy_url(proxy_url),
         }
 
     def list_public_items(self) -> list[dict[str, Any]]:
@@ -149,6 +151,9 @@ class ProxyService:
                     if proxy_url:
                         return proxy_url
         return self._default_proxy_url()
+
+    def get_public_enabled_proxy_url(self) -> str | None:
+        return self._masked_proxy_url(self.get_enabled_proxy_url())
 
     def test_connection(self, timeout_seconds: float = 12.0) -> dict[str, Any]:
         proxy_url = self.get_enabled_proxy_url()
@@ -187,21 +192,35 @@ class ProxyService:
             item["enabled"] = False
 
     def upsert_proxy(self, payload: dict[str, Any]) -> dict[str, Any]:
-        normalized = self._normalize_item(payload)
-        if normalized is None:
-            raise ValueError("invalid proxy payload")
+        raw_payload = dict(payload)
+        target_id = self._clean_text(raw_payload.get("id"))
         with self._lock:
-            target_id = str(normalized.get("id") or "").strip()
+            current_item = next(
+                (
+                    item
+                    for item in self._items
+                    if self._clean_text(item.get("id")) == target_id
+                ),
+                None,
+            )
+            if current_item is not None:
+                for key in ("username", "password"):
+                    if key not in raw_payload:
+                        raw_payload[key] = current_item.get(key)
+            normalized = self._normalize_item(raw_payload)
+            if normalized is None:
+                raise ValueError("invalid proxy payload")
+            target_id = self._clean_text(normalized.get("id"))
             replaced = False
             if normalized.get("enabled"):
                 self._disable_all_locked()
             for index, current in enumerate(self._items):
-                if str(current.get("id") or "").strip() != target_id:
+                if self._clean_text(current.get("id")) != target_id:
                     continue
                 if not normalized.get("enabled") and not any(
                     bool(item.get("enabled"))
                     for item in self._items
-                    if str(item.get("id") or "").strip() != target_id
+                    if self._clean_text(item.get("id")) != target_id
                 ):
                     normalized["enabled"] = True
                 self._items[index] = normalized
@@ -213,6 +232,7 @@ class ProxyService:
                 self._items.append(normalized)
             self._save_items()
             return self._serialize_public(normalized)
+
 
     def delete_proxy(self, proxy_id: str) -> dict[str, Any]:
         normalized_id = self._clean_text(proxy_id)

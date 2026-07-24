@@ -159,6 +159,10 @@ class BackendService:
                     prefer_input_image=bool(input_images),
                 )
             except HTTPException:
+                if last_error is not None and is_transient_image_error(str(last_error)):
+                    raise ImageGenerationError(
+                        f"image generation failed after {account_attempt_count} account attempts: {last_error}"
+                    ) from last_error
                 raise
 
             attempted_tokens.add(request_token)

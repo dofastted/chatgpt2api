@@ -1297,7 +1297,6 @@ def iter_responses_stream(payload: dict[str, object], *, include_start: bool = T
         sequence_number += 1
         return format_sse_event(event_type, event_payload)
 
-    response_id = str(payload.get("id") or "").strip()
     created_snapshot = build_responses_stream_snapshot(payload, "in_progress")
     if include_start:
         yield emit("response.created", response=created_snapshot)
@@ -2262,7 +2261,7 @@ def create_app() -> FastAPI:
         require_admin_auth_key(authorization)
         return {
             "items": proxy_service.list_public_items(),
-            "active_proxy_url": proxy_service.get_enabled_proxy_url(),
+            "active_proxy_url": proxy_service.get_public_enabled_proxy_url(),
         }
 
     @router.post("/api/proxies/test")
@@ -2534,13 +2533,13 @@ def create_app() -> FastAPI:
     ):
         require_admin_auth_key(authorization)
         try:
-            item = proxy_service.upsert_proxy(body.model_dump())
+            item = proxy_service.upsert_proxy(body.model_dump(exclude_unset=True))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {
             "item": item,
             "items": proxy_service.list_public_items(),
-            "active_proxy_url": proxy_service.get_enabled_proxy_url(),
+            "active_proxy_url": proxy_service.get_public_enabled_proxy_url(),
         }
 
     @router.post("/api/donations/accounts")
@@ -2629,7 +2628,7 @@ def create_app() -> FastAPI:
         result = proxy_service.delete_proxy(proxy_id)
         return {
             **result,
-            "active_proxy_url": proxy_service.get_enabled_proxy_url(),
+            "active_proxy_url": proxy_service.get_public_enabled_proxy_url(),
         }
 
     @router.delete("/api/user-keys")
