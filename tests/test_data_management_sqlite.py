@@ -100,13 +100,13 @@ class SQLiteDataManagementTests(unittest.TestCase):
 
         user_response = client.get(
             "/api/data-management/status",
-            headers={"Authorization": "Bearer test-auth-key"},
+            headers={"Authorization": f"Bearer {api.config.auth_key}"},
         )
         self.assertEqual(user_response.status_code, 403)
 
         admin_response = client.get(
             "/api/data-management/status",
-            headers={"Authorization": "Bearer test-admin-key"},
+            headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
         )
         self.assertEqual(admin_response.status_code, 200)
         self.assertEqual(admin_response.json()["sqlite_path"], str(sqlite_store.db_path))

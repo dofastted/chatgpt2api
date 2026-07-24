@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 import uuid
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from curl_cffi.requests import Session
 
 from services.config import DATA_DIR, config
 from services.sqlite_store import sqlite_store
@@ -96,6 +100,30 @@ class ProxyService:
         return f"{protocol}://{auth}{host}:{port}"
 
     @classmethod
+    def _default_proxy_url(cls) -> str | None:
+        explicit = cls._clean_text(os.getenv("CHATGPT2API_DEFAULT_PROXY_URL"))
+        if explicit:
+            return explicit
+        profile = cls._clean_text(os.getenv("CHATGPT2API_DEPLOYMENT_PROFILE")).lower()
+        if profile == "local_frp":
+            return "http://host.docker.internal:10808"
+        if profile == "vps":
+            return "http://172.20.0.1:3208"
+        return cls.DEFAULT_PROXY_URL
+
+    @staticmethod
+    def _masked_proxy_url(proxy_url: str | None) -> str | None:
+        text = str(proxy_url or "").strip()
+        if not text:
+            return None
+        parsed = urlsplit(text)
+        if parsed.username is None:
+            return text
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunsplit((parsed.scheme, f"***:***@{host}{port}", parsed.path, parsed.query, parsed.fragment))
+
+    @classmethod
     def _serialize_public(cls, item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": item.get("id"),
@@ -120,7 +148,39 @@ class ProxyService:
                     proxy_url = self.build_proxy_url(item)
                     if proxy_url:
                         return proxy_url
-        return self.DEFAULT_PROXY_URL
+        return self._default_proxy_url()
+
+    def test_connection(self, timeout_seconds: float = 12.0) -> dict[str, Any]:
+        proxy_url = self.get_enabled_proxy_url()
+        source = "configured" if any(bool(item.get("enabled")) for item in self._items) else "default"
+        started_at = time.monotonic()
+        session = Session(proxy=proxy_url, verify=config.tls_verify)
+        try:
+            response = session.get("https://chatgpt.com/", timeout=max(1.0, float(timeout_seconds)))
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            return {
+                "reachable": True,
+                "status_code": int(response.status_code),
+                "latency_ms": elapsed_ms,
+                "source": source,
+                "proxy_url": self._masked_proxy_url(proxy_url),
+                "error": None,
+            }
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            message = str(exc)
+            if proxy_url:
+                message = message.replace(proxy_url, self._masked_proxy_url(proxy_url) or "proxy")
+            return {
+                "reachable": False,
+                "status_code": None,
+                "latency_ms": elapsed_ms,
+                "source": source,
+                "proxy_url": self._masked_proxy_url(proxy_url),
+                "error": message[:500],
+            }
+        finally:
+            session.close()
 
     def _disable_all_locked(self) -> None:
         for item in self._items:

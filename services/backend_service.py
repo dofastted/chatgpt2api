@@ -37,6 +37,17 @@ class BackendService:
     def _token_label(access_token: str) -> str:
         return hashlib.sha1(str(access_token or "").encode("utf-8")).hexdigest()[:10]
 
+    def _account_pool_error_detail(self) -> dict:
+        summary = None
+        if hasattr(self.account_service, "pool_summary"):
+            summary = self.account_service.pool_summary()
+        return {
+            "error": "No available account slots found",
+            "reason": "account_pool_unavailable",
+            "message": "账号池没有可调度账号，请刷新账号、检查额度或等待冷却结束",
+            **({"summary": summary} if summary is not None else {}),
+        }
+
     @staticmethod
     def _is_account_ready_for_image(account: dict | None) -> bool:
         if not isinstance(account, dict):
@@ -61,12 +72,20 @@ class BackendService:
     def _is_responses_input_image_rejection(exc: ImageGenerationError, input_images: list[dict[str, str]] | None) -> bool:
         return bool(input_images) and "responses failed: 400" in str(exc).lower()
 
-    def _mark_image_result(self, access_token: str, *, success: bool, input_image: bool) -> dict | None:
+    def _mark_image_result(
+        self,
+        access_token: str,
+        *,
+        success: bool,
+        input_image: bool,
+        error: str | None = None,
+    ) -> dict | None:
         try:
             return self.account_service.mark_image_result(
                 access_token,
                 success=success,
                 input_image=input_image,
+                error=error,
             )
         except TypeError:
             return self.account_service.mark_image_result(access_token, success=success)
@@ -88,7 +107,7 @@ class BackendService:
                 token = self.account_service.acquire_token_slot(excluded_tokens=excluded_tokens)
             if token:
                 return token
-            raise HTTPException(status_code=503, detail={"error": "No available account slots found"})
+            raise HTTPException(status_code=503, detail=self._account_pool_error_detail())
         if hasattr(self.account_service, "try_acquire_token_slot"):
             try:
                 token = self.account_service.try_acquire_token_slot(
@@ -99,7 +118,7 @@ class BackendService:
                 token = self.account_service.try_acquire_token_slot(excluded_tokens=excluded_tokens)
             if token:
                 return token
-            raise HTTPException(status_code=503, detail={"error": "No available account slots found"})
+            raise HTTPException(status_code=503, detail=self._account_pool_error_detail())
         try:
             try:
                 return self.account_service.next_token(
@@ -121,11 +140,12 @@ class BackendService:
         size: str | None = None,
     ):
         attempted_tokens: set[str] = set()
+        account_attempt_count = 0
         max_account_attempts = max(1, int(config.image_generation_max_account_attempts or 4))
         last_error: Exception | None = None
 
         while True:
-            if len(attempted_tokens) >= max_account_attempts:
+            if account_attempt_count >= max_account_attempts:
                 message = (
                     f"image generation failed after {max_account_attempts} account attempts"
                     + (f": {last_error}" if last_error else "")
@@ -142,6 +162,7 @@ class BackendService:
                 raise
 
             attempted_tokens.add(request_token)
+            account_attempt_count += 1
             try:
                 account = self.account_service.get_account(request_token)
                 if not self._is_account_ready_for_image(account):
@@ -171,7 +192,7 @@ class BackendService:
                             account_token=request_token,
                             account_type=str((account or {}).get("type") or ""),
                             route=candidate_route,
-                            attempt_count=len(attempted_tokens),
+                            attempt_count=account_attempt_count,
                             fallback_used=attempt_index > 1,
                         )
                     print(
@@ -220,6 +241,7 @@ class BackendService:
                     request_token,
                     success=False,
                     input_image=bool(input_images),
+                    error=str(exc),
                 )
                 print(
                     f"[image-generate] fail pooled token={self._token_label(request_token)} "
@@ -227,8 +249,18 @@ class BackendService:
                 )
                 if is_token_invalid_error(str(exc)):
                     last_error = exc
-                    self.account_service.remove_token(request_token)
-                    print(f"[image-generate] remove invalid token={self._token_label(request_token)}")
+                    if hasattr(self.account_service, "disable_account"):
+                        self.account_service.disable_account(
+                            request_token,
+                            reason="credential_invalid",
+                            error="账号凭据已失效",
+                        )
+                    else:
+                        self.account_service.update_account(
+                            request_token,
+                            {"status": "禁用", "quota": 0, "needs_refresh": False},
+                        )
+                    print(f"[image-generate] disable invalid token={self._token_label(request_token)}")
                     continue
                 if self._is_responses_input_image_rejection(exc, input_images):
                     last_error = exc

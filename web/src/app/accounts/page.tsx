@@ -6,16 +6,19 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
+  Activity,
   Ban,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
   CircleOff,
+  Clock3,
   Copy,
   Database,
   FileSearch,
   Download,
+  Gauge,
   HardDrive,
   Images,
   KeyRound,
@@ -25,10 +28,12 @@ import {
   RefreshCw,
   Search,
   Save,
+  ShieldCheck,
   Ticket,
   Trash2,
   Upload,
   UserRound,
+  Wifi,
 } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 
@@ -81,6 +86,7 @@ import {
   fetchUserKeys,
   refreshAccounts,
   testDataManagementS3,
+  testProxyConnection,
   upsertProxy,
   updateDataManagementSettings,
   updateAccount,
@@ -102,6 +108,7 @@ import {
   type ImageModel,
   type ProxyItem,
   type ProxyProtocol,
+  type ProxyHealthResult,
   type RedeemCode,
   type UserKey,
   type UserKeyPricing,
@@ -135,6 +142,26 @@ const accountCategoryOptions: {
   { label: "捐赠", value: "捐赠" },
 ];
 
+type AccountAvailabilityFilter =
+  | "all"
+  | "ready"
+  | "refresh"
+  | "cooldown"
+  | "stopped"
+  | "busy";
+
+const accountAvailabilityOptions: Array<{
+  label: string;
+  value: AccountAvailabilityFilter;
+}> = [
+  { label: "全部调度状态", value: "all" },
+  { label: "可调度", value: "ready" },
+  { label: "待刷新", value: "refresh" },
+  { label: "冷却中", value: "cooldown" },
+  { label: "已停用 / 异常", value: "stopped" },
+  { label: "槽位占用", value: "busy" },
+];
+
 const statusMeta: Record<
   AccountStatus,
   {
@@ -150,22 +177,34 @@ const statusMeta: Record<
 
 const accountAssetCards = [
   {
-    key: "available",
-    label: "可用",
-    color: "text-emerald-600",
-    icon: CheckCircle2,
+    key: "total",
+    label: "账号资产",
+    color: "text-stone-900",
+    icon: UserRound,
   },
   {
-    key: "invalid",
-    label: "无效",
-    color: "text-rose-500",
-    icon: CircleOff,
+    key: "ready",
+    label: "可调度",
+    color: "text-emerald-600",
+    icon: ShieldCheck,
+  },
+  {
+    key: "refresh",
+    label: "待刷新",
+    color: "text-amber-600",
+    icon: RefreshCw,
+  },
+  {
+    key: "stopped",
+    label: "已停用",
+    color: "text-rose-600",
+    icon: Ban,
   },
   {
     key: "quota",
-    label: "可使用生图次数",
-    color: "text-blue-500",
-    icon: Images,
+    label: "可调度额度",
+    color: "text-sky-600",
+    icon: Gauge,
   },
 ] as const;
 
@@ -243,21 +282,34 @@ function formatRestoreAt(value?: string | null) {
   return { absolute, relative };
 }
 
-// 「可使用生图次数」：只累计 AT/session 有效（状态正常）且额度已刷新的账号的剩余额度。
+// 「可调度额度」只累计当前可进入生图账号槽位的剩余额度。
 function countUsableImageQuota(accounts: Account[]) {
   return accounts.reduce(
     (sum, account) =>
-      isUsableImageAccount(account) && isAccountQuotaKnown(account)
-        ? sum + Math.max(0, account.quota)
-        : sum,
+      isUsableImageAccount(account) ? sum + Math.max(0, account.quota) : sum,
     0,
   );
 }
 
-// 「可用」口径：只看 AT/session 是否有效（状态正常），不依赖额度是否已刷新。
-// 刚导入、尚未刷新额度的账号同样计入「可用」；额度数值由刷新单独填充。
 function isUsableImageAccount(account: Account) {
-  return account.status === "正常";
+  if (typeof account.availableForImages === "boolean") {
+    return account.availableForImages;
+  }
+  return (
+    account.status === "正常" &&
+    isAccountQuotaKnown(account) &&
+    account.quota > 0 &&
+    !account.cooldownUntil
+  );
+}
+
+function getAccountAvailabilityFilter(account: Account): AccountAvailabilityFilter {
+  const reason = String(account.availabilityReason || "");
+  if (account.availableForImages || reason === "可调度") return "ready";
+  if (account.needsRefresh || reason === "待刷新") return "refresh";
+  if (reason === "冷却中") return "cooldown";
+  if (reason === "槽位占用") return "busy";
+  return "stopped";
 }
 
 function formatPanelCount(value: number) {
@@ -344,6 +396,21 @@ function maskToken(token?: string, visibleStart = 16, visibleEnd = 8) {
   return `${token.slice(0, visibleStart)}...${token.slice(-visibleEnd)}`;
 }
 
+function maskProxyAddress(value?: string | null) {
+  const text = String(value || "").trim();
+  if (!text) return "默认出口";
+  try {
+    const url = new URL(text);
+    if (url.username) {
+      url.username = "***";
+      url.password = "***";
+    }
+    return url.toString();
+  } catch {
+    return text.replace(/\/\/[^/@]+@/, "//***:***@");
+  }
+}
+
 function downloadTextFile(content: string, filename: string) {
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -409,6 +476,7 @@ export default function AccountsPage() {
   const [redeemCodes, setRedeemCodes] = useState<RedeemCode[]>([]);
   const [proxies, setProxies] = useState<ProxyItem[]>([]);
   const [activeProxyUrl, setActiveProxyUrl] = useState<string>("");
+  const [proxyHealth, setProxyHealth] = useState<ProxyHealthResult | null>(null);
   const [dataStatus, setDataStatus] = useState<DataManagementStatus | null>(
     null,
   );
@@ -452,6 +520,8 @@ export default function AccountsPage() {
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">(
     "all",
   );
+  const [availabilityFilter, setAvailabilityFilter] =
+    useState<AccountAvailabilityFilter>("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
   const [userKeyPage, setUserKeyPage] = useState(1);
@@ -519,6 +589,7 @@ export default function AccountsPage() {
   const [isSavingDataSettings, setIsSavingDataSettings] = useState(false);
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
   const [isTestingS3, setIsTestingS3] = useState(false);
+  const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [isSubmittingUserKeys, setIsSubmittingUserKeys] = useState(false);
   const [isSubmittingRedeemCodes, setIsSubmittingRedeemCodes] = useState(false);
   const [isDeletingUserKeys, setIsDeletingUserKeys] = useState(false);
@@ -658,6 +729,24 @@ export default function AccountsPage() {
     },
     [handleAdminRouteFailure],
   );
+
+  const handleTestProxyConnection = useCallback(async () => {
+    setIsTestingProxy(true);
+    try {
+      const result = await testProxyConnection();
+      setProxyHealth(result);
+      if (result.reachable) {
+        toast.success(`代理出口可达，耗时 ${result.latency_ms}ms`);
+      } else {
+        toast.error(result.error || "代理出口不可达");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "代理连通性检测失败";
+      toast.error(message);
+    } finally {
+      setIsTestingProxy(false);
+    }
+  }, []);
 
   const loadDataManagement = useCallback(
     async (silent = false) => {
@@ -826,15 +915,20 @@ export default function AccountsPage() {
     return accounts.filter((account) => {
       const searchMatched =
         normalizedQuery.length === 0 ||
-        (account.email ?? "").toLowerCase().includes(normalizedQuery);
+        (account.email ?? "").toLowerCase().includes(normalizedQuery) ||
+        account.access_token.toLowerCase().includes(normalizedQuery) ||
+        String(account.accountId || "").toLowerCase().includes(normalizedQuery);
       const categoryMatched =
         categoryFilter === "all" || account.category === categoryFilter;
       const typeMatched = typeFilter === "all" || account.type === typeFilter;
       const statusMatched =
         statusFilter === "all" || account.status === statusFilter;
-      return searchMatched && categoryMatched && typeMatched && statusMatched;
+      const availabilityMatched =
+        availabilityFilter === "all" ||
+        getAccountAvailabilityFilter(account) === availabilityFilter;
+      return searchMatched && categoryMatched && typeMatched && statusMatched && availabilityMatched;
     });
-  }, [accounts, categoryFilter, query, statusFilter, typeFilter]);
+  }, [accounts, availabilityFilter, categoryFilter, query, statusFilter, typeFilter]);
 
   const pageCount = Math.max(
     1,
@@ -865,13 +959,20 @@ export default function AccountsPage() {
   };
 
   const summary = useMemo(() => {
-    const available = accounts.filter(isUsableImageAccount).length;
-    const invalid = Math.max(0, accounts.length - available);
+    const ready = accounts.filter(isUsableImageAccount).length;
+    const refresh = accounts.filter((account) => getAccountAvailabilityFilter(account) === "refresh").length;
+    const stopped = accounts.filter((account) => getAccountAvailabilityFilter(account) === "stopped").length;
+    const cooling = accounts.filter((account) => getAccountAvailabilityFilter(account) === "cooldown").length;
+    const busy = accounts.filter((account) => getAccountAvailabilityFilter(account) === "busy").length;
     const quota = countUsableImageQuota(accounts);
 
     return {
-      available: formatPanelCount(available),
-      invalid: formatPanelCount(invalid),
+      total: formatPanelCount(accounts.length),
+      ready: formatPanelCount(ready),
+      refresh: formatPanelCount(refresh),
+      stopped: formatPanelCount(stopped),
+      cooling: formatPanelCount(cooling),
+      busy: formatPanelCount(busy),
       quota: formatPanelCount(quota),
     };
   }, [accounts]);
@@ -1208,11 +1309,16 @@ export default function AccountsPage() {
       const messages = [
         `已从 ${matchedFiles} 个文件导入 ${accountsToImport.length} 个账户`,
       ];
+      messages.push(`验活成功 ${data.refreshed ?? 0} 个`);
+      messages.push(`当前可调度 ${data.available ?? 0} 个`);
       if ((data.updated ?? 0) > 0) {
         messages.push(`覆盖 ${data.updated} 个已有账户`);
       }
       if ((data.skipped ?? 0) > 0) {
         messages.push(`跳过 ${data.skipped} 个无效或重复项`);
+      }
+      if ((data.disabled ?? 0) > 0) {
+        messages.push(`自动停用 ${data.disabled} 个失效账号`);
       }
       if ((data.errors?.length ?? 0) > 0) {
         messages.push(`刷新失败 ${data.errors?.length ?? 0} 个`);
@@ -1320,6 +1426,25 @@ export default function AccountsPage() {
       toast.success("账号信息已更新");
     } catch (error) {
       const message = error instanceof Error ? error.message : "更新账号失败";
+      toast.error(message);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleQuickAccountStatus = async (account: Account) => {
+    if (account.status === "禁用" || account.status === "异常") {
+      await handleRefreshAccounts([account.access_token]);
+      return;
+    }
+
+    setIsUpdating(true);
+    try {
+      const data = await updateAccount(account.access_token, { status: "禁用" });
+      setAccounts(normalizeAccounts(data.items));
+      toast.success("账号已停用并退出调度池");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "停用账号失败";
       toast.error(message);
     } finally {
       setIsUpdating(false);
@@ -2386,53 +2511,56 @@ export default function AccountsPage() {
 
       {activeTab === "accounts" ? (
         <>
-          <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div className="space-y-1">
-              <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-                Account Pool
+          <section className="flex flex-col gap-5 rounded-3xl border border-stone-200 bg-[linear-gradient(135deg,#0f172a_0%,#172554_58%,#0369a1_100%)] p-6 text-white shadow-[0_30px_80px_-48px_rgba(15,23,42,0.9)] lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-2xl space-y-3">
+              <div className="flex items-center gap-2 text-xs font-semibold tracking-[0.18em] text-sky-200 uppercase">
+                <Activity className="size-4" />
+                Account Operations
               </div>
-              <h2 className="text-2xl font-semibold tracking-tight">
-                号池管理
-              </h2>
+              <div>
+                <h2 className="text-3xl font-semibold tracking-tight">
+                  账号资产与调度看板
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-slate-200">
+                  导入后自动验活并刷新额度；失效凭据自动停用保留，网络、冷却、槽位和最近错误集中排查。
+                </p>
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="outline"
-                className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-                onClick={() => void loadAccounts()}
-                disabled={
-                  isLoading || isRefreshing || isSubmitting || isDeleting
-                }
+                className="h-10 rounded-xl border-white/20 bg-white/10 px-4 text-white hover:bg-white/20 hover:text-white"
+                onClick={() => void handleTestProxyConnection()}
+                disabled={isTestingProxy}
               >
-                <RefreshCw
-                  className={cn("size-4", isLoading ? "animate-spin" : "")}
-                />
-                重新加载面板
+                {isTestingProxy ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <Wifi className="size-4" />
+                )}
+                检测网络出口
               </Button>
               <Button
                 variant="outline"
-                className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-                onClick={() =>
-                  void handleRefreshAccounts(
-                    accounts.map((item) => item.access_token),
-                  )
-                }
-                disabled={
-                  isLoading ||
-                  isRefreshing ||
-                  isSubmitting ||
-                  isDeleting ||
-                  accounts.length === 0
-                }
+                className="h-10 rounded-xl border-white/20 bg-white/10 px-4 text-white hover:bg-white/20 hover:text-white"
+                onClick={() => void loadAccounts()}
+                disabled={isLoading || isRefreshing || isSubmitting || isDeleting}
               >
-                <RefreshCw
-                  className={cn("size-4", isRefreshing ? "animate-spin" : "")}
-                />
-                手动刷新额度
+                <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
+                重新加载
               </Button>
               <Button
-                className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+                variant="outline"
+                className="h-10 rounded-xl border-white/20 bg-white/10 px-4 text-white hover:bg-white/20 hover:text-white"
+                onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
+                disabled={isRefreshing || accounts.length === 0}
+              >
+                <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+                全池验活
+              </Button>
+              <Button
+                className="h-10 rounded-xl bg-white px-4 text-slate-950 hover:bg-sky-50"
                 onClick={() => setOpen(true)}
               >
                 <Plus className="size-4" />
@@ -2442,56 +2570,41 @@ export default function AccountsPage() {
           </section>
 
           <section className="minimal-fade-soft space-y-3 [animation-delay:120ms]">
-            <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
-              <CardContent className="space-y-4 p-5">
+            <Card className="minimal-surface-hover rounded-2xl border-stone-200 bg-white shadow-sm">
+              <CardContent className="space-y-5 p-5">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="space-y-1">
                     <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-                      Account Assets
+                      Asset Overview
                     </div>
                     <h3 className="text-xl font-semibold tracking-tight">
-                      账号资产面板
+                      调度资产概览
                     </h3>
                     <p className="text-sm leading-6 text-stone-500">
-                      只显示汇总，不展示 token、邮箱和恢复时间等账号明细。页面不会自动刷新远端账号信息。
+                      “可调度”要求账号正常、额度已知且大于 0、未处于冷却，并且当前槽位空闲。
                     </p>
                   </div>
-                  <Badge
-                    variant="secondary"
-                    className="w-fit rounded-lg bg-stone-100 px-3 py-1 text-stone-600"
-                  >
-                    手动刷新
+                  <Badge variant="success" className="w-fit rounded-lg px-3 py-1">
+                    导入后自动验活
                   </Badge>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-3">
-                  {accountAssetCards.map((item, index) => {
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                  {accountAssetCards.map((item) => {
                     const Icon = item.icon;
                     const value = summary[item.key];
                     return (
                       <div
                         key={item.key}
-                        className={cn(
-                          "minimal-fade-soft rounded-2xl border border-stone-100 bg-stone-50/80 p-4",
-                          index === 0
-                            ? "[animation-delay:80ms]"
-                            : index === 1
-                              ? "[animation-delay:120ms]"
-                              : "[animation-delay:160ms]",
-                        )}
+                        className="minimal-surface-hover rounded-2xl border border-stone-200 bg-stone-50 p-4 hover:border-sky-200 hover:bg-sky-50/50"
                       >
                         <div className="mb-4 flex items-start justify-between">
-                          <span className="text-xs font-medium text-stone-400">
+                          <span className="text-xs font-medium text-stone-500">
                             {item.label}
                           </span>
                           <Icon className="size-4 text-stone-400" />
                         </div>
-                        <div
-                          className={cn(
-                            "text-[2rem] font-semibold tracking-tight tabular-nums",
-                            item.color,
-                          )}
-                        >
+                        <div className={cn("text-[2rem] font-semibold tracking-tight tabular-nums", item.color)}>
                           {value}
                         </div>
                       </div>
@@ -2503,44 +2616,52 @@ export default function AccountsPage() {
           </section>
 
           <section className="minimal-fade-soft grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px] [animation-delay:180ms]">
-            <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
-              <CardContent className="space-y-4 p-5">
+            <Card className="minimal-surface-hover rounded-2xl border-stone-200 bg-white shadow-sm xl:col-start-2 xl:row-start-1">
+              <CardContent className="space-y-5 p-5">
                 <div className="space-y-1">
                   <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-                    Dispatch
+                    Troubleshooting
                   </div>
                   <h3 className="text-xl font-semibold tracking-tight">
-                    派发规则
+                    运行排查
                   </h3>
                   <p className="text-sm leading-6 text-stone-500">
-                    单一账号同一时间只跑 1 个生图进程。可用账号数就是可同时派发的账号槽位；10 个可用账号可同时匹配 10 个请求，每个请求占用不同账号。
+                    账号失败先看待刷新、冷却和停用；请求报网络错误时再检测当前代理出口。
                   </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-stone-100 bg-stone-50/80 p-4">
-                    <div className="text-xs font-medium tracking-[0.18em] text-stone-400 uppercase">
-                      单账号进程
+                <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-1">
+                  <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
+                    <div className="flex items-center justify-between text-xs font-medium text-emerald-700">
+                      <span>可调度槽位</span>
+                      <ShieldCheck className="size-4" />
                     </div>
-                    <div className="mt-3 text-3xl font-semibold tracking-tight text-stone-900 tabular-nums">
-                      01
-                    </div>
+                    <div className="mt-3 text-3xl font-semibold text-emerald-700 tabular-nums">{summary.ready}</div>
                   </div>
-                  <div className="rounded-2xl border border-stone-100 bg-stone-50/80 p-4">
-                    <div className="text-xs font-medium tracking-[0.18em] text-stone-400 uppercase">
-                      当前可派发槽位
+                  <div className="rounded-2xl border border-amber-100 bg-amber-50 p-4">
+                    <div className="flex items-center justify-between text-xs font-medium text-amber-700">
+                      <span>冷却账号</span>
+                      <Clock3 className="size-4" />
                     </div>
-                    <div className="mt-3 text-3xl font-semibold tracking-tight text-emerald-600 tabular-nums">
-                      {summary.available}
-                    </div>
+                    <div className="mt-3 text-3xl font-semibold text-amber-700 tabular-nums">{summary.cooling}</div>
                   </div>
+                  <div className="rounded-2xl border border-violet-100 bg-violet-50 p-4">
+                    <div className="flex items-center justify-between text-xs font-medium text-violet-700">
+                      <span>槽位占用</span>
+                      <Activity className="size-4" />
+                    </div>
+                    <div className="mt-3 text-3xl font-semibold text-violet-700 tabular-nums">{summary.busy}</div>
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-xs leading-5 text-stone-600">
+                  单账号最多同时运行 1 个生图请求。瞬时网络失败会进入短期冷却并等待重新调度，不再直接把整池误判为空。
                 </div>
               </CardContent>
             </Card>
 
-            <div className="space-y-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-4 xl:col-start-1 xl:row-span-2 xl:row-start-1">
+              <div className="flex flex-col gap-3">
                 <div className="flex items-center gap-3">
-                  <h2 className="text-lg font-semibold tracking-tight">
+                  <h2 className="whitespace-nowrap text-lg font-semibold tracking-tight">
                     账户列表
                   </h2>
                   <Badge
@@ -2551,7 +2672,7 @@ export default function AccountsPage() {
                   </Badge>
                 </div>
 
-                <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+                <div className="flex flex-col gap-2 lg:flex-row lg:flex-wrap lg:items-center">
                   <div className="relative min-w-[260px]">
                     <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
                     <Input
@@ -2560,7 +2681,7 @@ export default function AccountsPage() {
                         setQuery(event.target.value);
                         setPage(1);
                       }}
-                      placeholder="搜索邮箱"
+                      placeholder="搜索邮箱、token 或账号 ID"
                       className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
                     />
                   </div>
@@ -2612,6 +2733,24 @@ export default function AccountsPage() {
                     </SelectTrigger>
                     <SelectContent>
                       {accountStatusOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={availabilityFilter}
+                    onValueChange={(value) => {
+                      setAvailabilityFilter(value as AccountAvailabilityFilter);
+                      setPage(1);
+                    }}
+                  >
+                    <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[170px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {accountAvailabilityOptions.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
                           {option.label}
                         </SelectItem>
@@ -2692,16 +2831,16 @@ export default function AccountsPage() {
                       </Button>
                       <Button
                         variant="ghost"
-                        className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                        onClick={() => void handleDeleteTokens(abnormalTokens)}
-                        disabled={abnormalTokens.length === 0 || isDeleting}
+                        className="h-8 rounded-lg px-3 text-amber-600 hover:bg-amber-50 hover:text-amber-700"
+                        onClick={() => void handleRefreshAccounts(abnormalTokens)}
+                        disabled={abnormalTokens.length === 0 || isRefreshing}
                       >
-                        {isDeleting ? (
+                        {isRefreshing ? (
                           <LoaderCircle className="size-4 animate-spin" />
                         ) : (
-                          <Trash2 className="size-4" />
+                          <RefreshCw className="size-4" />
                         )}
-                        移除异常账号
+                        重新检测异常账号
                       </Button>
                       <Button
                         variant="ghost"
@@ -2725,8 +2864,8 @@ export default function AccountsPage() {
                   </div>
 
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-[920px] text-left">
-                      <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
+                    <table className="w-full min-w-[1120px] text-left">
+                      <thead className="border-b border-stone-100 text-[11px] tracking-[0.18em] text-stone-400 uppercase">
                         <tr>
                           <th className="w-12 px-4 py-3">
                             <Checkbox
@@ -2735,147 +2874,146 @@ export default function AccountsPage() {
                                 checked
                                   ? selectCurrentPageAccounts()
                                   : setSelectedIds((prev) =>
-                                      prev.filter(
-                                        (id) =>
-                                          !currentRows.some((row) => row.id === id),
-                                      ),
+                                      prev.filter((id) => !currentRows.some((row) => row.id === id)),
                                     )
                               }
                             />
                           </th>
-                          <th className="w-56 px-4 py-3">token</th>
-                          <th className="w-24 px-4 py-3">来源</th>
-                          <th className="w-28 px-4 py-3">类型</th>
-                          <th className="w-24 px-4 py-3">状态</th>
-                          <th className="w-56 px-4 py-3">账号信息</th>
-                          <th className="w-24 px-4 py-3">额度</th>
-                          <th className="w-40 px-4 py-3">恢复时间</th>
-                          <th className="w-18 px-4 py-3">成功</th>
-                          <th className="w-18 px-4 py-3">失败</th>
-                          <th className="w-24 px-4 py-3">操作</th>
+                          <th className="w-[320px] px-4 py-3">账号资产</th>
+                          <th className="w-44 px-4 py-3">调度状态</th>
+                          <th className="w-48 px-4 py-3">额度与恢复</th>
+                          <th className="w-36 px-4 py-3">运行质量</th>
+                          <th className="min-w-[260px] px-4 py-3">最近排查信息</th>
+                          <th className="w-36 px-4 py-3">管理</th>
                         </tr>
                       </thead>
                       <tbody>
                         {currentRows.map((account) => {
-                          const status = statusMeta[account.status];
-                          const StatusIcon = status.icon;
+                          const availabilityReason = account.availabilityReason || (isUsableImageAccount(account) ? "可调度" : "不可调度");
+                          const availabilityVariant =
+                            availabilityReason === "可调度"
+                              ? "success"
+                              : availabilityReason === "待刷新" || availabilityReason === "冷却中"
+                                ? "warning"
+                                : availabilityReason === "槽位占用"
+                                  ? "violet"
+                                  : "danger";
+                          const restore = formatRestoreAt(account.restoreAt);
+                          const isStopped = account.status === "禁用" || account.status === "异常";
 
                           return (
                             <tr
                               key={account.id}
-                              className="minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
+                              className={cn(
+                                "minimal-row-shift border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70",
+                                isStopped ? "bg-rose-50/40" : account.needsRefresh ? "bg-amber-50/40" : "",
+                              )}
                             >
-                              <td className="px-4 py-3">
+                              <td className="px-4 py-4 align-top">
                                 <Checkbox
                                   checked={selectedIds.includes(account.id)}
                                   onCheckedChange={(checked) => {
                                     setSelectedIds((prev) =>
                                       checked
-                                        ? Array.from(
-                                            new Set([...prev, account.id]),
-                                          )
-                                        : prev.filter(
-                                            (item) => item !== account.id,
-                                          ),
+                                        ? Array.from(new Set([...prev, account.id]))
+                                        : prev.filter((item) => item !== account.id),
                                     );
                                   }}
                                 />
                               </td>
-                              <td className="px-4 py-3">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-medium tracking-tight text-stone-700">
-                                    {maskToken(account.access_token)}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                                    onClick={() => {
-                                      void navigator.clipboard.writeText(
-                                        account.access_token,
-                                      );
-                                      toast.success("token 已复制");
-                                    }}
-                                  >
-                                    <Copy className="size-4" />
-                                  </button>
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant={
-                                    account.category === "捐赠"
-                                      ? "info"
-                                      : "secondary"
-                                  }
-                                  className="rounded-md"
-                                >
-                                  {account.category}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant="secondary"
-                                  className="rounded-md bg-stone-100 text-stone-700"
-                                >
-                                  {account.type}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant={status.badge}
-                                  className="inline-flex items-center gap-1 rounded-md px-2 py-1"
-                                >
-                                  <StatusIcon className="size-3.5" />
-                                  {account.status}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="text-xs leading-5 text-stone-500">
-                                  {account.email ?? "—"}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3">
-                                <Badge
-                                  variant={
-                                    isAccountQuotaKnown(account)
-                                      ? "info"
-                                      : "warning"
-                                  }
-                                  className="rounded-md"
-                                >
-                                  {isAccountQuotaKnown(account)
-                                    ? formatQuota(account.quota)
-                                    : "待刷新"}
-                                </Badge>
-                              </td>
-                              <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                                {(() => {
-                                  const restore = formatRestoreAt(
-                                    account.restoreAt,
-                                  );
-                                  return (
-                                    <div className="space-y-0.5">
-                                      {restore.relative ? (
-                                        <div className="font-medium text-stone-700">
-                                          {restore.relative}
-                                        </div>
-                                      ) : null}
-                                      <div>{restore.absolute}</div>
+                              <td className="px-4 py-4 align-top">
+                                <div className="space-y-2">
+                                  <div>
+                                    <div className="font-semibold text-stone-900">{account.email || "未识别邮箱"}</div>
+                                    <div className="mt-1 flex items-center gap-2 font-mono text-xs text-stone-500">
+                                      <span>{maskToken(account.access_token, 12, 6)}</span>
+                                      <button
+                                        type="button"
+                                        title="复制 token"
+                                        className="cursor-pointer rounded-md p-1 transition-colors hover:bg-stone-100 hover:text-stone-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600"
+                                        onClick={() => {
+                                          void navigator.clipboard.writeText(account.access_token);
+                                          toast.success("token 已复制");
+                                        }}
+                                      >
+                                        <Copy className="size-3.5" />
+                                      </button>
                                     </div>
-                                  );
-                                })()}
+                                  </div>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    <Badge variant="secondary" className="rounded-md">{account.type}</Badge>
+                                    <Badge variant={account.category === "捐赠" ? "info" : "secondary"} className="rounded-md">
+                                      {account.category}
+                                    </Badge>
+                                    {account.authSource ? <Badge variant="outline" className="rounded-md">{account.authSource}</Badge> : null}
+                                  </div>
+                                </div>
                               </td>
-                              <td className="px-4 py-3 text-stone-500">
-                                {account.success}
+                              <td className="px-4 py-4 align-top">
+                                <div className="space-y-2">
+                                  <Badge variant={availabilityVariant} className="rounded-md">{availabilityReason}</Badge>
+                                  <div className="text-xs text-stone-500">账号状态：{account.status}</div>
+                                  <div className="text-xs text-stone-500">槽位：{account.slotInUse ?? 0}/{account.slotLimit ?? 1}</div>
+                                </div>
                               </td>
-                              <td className="px-4 py-3 text-stone-500">
-                                {account.fail}
+                              <td className="px-4 py-4 align-top">
+                                <div className="space-y-1">
+                                  <div className="text-2xl font-semibold text-stone-900 tabular-nums">
+                                    {isAccountQuotaKnown(account) ? formatQuota(account.quota) : "—"}
+                                  </div>
+                                  <div className="text-xs text-stone-500">{isAccountQuotaKnown(account) ? "剩余图片额度" : "等待远端刷新"}</div>
+                                  <div className="pt-1 text-xs text-stone-500">
+                                    {restore.relative || restore.absolute}
+                                  </div>
+                                </div>
                               </td>
-                              <td className="px-4 py-3">
+                              <td className="px-4 py-4 align-top">
+                                <div className="grid grid-cols-2 gap-2 text-center text-xs">
+                                  <div className="rounded-lg bg-emerald-50 px-2 py-2 text-emerald-700">
+                                    <div className="text-lg font-semibold tabular-nums">{account.success}</div>
+                                    成功
+                                  </div>
+                                  <div className="rounded-lg bg-rose-50 px-2 py-2 text-rose-700">
+                                    <div className="text-lg font-semibold tabular-nums">{account.fail}</div>
+                                    失败
+                                  </div>
+                                </div>
+                                <div className="mt-2 text-xs text-stone-500">最后使用：{formatDateTime(account.lastUsedAt)}</div>
+                              </td>
+                              <td className="px-4 py-4 align-top">
+                                {account.lastError ? (
+                                  <div className="space-y-1 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                                    <div className="font-medium">{account.lastError}</div>
+                                    <div className="text-rose-600">{formatDateTime(account.lastErrorAt)}</div>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-2 text-xs text-emerald-700">
+                                    <CheckCircle2 className="size-4" />
+                                    最近无错误
+                                  </div>
+                                )}
+                                {account.cooldownUntil ? (
+                                  <div className="mt-2 flex items-center gap-2 text-xs text-amber-700">
+                                    <Clock3 className="size-4" />
+                                    冷却至 {formatDateTime(account.cooldownUntil)}
+                                  </div>
+                                ) : null}
+                              </td>
+                              <td className="px-4 py-4 align-top">
                                 <div className="flex items-center gap-1 text-stone-400">
                                   <button
                                     type="button"
-                                    className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                                    title={isStopped ? "检测并恢复" : "停用账号"}
+                                    className="cursor-pointer rounded-lg p-2 transition-colors hover:bg-stone-100 hover:text-stone-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600"
+                                    onClick={() => void handleQuickAccountStatus(account)}
+                                    disabled={isUpdating || isRefreshing}
+                                  >
+                                    {isStopped ? <RefreshCw className="size-4" /> : <Ban className="size-4" />}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    title="编辑账号"
+                                    className="cursor-pointer rounded-lg p-2 transition-colors hover:bg-stone-100 hover:text-stone-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600"
                                     onClick={() => openEditDialog(account)}
                                     disabled={isUpdating}
                                   >
@@ -2883,29 +3021,18 @@ export default function AccountsPage() {
                                   </button>
                                   <button
                                     type="button"
-                                    className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                                    onClick={() =>
-                                      void handleRefreshAccounts([
-                                        account.access_token,
-                                      ])
-                                    }
+                                    title="刷新账号"
+                                    className="cursor-pointer rounded-lg p-2 transition-colors hover:bg-stone-100 hover:text-stone-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600"
+                                    onClick={() => void handleRefreshAccounts([account.access_token])}
                                     disabled={isRefreshing}
                                   >
-                                    <RefreshCw
-                                      className={cn(
-                                        "size-4",
-                                        isRefreshing ? "animate-spin" : "",
-                                      )}
-                                    />
+                                    <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
                                   </button>
                                   <button
                                     type="button"
-                                    className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                                    onClick={() =>
-                                      void handleDeleteTokens([
-                                        account.access_token,
-                                      ])
-                                    }
+                                    title="删除账号"
+                                    className="cursor-pointer rounded-lg p-2 text-rose-500 transition-colors hover:bg-rose-50 hover:text-rose-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600"
+                                    onClick={() => void handleDeleteTokens([account.access_token])}
                                     disabled={isDeleting}
                                   >
                                     <Trash2 className="size-4" />
@@ -3017,27 +3144,58 @@ export default function AccountsPage() {
               </Card>
             </div>
 
-            <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm">
+            <Card className="minimal-surface-hover rounded-2xl border-white/80 bg-white/90 shadow-sm xl:col-start-2 xl:row-start-2">
               <CardContent className="space-y-5 p-5">
-                <div className="space-y-1">
-                  <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
-                    Proxy
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
+                      Network Egress
+                    </div>
+                    <h3 className="text-xl font-semibold tracking-tight">
+                      代理与网络排查
+                    </h3>
+                    <p className="text-sm leading-6 text-stone-500">
+                      账号刷新和生图共用当前出口。检测成功只表示链路可达，不代表账号凭据有效。
+                    </p>
                   </div>
-                  <h3 className="text-xl font-semibold tracking-tight">
-                    代理管理
-                  </h3>
-                  <p className="text-sm leading-6 text-stone-500">
-                    所有账号刷新和生图请求都会优先走当前启用代理。没有启用代理时自动直连。
-                  </p>
+                  <Button
+                    variant="outline"
+                    className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700 hover:bg-stone-100"
+                    onClick={() => void handleTestProxyConnection()}
+                    disabled={isTestingProxy}
+                  >
+                    {isTestingProxy ? <LoaderCircle className="size-4 animate-spin" /> : <Wifi className="size-4" />}
+                    检测出口
+                  </Button>
                 </div>
 
-                <div className="rounded-2xl border border-stone-200 bg-stone-50/80 p-4">
-                  <div className="text-xs font-medium tracking-[0.18em] text-stone-400 uppercase">
-                    当前出口
+                <div className={cn(
+                  "rounded-2xl border p-4",
+                  proxyHealth?.reachable === true
+                    ? "border-emerald-100 bg-emerald-50"
+                    : proxyHealth?.reachable === false
+                      ? "border-rose-100 bg-rose-50"
+                      : "border-stone-200 bg-stone-50",
+                )}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-medium tracking-[0.18em] text-stone-500 uppercase">当前出口</div>
+                      <div className="mt-2 break-all text-sm font-medium text-stone-800">
+                        {maskProxyAddress(proxyHealth?.proxy_url || activeProxyUrl)}
+                      </div>
+                    </div>
+                    <Badge
+                      variant={proxyHealth?.reachable === true ? "success" : proxyHealth?.reachable === false ? "danger" : "secondary"}
+                      className="shrink-0 rounded-md"
+                    >
+                      {proxyHealth?.reachable === true
+                        ? `可达 ${proxyHealth.latency_ms}ms`
+                        : proxyHealth?.reachable === false
+                          ? "不可达"
+                          : "未检测"}
+                    </Badge>
                   </div>
-                  <div className="mt-2 break-all text-sm font-medium text-stone-700">
-                    {activeProxyUrl || "直连"}
-                  </div>
+                  {proxyHealth?.error ? <div className="mt-3 text-xs leading-5 text-rose-700">{proxyHealth.error}</div> : null}
                 </div>
 
                 <div className="space-y-3">
@@ -3191,7 +3349,7 @@ export default function AccountsPage() {
                                 {item.port}
                               </div>
                               <div className="text-xs break-all text-stone-400">
-                                {item.url || "—"}
+                                {maskProxyAddress(item.url)}
                               </div>
                             </div>
                             <div className="flex items-center gap-1">

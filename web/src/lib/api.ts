@@ -82,6 +82,21 @@ export type Account = {
   fail: number;
   lastUsedAt: string | null;
   needsRefresh?: boolean;
+  accountId?: string | null;
+  inputImageSuccess?: number;
+  inputImageFail?: number;
+  lastInputImageUsedAt?: string | null;
+  lastInputImageSuccessAt?: string | null;
+  cooldownUntil?: string | null;
+  availableForImages?: boolean;
+  availabilityReason?: string;
+  slotInUse?: number;
+  slotLimit?: number;
+  lastError?: string | null;
+  lastErrorAt?: string | null;
+  disabledReason?: string | null;
+  expiresAt?: string | null;
+  authSource?: string | null;
 };
 
 export type ProxyItem = {
@@ -94,6 +109,15 @@ export type ProxyItem = {
   password?: string | null;
   enabled: boolean;
   url?: string | null;
+};
+
+export type ProxyHealthResult = {
+  reachable: boolean;
+  status_code?: number | null;
+  latency_ms: number;
+  source: "configured" | "default";
+  proxy_url?: string | null;
+  error?: string | null;
 };
 
 export type ImportedAccount = {
@@ -306,12 +330,14 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  disabled?: number;
+  available?: number;
   rewarded_accounts?: number;
   rewarded_quota?: number;
   rewarded_ldc?: number;
   remaining_quota?: number | null;
   ldc_balance?: number | null;
-  errors?: Array<{ access_token: string; error: string }>;
+  errors?: Array<{ access_token: string; error: string; disabled?: boolean }>;
 };
 
 type UserKeyMutationResponse = {
@@ -338,7 +364,8 @@ type RedeemCodeMutationResponse = {
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
-  errors: Array<{ access_token: string; error: string }>;
+  disabled?: number;
+  errors: Array<{ access_token: string; error: string; disabled?: boolean }>;
 };
 
 type AccountUpdateResponse = {
@@ -655,6 +682,14 @@ export async function fetchUserKeys(options: { redirectOnUnauthorized?: boolean 
 
 export async function fetchProxies(options: { redirectOnUnauthorized?: boolean } = {}) {
   return httpRequest<ProxyListResponse>("/api/proxies", options);
+}
+
+export async function testProxyConnection() {
+  return httpRequest<ProxyHealthResult>("/api/proxies/test", {
+    method: "POST",
+    body: {},
+    redirectOnUnauthorized: false,
+  });
 }
 
 export async function fetchRedeemCodes(options: { redirectOnUnauthorized?: boolean } = {}) {

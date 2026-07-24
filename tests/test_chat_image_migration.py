@@ -243,16 +243,17 @@ class ChatImageMigrationTests(unittest.TestCase):
 
         self.assertEqual(account_service.prefer_input_image_values, [True])
 
-    def test_backend_service_falls_back_to_images_when_responses_policy_is_rate_limited(self) -> None:
+    def test_backend_service_does_not_fallback_to_images_when_responses_policy_is_rate_limited(self) -> None:
         service = BackendService(FakeRouteAccountService("Team"))
         gateway = RecordingGateway(fail_routes={"responses"})
         service.image_gateway = gateway
 
         with patch("services.backend_service.config", patched_backend_config(image_route_policy="force_responses")):
-            payload = service.generate_with_pool("draw", "gpt-image-2", 1)
+            with self.assertRaises(ImageGenerationError) as raised:
+                service.generate_with_pool("draw", "gpt-image-2", 1)
 
-        self.assertEqual(payload["data"][0]["b64_json"], "ok")
-        self.assertEqual(gateway.routes, ["responses", "images"])
+        self.assertIn("failed after 4 account attempts", str(raised.exception))
+        self.assertEqual(gateway.routes, ["responses"] * 4)
 
     def test_backend_service_does_not_fallback_to_images_edit_for_paid_input_images(self) -> None:
         self.assertIsNone(
@@ -261,7 +262,7 @@ class ChatImageMigrationTests(unittest.TestCase):
                 [{"image_url": "data:image/png;base64,aW1n"}],
             )
         )
-        self.assertEqual(BackendService._fallback_route_for("responses", None), "images")
+        self.assertIsNone(BackendService._fallback_route_for("responses", None))
 
     def test_backend_service_treats_responses_input_image_400_as_next_account_retry(self) -> None:
         self.assertTrue(

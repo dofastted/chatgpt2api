@@ -286,6 +286,9 @@ def is_token_invalid_error(message: str) -> bool:
         or "invalidated oauth token" in text
         or "token_expired" in text
         or "authentication token is expired" in text
+        or "invalid access token" in text
+        or "unauthorized" in text
+        or bool(re.search(r"\b401\b", text))
     )
 
 

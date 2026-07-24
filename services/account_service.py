@@ -106,14 +106,35 @@ class AccountService:
         return cooldown_until is not None and cooldown_until > datetime.now()
 
     @staticmethod
-    def _is_image_account_available(account: dict) -> bool:
+    def _is_image_account_configured(account: dict) -> bool:
         if not isinstance(account, dict):
             return False
         if account.get("status") in {"禁用", "异常"}:
             return False
-        if AccountService._is_in_cooldown(account):
+        if bool(account.get("needs_refresh")):
             return False
         return int(account.get("quota") or 0) > 0
+
+    @classmethod
+    def _is_image_account_available(cls, account: dict) -> bool:
+        return cls._is_image_account_configured(account) and not cls._is_in_cooldown(account)
+
+    @classmethod
+    def _availability_reason(cls, account: dict[str, Any], inflight_count: int) -> str:
+        status = cls._clean_token(account.get("status"))
+        if status == "禁用":
+            return "已停用"
+        if status == "异常":
+            return "账号异常"
+        if bool(account.get("needs_refresh")):
+            return "待刷新"
+        if int(account.get("quota") or 0) <= 0:
+            return "额度耗尽"
+        if cls._is_in_cooldown(account):
+            return "冷却中"
+        if not cls._has_account_capacity(inflight_count):
+            return "槽位占用"
+        return "可调度"
 
     @classmethod
     def _has_account_capacity(cls, inflight_count: int) -> bool:
@@ -152,10 +173,17 @@ class AccountService:
     @staticmethod
     def _is_terminal_refresh_error(message: str) -> bool:
         normalized = str(message or "").lower()
-        return (
-            "/backend-api/me failed: http 401" in normalized
-            or "/backend-api/me failed: http 402" in normalized
+        terminal_markers = (
+            "http 401",
+            "status code 401",
+            "unauthorized",
+            "token revoked",
+            "token invalidated",
+            "invalid access token",
+            "access token expired",
+            "authentication token is expired",
         )
+        return any(marker in normalized for marker in terminal_markers)
 
     def _decode_access_token_payload(self, access_token: str) -> dict[str, Any]:
         parts = self._clean_token(access_token).split(".")
@@ -238,6 +266,11 @@ class AccountService:
         normalized["last_input_image_used_at"] = normalized.get("last_input_image_used_at")
         normalized["last_input_image_success_at"] = normalized.get("last_input_image_success_at")
         normalized["cooldown_until"] = self._normalize_future_time_text(normalized.get("cooldown_until"))
+        normalized["last_error"] = self._clean_token(normalized.get("last_error")) or None
+        normalized["last_error_at"] = self._clean_token(normalized.get("last_error_at")) or None
+        normalized["disabled_reason"] = self._clean_token(normalized.get("disabled_reason")) or None
+        normalized["expires_at"] = self._clean_token(normalized.get("expires_at")) or None
+        normalized["auth_source"] = self._clean_token(normalized.get("auth_source")) or None
         raw_needs_refresh = normalized.get("needs_refresh")
         if raw_needs_refresh is None:
             normalized["needs_refresh"] = (
@@ -308,33 +341,49 @@ class AccountService:
         return headers, impersonate
 
     def _public_items(self, accounts: list[dict]) -> list[dict]:
-        return [
-            {
-                "id": hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16],
-                "access_token": access_token,
-                "category": account.get("category") or self.DEFAULT_CATEGORY,
-                "type": account.get("type") or "Free",
-                "status": account.get("status") or "正常",
-                "quota": account.get("quota") if account.get("quota") is not None else 0,
-                "quotaKnown": not bool(account.get("needs_refresh")),
-                "email": account.get("email"),
-                "user_id": account.get("user_id"),
-                "limits_progress": account.get("limits_progress") or [],
-                "default_model_slug": account.get("default_model_slug"),
-                "restoreAt": account.get("restore_at"),
-                "success": int(account.get("success") or 0),
-                "fail": int(account.get("fail") or 0),
-                "inputImageSuccess": int(account.get("input_image_success") or 0),
-                "inputImageFail": int(account.get("input_image_fail") or 0),
-                "lastUsedAt": account.get("last_used_at"),
-                "lastInputImageUsedAt": account.get("last_input_image_used_at"),
-                "lastInputImageSuccessAt": account.get("last_input_image_success_at"),
-                "cooldownUntil": account.get("cooldown_until"),
-                "needsRefresh": bool(account.get("needs_refresh")),
-            }
-            for account in accounts
-            if (access_token := self._clean_token(account.get("access_token")))
-        ]
+        items: list[dict] = []
+        for account in accounts:
+            access_token = self._clean_token(account.get("access_token"))
+            if not access_token:
+                continue
+            inflight_count = int(self._inflight_counts.get(access_token) or 0)
+            availability_reason = self._availability_reason(account, inflight_count)
+            items.append(
+                {
+                    "id": hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16],
+                    "access_token": access_token,
+                    "category": account.get("category") or self.DEFAULT_CATEGORY,
+                    "type": account.get("type") or "Free",
+                    "status": account.get("status") or "正常",
+                    "quota": account.get("quota") if account.get("quota") is not None else 0,
+                    "quotaKnown": not bool(account.get("needs_refresh")),
+                    "email": account.get("email"),
+                    "user_id": account.get("user_id"),
+                    "accountId": account.get("account_id"),
+                    "limits_progress": account.get("limits_progress") or [],
+                    "default_model_slug": account.get("default_model_slug"),
+                    "restoreAt": account.get("restore_at"),
+                    "success": int(account.get("success") or 0),
+                    "fail": int(account.get("fail") or 0),
+                    "inputImageSuccess": int(account.get("input_image_success") or 0),
+                    "inputImageFail": int(account.get("input_image_fail") or 0),
+                    "lastUsedAt": account.get("last_used_at"),
+                    "lastInputImageUsedAt": account.get("last_input_image_used_at"),
+                    "lastInputImageSuccessAt": account.get("last_input_image_success_at"),
+                    "cooldownUntil": account.get("cooldown_until"),
+                    "needsRefresh": bool(account.get("needs_refresh")),
+                    "availableForImages": availability_reason == "可调度",
+                    "availabilityReason": availability_reason,
+                    "slotInUse": inflight_count,
+                    "slotLimit": self.MAX_INFLIGHT_PER_ACCOUNT,
+                    "lastError": account.get("last_error"),
+                    "lastErrorAt": account.get("last_error_at"),
+                    "disabledReason": account.get("disabled_reason"),
+                    "expiresAt": account.get("expires_at"),
+                    "authSource": account.get("auth_source"),
+                }
+            )
+        return items
 
     def list_tokens(self) -> list[str]:
         with self._lock:
@@ -358,11 +407,17 @@ class AccountService:
         *,
         prefer_input_image: bool = False,
         require_capacity: bool = True,
+        include_cooldown: bool = False,
     ) -> list[str]:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
         candidates: list[tuple[str, dict[str, Any]]] = []
         for item in self._accounts:
-            if not self._is_image_account_available(item):
+            is_eligible = (
+                self._is_image_account_configured(item)
+                if include_cooldown
+                else self._is_image_account_available(item)
+            )
+            if not is_eligible:
                 continue
             token = self._clean_token(item.get("access_token"))
             if not token or token in excluded:
@@ -436,6 +491,7 @@ class AccountService:
                         excluded_tokens=excluded_tokens,
                         prefer_input_image=prefer_input_image,
                         require_capacity=False,
+                        include_cooldown=True,
                     )
                 )
                 if not has_waitable_account:
@@ -473,6 +529,37 @@ class AccountService:
     def list_accounts(self) -> list[dict]:
         with self._lock:
             return self._public_items(self._accounts)
+
+    def pool_summary(self) -> dict[str, int]:
+        with self._lock:
+            summary = {
+                "total": len(self._accounts),
+                "ready": 0,
+                "needs_refresh": 0,
+                "cooling_down": 0,
+                "disabled": 0,
+                "abnormal": 0,
+                "busy": 0,
+                "quota": 0,
+            }
+            for account in self._accounts:
+                token = self._clean_token(account.get("access_token"))
+                inflight_count = int(self._inflight_counts.get(token) or 0)
+                reason = self._availability_reason(account, inflight_count)
+                if reason == "可调度":
+                    summary["ready"] += 1
+                    summary["quota"] += max(0, int(account.get("quota") or 0))
+                elif reason == "待刷新":
+                    summary["needs_refresh"] += 1
+                elif reason == "冷却中":
+                    summary["cooling_down"] += 1
+                elif reason == "已停用":
+                    summary["disabled"] += 1
+                elif reason == "账号异常":
+                    summary["abnormal"] += 1
+                elif reason == "槽位占用":
+                    summary["busy"] += 1
+            return summary
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
@@ -643,6 +730,22 @@ class AccountService:
             return dict(account)
         return None
 
+    def disable_account(self, access_token: str, *, reason: str, error: str | None = None) -> dict | None:
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = self._clean_token(error) or self._clean_token(reason) or "账号不可用"
+        return self.update_account(
+            access_token,
+            {
+                "status": "禁用",
+                "quota": 0,
+                "cooldown_until": None,
+                "needs_refresh": False,
+                "disabled_reason": self._clean_token(reason) or "account_unavailable",
+                "last_error": message[:500],
+                "last_error_at": now_text,
+            },
+        )
+
     def mark_request_failure(self, access_token: str, cooldown_seconds: int | None = None) -> dict | None:
         access_token = self._clean_token(access_token)
         if not access_token:
@@ -666,7 +769,14 @@ class AccountService:
             return dict(account)
         return None
 
-    def mark_image_result(self, access_token: str, success: bool, *, input_image: bool = False) -> dict | None:
+    def mark_image_result(
+        self,
+        access_token: str,
+        success: bool,
+        *,
+        input_image: bool = False,
+        error: str | None = None,
+    ) -> dict | None:
         access_token = self._clean_token(access_token)
         if not access_token:
             return None
@@ -686,6 +796,8 @@ class AccountService:
                     next_item["last_input_image_success_at"] = now_text
                 next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
                 next_item["cooldown_until"] = None
+                next_item["last_error"] = None
+                next_item["last_error_at"] = None
                 if next_item["quota"] == 0:
                     next_item["status"] = "限流"
                     next_item["restore_at"] = next_item.get("restore_at") or None
@@ -696,6 +808,10 @@ class AccountService:
                 if input_image:
                     next_item["input_image_fail"] = int(next_item.get("input_image_fail") or 0) + 1
                 next_item["cooldown_until"] = self._build_cooldown_until(self.FAILURE_COOLDOWN_SECONDS)
+                error_message = self._clean_token(error)
+                if error_message:
+                    next_item["last_error"] = error_message[:500]
+                    next_item["last_error_at"] = now_text
             account = self._normalize_account(next_item)
             if account is None:
                 return None
@@ -703,7 +819,6 @@ class AccountService:
             self._save_accounts()
             self._slot_condition.notify_all()
             return dict(account)
-        return None
 
     def fetch_remote_info(self, access_token: str) -> dict[str, Any]:
         access_token = self._clean_token(access_token)
@@ -770,6 +885,9 @@ class AccountService:
                 "status": status,
                 "cooldown_until": None,
                 "needs_refresh": False,
+                "disabled_reason": None,
+                "last_error": None,
+                "last_error_at": None,
             }
             print(
                 "[account-refresh] ok",
@@ -788,7 +906,8 @@ class AccountService:
             return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
 
         refreshed = 0
-        errors: list[dict[str, str]] = []
+        disabled = 0
+        errors: list[dict[str, Any]] = []
         max_workers = min(10, len(cleaned_tokens))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -802,21 +921,29 @@ class AccountService:
                 except Exception as exc:
                     message = str(exc)
                     print(f"[account-refresh] fail {self._token_label(access_token)} {message}")
-                    if self._is_terminal_refresh_error(message):
+                    is_terminal = self._is_terminal_refresh_error(message)
+                    if is_terminal:
+                        self.disable_account(
+                            access_token,
+                            reason="credential_invalid",
+                            error="账号凭据已失效",
+                        )
+                        disabled += 1
+                        message = "账号凭据已失效，已自动停用"
+                    else:
                         self.update_account(
                             access_token,
                             {
-                                "status": "异常",
-                                "quota": 0,
-                                "cooldown_until": None,
+                                "last_error": message[:500],
+                                "last_error_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             },
                         )
-                        message = "账号不可用"
-                    errors.append({"access_token": access_token, "error": message})
+                    errors.append({"access_token": access_token, "error": message, "disabled": is_terminal})
 
         print(f"[account-refresh] done refreshed={refreshed} errors={len(errors)} workers={max_workers}")
         return {
             "refreshed": refreshed,
+            "disabled": disabled,
             "errors": errors,
             "items": self.list_accounts(),
         }

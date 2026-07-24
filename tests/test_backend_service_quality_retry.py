@@ -14,6 +14,8 @@ class FakeAccountService:
         self.removed: list[str] = []
         self.failed: list[str] = []
         self.fetch_remote_info_calls: list[str] = []
+        self.disabled: list[str] = []
+        self.image_errors: list[tuple[str, str | None]] = []
         self.accounts = {
             "bad-token": {"access_token": "bad-token", "quota": 5, "status": "正常"},
             "good-token": {"access_token": "good-token", "quota": 5, "status": "正常"},
@@ -43,7 +45,16 @@ class FakeAccountService:
         self.accounts[access_token] = next_item
         return dict(next_item)
 
-    def mark_image_result(self, access_token: str, success: bool) -> dict:
+    def mark_image_result(
+        self,
+        access_token: str,
+        success: bool,
+        *,
+        input_image: bool = False,
+        error: str | None = None,
+    ) -> dict:
+        del input_image
+        self.image_errors.append((access_token, error))
         next_item = {
             **(self.accounts.get(access_token) or {"access_token": access_token}),
             "quota": 5,
@@ -52,6 +63,18 @@ class FakeAccountService:
         }
         self.accounts[access_token] = next_item
         return dict(next_item)
+    def disable_account(self, access_token: str, *, reason: str, error: str | None = None) -> dict:
+        self.disabled.append(access_token)
+        return self.update_account(
+            access_token,
+            {
+                "status": "禁用",
+                "quota": 0,
+                "disabled_reason": reason,
+                "last_error": error,
+            },
+        )
+
 
     def remove_token(self, access_token: str) -> None:
         self.removed.append(access_token)
@@ -129,6 +152,35 @@ class BackendServiceQualityRetryTests(unittest.TestCase):
             payload = service.generate_with_pool("draw ABCD", "gpt-image-2", 1)
 
         self.assertEqual(payload["data"][0]["b64_json"], "ok")
+        self.assertEqual(service.account_service.disabled, [])
+        self.assertIn(("bad-token", "download image failed"), service.account_service.image_errors)
+
+    def test_generate_with_pool_disables_invalid_token_and_uses_next_account(self) -> None:
+        account_service = FakeAccountService()
+        service = BackendService(account_service)
+
+        def fake_generate(
+            access_token: str,
+            prompt: str,
+            model: str,
+            n: int,
+            input_images: list[dict[str, str]] | None = None,
+            route: str = "legacy",
+            size: str | None = None,
+        ) -> dict:
+            del prompt, model, n, input_images, route, size
+            if access_token == "bad-token":
+                raise ImageGenerationError("conversation failed: HTTP 401 invalid access token")
+            return {"created": 1, "data": [{"b64_json": "ok"}]}
+
+        with patch("services.backend_service.generate_image_result", side_effect=fake_generate):
+            payload = service.generate_with_pool("draw ABCD", "gpt-image-2", 1)
+
+        self.assertEqual(payload["data"][0]["b64_json"], "ok")
+        self.assertEqual(account_service.disabled, ["bad-token"])
+        self.assertEqual(account_service.accounts["bad-token"]["status"], "禁用")
+        self.assertEqual(account_service.accounts["bad-token"]["disabled_reason"], "credential_invalid")
+        self.assertEqual(account_service.removed, [])
 
     def test_generate_with_pool_retries_next_token_when_upstream_returns_524(self) -> None:
         service = BackendService(FakeAccountService())

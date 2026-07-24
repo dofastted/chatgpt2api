@@ -210,7 +210,7 @@ class GalleryApiTests(unittest.TestCase):
 
         response = self.client.get(
             "/api/gallery/public",
-            headers={"Authorization": "Bearer test-auth-key"},
+            headers={"Authorization": f"Bearer {api.config.auth_key}"},
         )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -220,7 +220,7 @@ class GalleryApiTests(unittest.TestCase):
     def test_user_submission_and_admin_review_boundaries(self) -> None:
         submit_response = self.client.post(
             "/api/gallery/submissions",
-            headers={"Authorization": "Bearer test-auth-key"},
+            headers={"Authorization": f"Bearer {api.config.auth_key}"},
             json={
                 "prompt": "生成一张夜晚城市霓虹插画",
                 "image_url": "data:image/png;base64,ZmFrZQ==",
@@ -231,13 +231,13 @@ class GalleryApiTests(unittest.TestCase):
 
         user_admin_response = self.client.get(
             "/api/admin/gallery",
-            headers={"Authorization": "Bearer test-auth-key"},
+            headers={"Authorization": f"Bearer {api.config.auth_key}"},
         )
         self.assertEqual(user_admin_response.status_code, 403)
 
         admin_response = self.client.patch(
             f"/api/admin/gallery/{item_id}",
-            headers={"Authorization": "Bearer test-admin-key"},
+            headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
             json={"action": "approve", "is_pinned": True, "sort_order": -10},
         )
         self.assertEqual(admin_response.status_code, 200)
@@ -248,7 +248,7 @@ class GalleryApiTests(unittest.TestCase):
     def test_gallery_lists_strip_base64_assets_but_asset_endpoint_serves_image(self) -> None:
         submit_response = self.client.post(
             "/api/gallery/submissions",
-            headers={"Authorization": "Bearer test-auth-key"},
+            headers={"Authorization": f"Bearer {api.config.auth_key}"},
             json={
                 "prompt": "生成一张适合画廊展示的花园照片",
                 "image_url": "data:image/png;base64,ZmFrZQ==",
@@ -260,14 +260,14 @@ class GalleryApiTests(unittest.TestCase):
 
         admin_response = self.client.patch(
             f"/api/admin/gallery/{item_id}",
-            headers={"Authorization": "Bearer test-admin-key"},
+            headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
             json={"action": "approve"},
         )
         self.assertEqual(admin_response.status_code, 200)
 
         list_response = self.client.get(
             "/api/gallery/public",
-            headers={"Authorization": "Bearer test-auth-key"},
+            headers={"Authorization": f"Bearer {api.config.auth_key}"},
         )
         self.assertEqual(list_response.status_code, 200)
         list_item = next(item for item in list_response.json()["items"] if item["id"] == item_id)
@@ -282,7 +282,7 @@ class GalleryApiTests(unittest.TestCase):
 
         admin_list_response = self.client.get(
             "/api/admin/gallery",
-            headers={"Authorization": "Bearer test-admin-key"},
+            headers={"Authorization": f"Bearer {api.config.admin_auth_key}"},
         )
         self.assertEqual(admin_list_response.status_code, 200)
         admin_list_item = next(item for item in admin_list_response.json()["items"] if item["id"] == item_id)

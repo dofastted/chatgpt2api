@@ -6,6 +6,8 @@ services:
     ports:
       - "3000:80"
     environment:
+      CHATGPT2API_DEPLOYMENT_PROFILE: vps
+      CHATGPT2API_DEFAULT_PROXY_URL: http://172.20.0.1:3208
       CHATGPT2API_PUBLIC_BASE_URL: https://img.fkcodex.com
       CHATGPT2API_SQLITE_PATH: /app/data/chatgpt2api.sqlite3
       CHATGPT2API_BACKUP_MAX_BYTES: "524288000"

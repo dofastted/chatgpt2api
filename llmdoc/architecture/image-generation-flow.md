@@ -21,7 +21,7 @@
 - 选号只使用账号池本地状态；禁用、异常、额度为 0，或 `needs_refresh=true` 但未刷新完成的账号不参与生图。图片请求前不再同步刷新远端账号信息。
 - 选号后会按是否带输入图选择内部执行路线：无输入图默认走 `images`，Free 有输入图走 `images_edit`，Plus/Pro/Team 有输入图走 `responses`，判断点在 `services/chat_image/route_selector.py` 和 `services/backend_service.py`。
 - 带输入图请求会优先选择最近在 input image responses 路线成功过的账号。账号侧记录 `input_image_success`、`input_image_fail`、`last_input_image_used_at` 和 `last_input_image_success_at`，选择逻辑在 `services/account_service.py`，调用点在 `services/backend_service.py`。
-- 如果临时用 `IMAGE_ROUTE_POLICY=force_responses` 让无输入图走 Responses，遇到 `429`、网关超时或其他瞬时上游错误时，同一个账号会先退到 Images 路线再试一次；仍失败才换下一个账号。带输入图的付费账号请求不会退到 `images_edit`。
+- `responses` 路线失败时不会自动回退到已知会超时或无图的 legacy `images` conversation 路线；瞬时错误通过当前路线的短重试和账号轮换处理。
 - 这条分层来自 `IMAGE_ROUTE_POLICY=plan_type` 的默认配置；主容器默认走 `IMAGE_ENGINE=chat_image`，不要退回旧后端协议作为长期方案。
 - 真正的远端图片请求交给 `services/image_service.py`。
 
@@ -80,11 +80,11 @@
 - `wait_for_turn` 通过后，请求记录进入 `assigning_account`；`BackendService.generate_with_pool` 选到账户并开始上游调用时进入 `running`，同时记录账号哈希、账号类型、内部路线和尝试次数。
 - JSON 请求成功返回前写 `finished`；SSE 请求在最终事件和 `data: [DONE]` 发完后写 `finished`。异常路径写 `failed`，队列或活动数超限写 `rejected`。
 - 成功和失败统计都回写账号池，见 `services/account_service.py:329`。
-- 如果报错命中失效 token 条件，判断在 `services/image_service.py:205`，随后 `services/backend_service.py:68` 会把 token 从池里删掉。
-- 图片请求前不再刷新账号远端信息。`BackendService.generate_with_pool` 只使用账号池本地状态；`needs_refresh=true` 或额度为 0 的账号不会参与选号。
-- 如果上游会话返回瞬时错误，`services/image_service.py` 会把 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit、temporarily unavailable 这类信号都当作可重试失败；`services/backend_service.py` 会跳过当前账号继续试。
-- 如果本机代理报 `curl: (7) Failed to connect ... 10808`，先按本机 Clash 或代理瞬时连接失败处理：先测代理是否还能连通，再走代码层短退避重试。不要把这类错误先归因到 `low quality text render`、prompt 质量或账号质量。
-- 如果整个池里没有可用 token，`services/backend_service.py:38` 会抛出 `503`。
+- 如果报错命中失效 token 条件，`services/backend_service.py` 会调用账号服务停用该账号并保留资产记录，然后切换下一个账号；不会删除账号。
+- 图片请求前不刷新账号远端信息。`BackendService.generate_with_pool` 只使用账号池本地状态；`needs_refresh=true` 或额度为 0 的账号不会参与选号。
+- 如果上游会话返回瞬时错误，`services/image_service.py` 会把 `408/422/429/500/502/503/504/520/522/524`、网关超时、Cloudflare、rate limit、temporarily unavailable 这类信号视为可重试失败；`services/backend_service.py` 会冷却当前账号并轮换。单次生成最多尝试 `image_generation_max_account_attempts` 个账号，默认 4，避免同一坏 token 或假服务导致无限循环。
+- 如果本机代理报 `curl: (7) Failed to connect ... 10808`，先按代理瞬时连接失败处理：检查代理连通性并走代码层短退避重试，不永久停用账号，也不要归因到 `low quality text render`、prompt 质量或账号质量。
+- 如果账号池没有已配置账号，服务返回结构化 `account_pool_unavailable` 503，并附账号池摘要；如果账号只是临时 busy/cooldown，账号槽位分配会等待可恢复账号。
 - 请求完成后，不论是 JSON 还是 SSE，都会在响应真正发完后才从运行态移除。`/v1/images/generations` 和 `/v1/images/edits` 流式请求要等 `image_generation.completed` 与 `data: [DONE]` 发完；`/v1/responses` 流式请求要等 `response.completed` 与 `data: [DONE]` 发完。
 
 2026-04-26 云端并发验收：

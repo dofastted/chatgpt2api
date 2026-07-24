@@ -12,3 +12,9 @@ web/node_modules
 
 assets
 README.md
+
+# local runtime data / scratch — never part of the image, keep out of build context
+data
+.llmdoc-tmp
+*.tar
+*.tar.gz

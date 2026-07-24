@@ -1601,13 +1601,33 @@ def create_accounts_result(body: AccountCreateRequest, *, category_override: str
         raise HTTPException(status_code=400, detail={"error": "tokens or accounts is required"})
     if imported_accounts:
         result = account_service.add_account_items(imported_accounts, category=category)
+        refresh_tokens = [str(item.get("access_token") or "").strip() for item in imported_accounts]
     else:
         result = account_service.add_accounts(tokens, category=category)
+        refresh_tokens = tokens
+
+    refresh_result = account_service.refresh_accounts(refresh_tokens)
+    refreshed_items = refresh_result.get("items", result.get("items", []))
+    if hasattr(account_service, "pool_summary"):
+        available = int(account_service.pool_summary().get("ready", 0))
+    else:
+        available = sum(
+            1
+            for item in refreshed_items
+            if item.get("availableForImages")
+            or (
+                item.get("status") not in {"禁用", "异常"}
+                and not bool(item.get("needsRefresh"))
+                and int(item.get("quota") or 0) > 0
+            )
+        )
     return {
         **result,
-        "refreshed": 0,
-        "errors": [],
-        "items": result.get("items", []),
+        "refreshed": refresh_result.get("refreshed", 0),
+        "disabled": refresh_result.get("disabled", 0),
+        "available": available,
+        "errors": refresh_result.get("errors", []),
+        "items": refreshed_items,
     }
 
 
@@ -2244,6 +2264,11 @@ def create_app() -> FastAPI:
             "items": proxy_service.list_public_items(),
             "active_proxy_url": proxy_service.get_enabled_proxy_url(),
         }
+
+    @router.post("/api/proxies/test")
+    async def test_proxy_connection(authorization: str | None = Header(default=None)):
+        require_admin_auth_key(authorization)
+        return proxy_service.test_connection()
 
     @router.get("/api/user-keys")
     async def get_user_keys(authorization: str | None = Header(default=None)):
